@@ -250,7 +250,7 @@ class PlexService implements MediaServer
         );
     }
 
-    public function getDirectStreamUrl(Request $request, string $itemId, string $container = 'ts'): string
+    public function getDirectStreamUrl(Request $request, string $itemId, string $container = 'ts', array $transcodeOptions = []): string
     {
         try {
             $response = $this->client()->get("/library/metadata/{$itemId}");
@@ -262,11 +262,45 @@ class PlexService implements MediaServer
                 if ($metadata && isset($metadata['Media'][0]['Part'][0]['key'])) {
                     $partKey = $metadata['Media'][0]['Part'][0]['key'];
 
-                    // Base URL for the stream
-                    $streamUrl = "{$this->baseUrl}{$partKey}";
+                    // Check if transcoding is requested
+                    $shouldTranscode = ! empty($transcodeOptions) && (
+                        isset($transcodeOptions['VideoBitrate']) ||
+                        isset($transcodeOptions['MaxWidth']) ||
+                        isset($transcodeOptions['MaxHeight'])
+                    );
 
-                    // Start with the API key
-                    $params = ['X-Plex-Token' => $this->apiKey];
+                    // For transcoding, use Plex's transcode endpoint
+                    if ($shouldTranscode) {
+                        $streamUrl = "{$this->baseUrl}/video/:/transcode/universal/start.m3u8";
+                        $params = [
+                            'X-Plex-Token' => $this->apiKey,
+                            'path' => "/library/metadata/{$itemId}",
+                            'protocol' => 'hls',
+                            'fastSeek' => '1',
+                            'directStream' => '0',
+                            'directPlay' => '0',
+                        ];
+
+                        // Video bitrate (Plex uses kbps)
+                        if (isset($transcodeOptions['VideoBitrate'])) {
+                            $params['videoBitrate'] = $transcodeOptions['VideoBitrate'];
+                            $params['maxVideoBitrate'] = $transcodeOptions['VideoBitrate'];
+                        }
+
+                        // Audio bitrate
+                        if (isset($transcodeOptions['AudioBitrate'])) {
+                            $params['audioBitrate'] = $transcodeOptions['AudioBitrate'];
+                        }
+
+                        // Resolution limits
+                        if (isset($transcodeOptions['MaxWidth'])) {
+                            $params['videoResolution'] = $transcodeOptions['MaxWidth'].'x'.($transcodeOptions['MaxHeight'] ?? $transcodeOptions['MaxWidth']);
+                        }
+                    } else {
+                        // Direct stream - use the part key directly
+                        $streamUrl = "{$this->baseUrl}{$partKey}";
+                        $params = ['X-Plex-Token' => $this->apiKey];
+                    }
 
                     // Handle seeking (StartTimeTicks from Emby/Jellyfin needs to be converted to seconds for Plex)
                     if ($request->has('StartTimeTicks')) {

@@ -2,6 +2,7 @@
 
 namespace App\Filament\Resources\Networks;
 
+use App\Enums\TranscodeMode;
 use App\Filament\Resources\Networks\Pages\CreateNetwork;
 use App\Filament\Resources\Networks\Pages\EditNetwork;
 use App\Filament\Resources\Networks\Pages\ListNetworks;
@@ -17,6 +18,7 @@ use Filament\Actions\DeleteAction;
 use Filament\Actions\DeleteBulkAction;
 use Filament\Actions\EditAction;
 use Filament\Forms\Components\DateTimePicker;
+use Filament\Forms\Components\Radio;
 use Filament\Forms\Components\Select;
 use Filament\Forms\Components\Textarea;
 use Filament\Forms\Components\TextInput;
@@ -593,12 +595,21 @@ class NetworkResource extends Resource
 
                             Section::make('Transcoding')
                                 ->compact()
-                                ->description('Control how media is transcoded')
+                                ->description('Control how media is transcoded for broadcasting')
                                 ->schema([
-                                    Toggle::make('transcode_on_server')
-                                        ->label('Transcode on Media Server')
-                                        ->helperText('Let Jellyfin/Emby transcode with hardware acceleration.')
-                                        ->default(true)
+                                    Radio::make('transcode_mode')
+                                        ->label('Transcoding Mode')
+                                        ->options([
+                                            'direct' => 'Direct Stream — Pass through source without transcoding',
+                                            'server' => 'Media Server — Jellyfin/Emby/Plex handles transcoding',
+                                            'local' => 'Local FFmpeg — M3U Editor transcodes the stream',
+                                        ])
+                                        ->descriptions([
+                                            'direct' => 'Highest quality. Stream passes through unchanged. Requires player compatibility.',
+                                            'server' => 'Uses media server\'s transcoding engine and hardware acceleration settings.',
+                                            'local' => 'Full control over output. Uses hardware acceleration if available in container.',
+                                        ])
+                                        ->default('direct')
                                         ->live(),
 
                                     Grid::make(3)->schema([
@@ -607,6 +618,7 @@ class NetworkResource extends Resource
                                             ->numeric()
                                             ->suffix('kbps')
                                             ->placeholder('Source')
+                                            ->helperText('Leave empty for source quality')
                                             ->nullable(),
 
                                         TextInput::make('audio_bitrate')
@@ -616,18 +628,18 @@ class NetworkResource extends Resource
                                             ->default(192),
 
                                         Select::make('video_resolution')
-                                            ->label('Resolution')
+                                            ->label('Max Resolution')
                                             ->options([
-                                                null => 'Source (no scaling)',
-                                                '3840x2160' => '4K',
-                                                '1920x1080' => '1080p',
-                                                '1280x720' => '720p',
-                                                '854x480' => '480p',
+                                                null => 'Source (no limit)',
+                                                '3840x2160' => '4K (3840×2160)',
+                                                '1920x1080' => '1080p (1920×1080)',
+                                                '1280x720' => '720p (1280×720)',
+                                                '854x480' => '480p (854×480)',
                                             ])
                                             ->placeholder('Source')
                                             ->native(false)
                                             ->nullable(),
-                                    ])->visible(fn (Get $get): bool => $get('transcode_on_server')),
+                                    ])->visible(fn (Get $get): bool => in_array($get('transcode_mode'), ['server', 'local'])),
                                 ])
                                 ->visible(fn (Get $get): bool => $get('broadcast_enabled')),
 

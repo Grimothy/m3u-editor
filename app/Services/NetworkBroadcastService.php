@@ -2,6 +2,7 @@
 
 namespace App\Services;
 
+use App\Enums\TranscodeMode;
 use App\Models\MediaServerIntegration;
 use App\Models\Network;
 use App\Models\NetworkProgramme;
@@ -372,16 +373,21 @@ class NetworkBroadcastService
             '-map', '0:a:0',  // First audio stream
         ]);
 
-        // Output options - check if we should transcode or copy
-        if ($network->transcode_on_server) {
-            // Media server is transcoding - we just copy the streams
+        // Output options based on transcode mode
+        // - 'direct' or 'server': Media server handles transcoding, we just copy streams
+        // - 'local': We transcode locally with FFmpeg
+        $transcodeMode = $network->transcode_mode ?? TranscodeMode::Direct;
+
+        if ($transcodeMode === TranscodeMode::Local) {
+            // Local transcoding with FFmpeg
+            $command = array_merge($command, $this->getTranscodeOptions($network));
+        } else {
+            // Direct stream or server-side transcoding - just copy the streams
+            // (server transcoding is handled when building the stream URL)
             $command[] = '-c:v';
             $command[] = 'copy';
             $command[] = '-c:a';
             $command[] = 'copy';
-        } else {
-            // We need to transcode
-            $command = array_merge($command, $this->getTranscodeOptions($network));
         }
 
         // HLS output options for continuous streaming across programme transitions
@@ -522,7 +528,6 @@ class NetworkBroadcastService
 
         $service = MediaServerService::make($integration);
         $request = request();
-        $request->merge(['static' => 'true']); // static stream for HLS
 
         // Use media server's native seeking if we need to seek
         if ($seekSeconds > 0) {
@@ -538,7 +543,34 @@ class NetworkBroadcastService
             ]);
         }
 
-        $streamUrl = $service->getDirectStreamUrl($request, $itemId, 'ts');
+        // Build transcoding options for server-side transcoding
+        $transcodeOptions = [];
+        $transcodeMode = $network->transcode_mode ?? TranscodeMode::Direct;
+
+        if ($transcodeMode === TranscodeMode::Server) {
+            // Pass bitrate/resolution settings to media server for transcoding
+            if ($network->video_bitrate) {
+                $transcodeOptions['VideoBitrate'] = $network->video_bitrate;
+            }
+            if ($network->audio_bitrate) {
+                $transcodeOptions['AudioBitrate'] = $network->audio_bitrate;
+            }
+            if ($network->video_resolution) {
+                // Parse resolution like "1920x1080" into MaxWidth/MaxHeight
+                $parts = explode('x', $network->video_resolution);
+                if (count($parts) === 2) {
+                    $transcodeOptions['MaxWidth'] = (int) $parts[0];
+                    $transcodeOptions['MaxHeight'] = (int) $parts[1];
+                }
+            }
+
+            Log::debug('🎬 Server-side transcoding requested', [
+                'network_id' => $network->id,
+                'transcode_options' => $transcodeOptions,
+            ]);
+        }
+
+        $streamUrl = $service->getDirectStreamUrl($request, $itemId, 'ts', $transcodeOptions);
 
         return $streamUrl;
     }

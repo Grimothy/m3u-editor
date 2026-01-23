@@ -263,16 +263,28 @@ class EmbyJellyfinService implements MediaServer
      *
      * @param  string  $itemId  The media server's item ID
      * @param  string  $container  The container format (e.g., 'mp4', 'mkv', 'ts')
+     * @param  array  $transcodeOptions  Optional transcoding options (VideoBitrate, AudioBitrate, MaxWidth, MaxHeight)
      */
-    public function getDirectStreamUrl(Request $request, string $itemId, string $container = 'ts'): string
+    public function getDirectStreamUrl(Request $request, string $itemId, string $container = 'ts', array $transcodeOptions = []): string
     {
         $streamUrl = "{$this->baseUrl}/Videos/{$itemId}/stream.{$container}";
 
+        // Check if transcoding is requested
+        $shouldTranscode = ! empty($transcodeOptions) && (
+            isset($transcodeOptions['VideoBitrate']) ||
+            isset($transcodeOptions['MaxWidth']) ||
+            isset($transcodeOptions['MaxHeight'])
+        );
+
         // Base parameters
         $params = [
-            'static' => 'true',
             'api_key' => $this->apiKey,
         ];
+
+        // Only set static=true for direct streaming (no transcoding)
+        if (! $shouldTranscode) {
+            $params['static'] = 'true';
+        }
 
         // Forward relevant parameters from the incoming request
         $forwardParams = ['StartTimeTicks', 'AudioStreamIndex', 'SubtitleStreamIndex'];
@@ -280,6 +292,33 @@ class EmbyJellyfinService implements MediaServer
             if ($request->has($param)) {
                 $params[$param] = $request->input($param);
             }
+        }
+
+        // Apply transcoding options if provided
+        if ($shouldTranscode) {
+            // Video bitrate (Jellyfin/Emby use bits per second)
+            if (isset($transcodeOptions['VideoBitrate'])) {
+                $params['VideoBitrate'] = $transcodeOptions['VideoBitrate'] * 1000; // kbps to bps
+                $params['MaxStreamingBitrate'] = $transcodeOptions['VideoBitrate'] * 1000;
+            }
+
+            // Audio bitrate
+            if (isset($transcodeOptions['AudioBitrate'])) {
+                $params['AudioBitrate'] = $transcodeOptions['AudioBitrate'] * 1000; // kbps to bps
+            }
+
+            // Resolution limits
+            if (isset($transcodeOptions['MaxWidth'])) {
+                $params['MaxWidth'] = $transcodeOptions['MaxWidth'];
+            }
+            if (isset($transcodeOptions['MaxHeight'])) {
+                $params['MaxHeight'] = $transcodeOptions['MaxHeight'];
+            }
+
+            // Request transcoding
+            $params['TranscodingContainer'] = $container;
+            $params['VideoCodec'] = 'h264';
+            $params['AudioCodec'] = 'aac';
         }
 
         // Return the full URL with query parameters

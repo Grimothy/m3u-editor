@@ -39,6 +39,10 @@ Tip: Use `--dry-run` on `hls:gc` to preview deletions before actual cleanup. ✅
 - **Resilience & healing**: If FFmpeg dies, the heal command clears stale PID entries and attempts to restart using the persisted reference.
 - **HLS Garbage Collection**: A scheduled & manual `hls:gc` command deletes old `.ts` and stale playlist files to prevent disk growth.
 - **Xtream API support for networks**: `player_api.php` endpoints are supported so IPTV players can list networks and fetch EPG; `/live/` stream requests redirect to the network HLS URL.
+- **Transcoding modes**: Networks support three transcoding modes:
+  - **Direct** — Pass content through without transcoding (lowest CPU usage)
+  - **Server** — Request transcoded streams from Jellyfin/Emby/Plex at specified bitrate/resolution
+  - **Local** — Use FFmpeg locally to transcode (supports hardware acceleration if available)
 
 ---
 
@@ -80,6 +84,16 @@ ffmpeg -y -ss 3600 -re -reconnect 1 -reconnect_streamed 1 -reconnect_delay_max 1
   - `broadcast_programme_id` (nullable)
   - `broadcast_initial_offset_seconds` (nullable)
 - Purpose: allow restart after crash to calculate seek position relative to when broadcast originally started.
+
+### Transcoding modes
+
+- The `transcode_mode` column controls how streams are transcoded:
+  - `direct` — No transcoding; content is passed through as-is
+  - `server` — The media server (Jellyfin/Emby/Plex) transcodes the stream before it reaches M3U Editor
+  - `local` — FFmpeg transcodes locally using the configured bitrate/resolution settings
+- When using `server` mode, the system passes `VideoBitrate`, `AudioBitrate`, `MaxWidth`, and `MaxHeight` parameters to the media server API
+- When using `local` mode, FFmpeg applies the network's `transcode_video_bitrate`, `transcode_audio_bitrate`, and resolution settings
+- The `TranscodeMode` enum (`App\Enums\TranscodeMode`) provides the three options with labels and descriptions
 
 ### Automated cleanup & scheduling
 
