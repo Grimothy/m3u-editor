@@ -6,19 +6,14 @@ use Illuminate\Support\Facades\File;
 
 beforeEach(function () {
     $this->user = User::factory()->create();
+    $this->createdNetworkPaths = [];
 });
 
 afterEach(function () {
-    // Clean up any created test directories
-    $networksPath = storage_path('app/networks');
-    if (File::exists($networksPath)) {
-        // Only clean up test network directories (ones with 'test-' prefix or UUIDs)
-        foreach (File::directories($networksPath) as $dir) {
-            $dirName = basename($dir);
-            // Clean up our test network directories
-            if (preg_match('/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i', $dirName)) {
-                File::deleteDirectory($dir);
-            }
+    // Clean up only the directories created by this test
+    foreach ($this->createdNetworkPaths ?? [] as $path) {
+        if (File::isDirectory($path)) {
+            File::deleteDirectory($path);
         }
     }
 });
@@ -35,7 +30,7 @@ describe('Network HLS Controller', function () {
             $response = $this->get(route('network.hls.playlist', ['network' => $network->uuid]));
 
             $response->assertNotFound();
-        });
+        })->group('serial');
 
         it('returns 503 when broadcast is enabled but no playlist exists', function () {
             $network = Network::factory()->for($this->user)->broadcasting()->create();
@@ -44,7 +39,7 @@ describe('Network HLS Controller', function () {
 
             $response->assertStatus(503);
             $response->assertHeader('Retry-After', '5');
-        });
+        })->group('serial');
 
         it('returns playlist content when broadcast is active and playlist exists', function () {
             $network = Network::factory()->for($this->user)->activeBroadcast()->create();
@@ -52,6 +47,7 @@ describe('Network HLS Controller', function () {
             // Create the HLS storage directory and playlist
             $hlsPath = $network->getHlsStoragePath();
             File::ensureDirectoryExists($hlsPath);
+            $this->createdNetworkPaths[] = $hlsPath;
 
             $playlistContent = <<<'M3U8'
 #EXTM3U
@@ -77,7 +73,7 @@ M3U8;
             $response->assertHeader('Access-Control-Allow-Origin', '*');
             $response->assertSee('#EXTM3U');
             $response->assertSee('live000001.ts');
-        });
+        })->group('serial');
 
         it('returns 503 when broadcast is enabled but not actively broadcasting even if playlist exists', function () {
             $network = Network::factory()->for($this->user)->broadcasting()->create();
@@ -85,13 +81,14 @@ M3U8;
             // Create the HLS storage directory and playlist
             $hlsPath = $network->getHlsStoragePath();
             File::ensureDirectoryExists($hlsPath);
+            $this->createdNetworkPaths[] = $hlsPath;
             File::put("{$hlsPath}/live.m3u8", "#EXTM3U\n");
 
             $response = $this->get(route('network.hls.playlist', ['network' => $network->uuid]));
 
             $response->assertStatus(503);
             $response->assertHeader('Retry-After', '5');
-        });
+        })->group('serial');
     });
 
     describe('segment endpoint', function () {
@@ -107,7 +104,7 @@ M3U8;
             ]));
 
             $response->assertNotFound();
-        });
+        })->group('serial');
 
         it('returns 503 when segment does not exist while broadcast enabled but not active', function () {
             $network = Network::factory()->for($this->user)->broadcasting()->create();
@@ -118,7 +115,7 @@ M3U8;
             ]));
 
             $response->assertStatus(503);
-        });
+        })->group('serial');
 
         it('returns 503 when broadcast is enabled but not actively broadcasting even if segment exists', function () {
             $network = Network::factory()->for($this->user)->broadcasting()->create();
@@ -126,6 +123,7 @@ M3U8;
             // Create the HLS storage directory and a segment
             $hlsPath = $network->getHlsStoragePath();
             File::ensureDirectoryExists($hlsPath);
+            $this->createdNetworkPaths[] = $hlsPath;
 
             // Create a small dummy .ts file (just some bytes for testing)
             $dummyContent = str_repeat("\x00", 188 * 10);
@@ -137,7 +135,7 @@ M3U8;
             ]));
 
             $response->assertStatus(503);
-        });
+        })->group('serial');
 
         it('returns segment content when it exists', function () {
             $network = Network::factory()->for($this->user)->activeBroadcast()->create();
@@ -145,6 +143,7 @@ M3U8;
             // Create the HLS storage directory and a segment
             $hlsPath = $network->getHlsStoragePath();
             File::ensureDirectoryExists($hlsPath);
+            $this->createdNetworkPaths[] = $hlsPath;
 
             // Create a small dummy .ts file (just some bytes for testing)
             $dummyContent = str_repeat("\x00", 188 * 10); // 188 bytes is TS packet size
@@ -158,7 +157,7 @@ M3U8;
             $response->assertOk();
             $response->assertHeader('Content-Type', 'video/MP2T');
             $response->assertHeader('Access-Control-Allow-Origin', '*');
-        });
+        })->group('serial');
     });
 
     describe('storage path', function () {
@@ -175,6 +174,7 @@ M3U8;
 
             $hlsPath = $network->getHlsStoragePath();
             File::ensureDirectoryExists($hlsPath);
+            $this->createdNetworkPaths[] = $hlsPath;
 
             expect(File::isDirectory($hlsPath))->toBeTrue();
         });
