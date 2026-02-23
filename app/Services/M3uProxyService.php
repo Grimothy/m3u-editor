@@ -1963,9 +1963,9 @@ class M3uProxyService
                 'playlist_uuid' => $playlistUuid,
             ]);
 
-            // Return all URLs as fallback if something goes wrong
+            // Return null so the proxy stops retrying instead of looping on the same URL
             return [
-                'next_url' => $currentUrl,
+                'next_url' => null,
                 'error' => $e->getMessage(),
             ];
         }
