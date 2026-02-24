@@ -30,7 +30,7 @@ class RegisterM3uProxyWebhook extends Command
      */
     public function handle(M3uProxyService $service): int
     {
-        $this->info('🔗 Registering m3u-editor webhook with m3u-proxy...');
+        $this->info('🔗 Checking m3u-editor webhook status with m3u-proxy...');
 
         // Construct webhook URL - use APP_URL instead of apiPublicUrl
         // because m3u-proxy needs to call back to Laravel, not to itself
