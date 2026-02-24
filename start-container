@@ -547,16 +547,11 @@ php artisan migrate --database=jobs --force
 echo "🔄 Resetting any stuck sync processes..."
 php artisan app:reset-sync-process
 
-#
-#   NOTE: Not sure we need this? Disabling for now.
-#   Also seeing a lot of noise (endpoint being called multiple times in quick succession).
-#
-# # Register webhook for real-time cache invalidation
-# # This works for both embedded and external m3u-proxy modes
-# # The artisan command will check if m3u-proxy is configured before attempting registration
-# echo "🔗 Registering m3u-proxy webhook for cache invalidation..."
-# php artisan m3u-proxy:register-webhook
-# echo ""
+# Register webhook for real-time cache invalidation
+# This works for both embedded and external m3u-proxy modes
+# The command will check if m3u-proxy is configured before attempting registration
+# Command will be run automatically via `supervisor` since it's included in the supervisord.conf as a one-time command
+# Note: This command is also scheduled to run every 5 minutes in app/Console/Kernel.php to handle proxy restarts, delayed startup, etc.
 
 # Ensure composer dir is writable
 [ ! -d /.composer ] && mkdir /.composer
