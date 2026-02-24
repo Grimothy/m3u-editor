@@ -52,6 +52,11 @@ Schedule::command('queue:prune-failed --hours=48')
 Schedule::command('app:prune-old-notifications --days=7')
     ->daily();
 
+// Ensure m3u-proxy webhook is registered (handles proxy restarts, delayed startup, etc.)
+Schedule::command('m3u-proxy:register-webhook')
+    ->everyFiveMinutes()
+    ->withoutOverlapping();
+
 // Reconcile profile connection counts
 Schedule::command('profiles:reconcile')
     ->everyFiveMinutes()

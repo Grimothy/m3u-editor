@@ -767,12 +767,37 @@ class M3uProxyService
             $selectedProfile = ProfileService::selectProfile($profileSourcePlaylist);
 
             if (! $selectedProfile) {
-                Log::warning('No profiles with capacity available', [
-                    'playlist_id' => $profileSourcePlaylist->id,
-                    'source_playlist' => $profileSourcePlaylist->name,
-                    'channel_id' => $id,
-                ]);
-                abort(503, 'All provider profiles have reached their maximum stream limit. Please try again later.');
+                // No profiles with capacity - try "stop oldest on limit" before giving up
+                if ($this->stopOldestOnLimit) {
+                    $stopResult = self::stopOldestPlaylistStream($playlist->uuid, $id);
+
+                    if ($stopResult['deleted_count'] > 0) {
+                        Log::debug('Stopped oldest stream to free provider profile capacity', [
+                            'channel_id' => $id,
+                            'playlist_uuid' => $playlist->uuid,
+                            'stopped_stream' => $stopResult['deleted_stream'] ?? null,
+                            'stream_age_seconds' => $stopResult['stream_age_seconds'] ?? null,
+                        ]);
+
+                        // Short delay to allow proxy to clean up and webhook to decrement
+                        usleep(200000); // 200ms
+
+                        // Reconcile profile counts from proxy to ensure accuracy
+                        ProfileService::reconcileFromProxy($profileSourcePlaylist);
+
+                        // Retry profile selection after freeing a slot
+                        $selectedProfile = ProfileService::selectProfile($profileSourcePlaylist);
+                    }
+                }
+
+                if (! $selectedProfile) {
+                    Log::warning('No profiles with capacity available', [
+                        'playlist_id' => $profileSourcePlaylist->id,
+                        'source_playlist' => $profileSourcePlaylist->name,
+                        'channel_id' => $id,
+                    ]);
+                    abort(503, 'All provider profiles have reached their maximum stream limit. Please try again later.');
+                }
             }
 
             Log::debug('Selected profile for streaming', [
@@ -990,11 +1015,30 @@ class M3uProxyService
             $selectedProfile = ProfileService::selectProfile($playlist);
 
             if (! $selectedProfile) {
-                Log::warning('No profiles with capacity available for episode', [
-                    'playlist_id' => $playlist->id,
-                    'episode_id' => $id,
-                ]);
-                abort(503, 'All provider profiles have reached their maximum stream limit. Please try again later.');
+                // No profiles with capacity - try "stop oldest on limit" before giving up
+                if ($this->stopOldestOnLimit) {
+                    $stopResult = self::stopOldestPlaylistStream($playlist->uuid, $id);
+
+                    if ($stopResult['deleted_count'] > 0) {
+                        Log::debug('Stopped oldest stream to free provider profile capacity for episode', [
+                            'episode_id' => $id,
+                            'playlist_uuid' => $playlist->uuid,
+                            'stopped_stream' => $stopResult['deleted_stream'] ?? null,
+                        ]);
+
+                        usleep(200000); // 200ms
+                        ProfileService::reconcileFromProxy($playlist);
+                        $selectedProfile = ProfileService::selectProfile($playlist);
+                    }
+                }
+
+                if (! $selectedProfile) {
+                    Log::warning('No profiles with capacity available for episode', [
+                        'playlist_id' => $playlist->id,
+                        'episode_id' => $id,
+                    ]);
+                    abort(503, 'All provider profiles have reached their maximum stream limit. Please try again later.');
+                }
             }
 
             Log::debug('Selected profile for episode streaming', [
