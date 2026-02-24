@@ -186,9 +186,11 @@ class PlaylistGenerateController extends Controller
                     // Need to get clean URL first (in case URL variables are used that might not have an extension, e.g. /stream/{id})
                     $filename = parse_url($url, PHP_URL_PATH);
                     $extension = pathinfo($filename, PATHINFO_EXTENSION);
-                    if (empty($extension) && $playlist->xtream) {
+                    if (empty($extension)) {
                         $sourcePlaylist = $channel->getEffectivePlaylist();
-                        $extension = $sourcePlaylist->xtream_config['output'] ?? 'ts'; // Default to 'ts' if not set
+                        if ($sourcePlaylist?->xtream) {
+                            $extension = $sourcePlaylist->xtream_config['output'] ?? 'ts'; // Default to 'ts' if not set
+                        }
                     }
 
                     if ($logoProxyEnabled) {
