@@ -352,6 +352,15 @@ class LocalMediaService implements MediaServer
                                 $episodes->push($episodeData);
                             }
                         }
+                    } else {
+                        // Season ID didn't match any known season — fall back to all episodes
+                        $files = $this->scanDirectoryForVideoFiles($seriesDir, true);
+                        foreach ($files as $file) {
+                            $episodeData = $this->parseEpisodeFile($file, basename($seriesDir));
+                            if ($episodeData) {
+                                $episodes->push($episodeData);
+                            }
+                        }
                     }
                 } else {
                     // No season filter — scan entire series tree
