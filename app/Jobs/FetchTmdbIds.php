@@ -508,6 +508,11 @@ class FetchTmdbIds implements ShouldQueue
                     $info['release_date'] = $details['release_date'];
                 }
 
+                // Populate year from release date if not already set
+                if (! empty($details['release_date']) && empty($channel->year)) {
+                    $updateData['year'] = substr($details['release_date'], 0, 4);
+                }
+
                 // Populate rating if not already set
                 if (! empty($details['vote_average']) && empty($info['rating'])) {
                     $info['rating'] = $details['vote_average'];
@@ -698,6 +703,7 @@ class FetchTmdbIds implements ShouldQueue
             // Update series with found IDs - use dedicated columns
             $updateData = [
                 'tmdb_id' => $result['tmdb_id'],
+                'last_metadata_fetch' => now(),
             ];
 
             if (! empty($result['tvdb_id'])) {

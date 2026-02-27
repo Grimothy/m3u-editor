@@ -567,7 +567,7 @@ class SyncMediaServer implements ShouldQueue
                 'tmdb_id' => $tmdbId,
                 'tvdb_id' => $tvdbId,
                 'imdb_id' => $imdbId,
-                'last_metadata_fetch' => now(),
+                'last_metadata_fetch' => $integration->isLocal() ? null : now(), // Only mark as fetched for non-local integrations (local media needs TMDB lookup)
                 'metadata' => [
                     'media_server_id' => $seriesId,
                     'media_server_type' => $integration->type,
