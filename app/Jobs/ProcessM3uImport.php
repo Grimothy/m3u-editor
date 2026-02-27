@@ -367,6 +367,8 @@ class ProcessM3uImport implements ShouldQueue
                         return;
                     }
                     $playlist->update(attributes: ['progress' => 5]);
+                } else {
+                    $liveFp = null; // we'll fetch the streams later after we determine what groups to include
                 }
             }
 
@@ -411,6 +413,8 @@ class ProcessM3uImport implements ShouldQueue
                         return;
                     }
                     $playlist->update(attributes: ['vod_progress' => 5]);
+                } else {
+                    $vodFp = null; // we'll fetch the streams later after we determine what groups to include
                 }
             }
 
