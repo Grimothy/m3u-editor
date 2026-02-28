@@ -694,3 +694,46 @@ it('does not dispatch FetchTmdbIds job for non-local integrations', function () 
 
     Queue::assertNotPushed(\App\Jobs\FetchTmdbIds::class);
 });
+
+it('dispatches FetchTmdbIds job for webdav integrations', function () {
+    Queue::fake([\App\Jobs\FetchTmdbIds::class]);
+
+    $this->mock(\App\Services\TmdbService::class, function ($mock) {
+        $mock->shouldReceive('isConfigured')->andReturn(true);
+    });
+
+    $integration = MediaServerIntegration::withoutEvents(function () {
+        return MediaServerIntegration::create([
+            'name' => 'WebDAV Server',
+            'type' => 'webdav',
+            'host' => 'webdav.local',
+            'port' => 80,
+            'user_id' => $this->user->id,
+            'auto_fetch_metadata' => true,
+        ]);
+    });
+
+    $playlist = \App\Models\Playlist::withoutEvents(function () {
+        return \App\Models\Playlist::factory()->create([
+            'user_id' => $this->user->id,
+        ]);
+    });
+
+    $job = new SyncMediaServer($integration->id);
+
+    $reflection = new ReflectionClass($job);
+    $statsProperty = $reflection->getProperty('stats');
+    $statsProperty->setValue($job, [
+        'movies_synced' => 4,
+        'series_synced' => 2,
+        'errors' => [],
+    ]);
+
+    $method = $reflection->getMethod('dispatchMetadataLookup');
+    $method->invoke($job, $integration, $playlist);
+
+    Queue::assertPushed(\App\Jobs\FetchTmdbIds::class, function ($job) use ($playlist) {
+        return $job->vodPlaylistId === $playlist->id
+            && $job->seriesPlaylistId === $playlist->id;
+    });
+});

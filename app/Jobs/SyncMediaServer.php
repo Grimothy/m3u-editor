@@ -150,7 +150,7 @@ class SyncMediaServer implements ShouldQueue
             // Send success notification
             $body = "Synced {$this->stats['movies_synced']} movies and {$this->stats['series_synced']} series from {$integration->name}";
 
-            if ($integration->isLocal() && $this->stats['series_synced'] === 0 && $service instanceof \App\Services\LocalMediaService) {
+            if ($integration->usesLocalPathConfig() && $this->stats['series_synced'] === 0 && $service instanceof \App\Services\LocalMediaService) {
                 $flatWarnings = $service->getSeriesPathWarnings();
 
                 if (! empty($flatWarnings)) {
@@ -221,12 +221,12 @@ class SyncMediaServer implements ShouldQueue
             'emby' => PlaylistSourceType::Emby,
             'jellyfin' => PlaylistSourceType::Jellyfin,
             'plex' => PlaylistSourceType::Plex,
-            'local' => PlaylistSourceType::LocalMedia,
+            'local', 'webdav' => PlaylistSourceType::LocalMedia,
             default => PlaylistSourceType::M3u,
         };
 
         // Determine URL for reference
-        $url = $integration->isLocal()
+        $url = $integration->usesLocalPathConfig()
             ? 'local://'.$integration->name
             : $integration->base_url;
 
@@ -237,22 +237,6 @@ class SyncMediaServer implements ShouldQueue
             'url' => $url,
             'user_id' => $integration->user_id,
             'source_type' => $sourceType,
-            'status' => Status::Processing,
-            'auto_sync' => false, // Sync is managed by the integration, not the playlist
-            'user_agent' => 'M3U-Editor-MediaServer-Sync/1.0', // required value for playlist, set to something meaningful
-        ]);
-
-        // Link the playlist to the integration
-        $integration->update(['playlist_id' => $playlist->id]);
-
-        return $playlist;
-        // Create a new playlist for this integration
-        $playlist = Playlist::createQuietly([
-            'uuid' => Str::orderedUuid()->toString(),
-            'name' => $integration->name,
-            'url' => $url,
-            'user_id' => $integration->user_id,
-            'source_type' => $integration->type,
             'status' => Status::Processing,
             'auto_sync' => false, // Sync is managed by the integration, not the playlist
             'user_agent' => 'M3U-Editor-MediaServer-Sync/1.0', // required value for playlist, set to something meaningful
@@ -428,10 +412,11 @@ class SyncMediaServer implements ShouldQueue
             'info' => $info,
         ]);
 
-        // Only reset last_metadata_fetch for new local media channels (existing ones keep their timestamp)
-        if ($isNew && $integration->isLocal()) {
+        // Only reset last_metadata_fetch for new local-style media channels (existing ones keep their timestamp)
+        // For non-local-style (Emby/Jellyfin/Plex), set to now() so FetchTmdbIds skips them (they already have metadata)
+        if ($isNew && $integration->usesLocalPathConfig()) {
             $channel->last_metadata_fetch = null;
-        } elseif (! $integration->isLocal()) {
+        } elseif (! $integration->usesLocalPathConfig()) {
             $channel->last_metadata_fetch = now();
         }
 
@@ -613,10 +598,11 @@ class SyncMediaServer implements ShouldQueue
             ],
         ]);
 
-        // Only reset last_metadata_fetch for new local media series (existing ones keep their timestamp)
-        if ($isNewSeries && $integration->isLocal()) {
+        // Only reset last_metadata_fetch for new local-style media series (existing ones keep their timestamp)
+        // For non-local-style (Emby/Jellyfin/Plex), set to now() so FetchTmdbIds skips them (they already have metadata)
+        if ($isNewSeries && $integration->usesLocalPathConfig()) {
             $series->last_metadata_fetch = null;
-        } elseif ($isNewSeries || ! $integration->isLocal()) {
+        } elseif ($isNewSeries || ! $integration->usesLocalPathConfig()) {
             $series->last_metadata_fetch = now();
         }
 
@@ -827,7 +813,7 @@ class SyncMediaServer implements ShouldQueue
         MediaServerIntegration $integration,
         Playlist $playlist
     ): void {
-        if (! $integration->isLocal()) {
+        if (! $integration->usesLocalPathConfig()) {
             return;
         }
 
@@ -864,7 +850,7 @@ class SyncMediaServer implements ShouldQueue
             return;
         }
 
-        Log::info('SyncMediaServer: Dispatching TMDB metadata lookup for local media', [
+        Log::info('SyncMediaServer: Dispatching TMDB metadata lookup for local-style media', [
             'integration_id' => $integration->id,
             'playlist_id' => $playlist->id,
             'movies_synced' => $this->stats['movies_synced'],
