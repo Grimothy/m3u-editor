@@ -914,7 +914,7 @@ class FetchTmdbIds implements ShouldQueue
                     $updateData = [];
                     $info = $episode->info ?? [];
 
-                    if (! empty($episodeData['name']) && (empty($episode->title) || $this->overwriteExisting)) {
+                    if (! empty($episodeData['name']) && (empty($episode->title) || $this->overwriteExisting || $episode->title !== $episodeData['name'])) {
                         $updateData['title'] = $episodeData['name'];
                     }
 
