@@ -944,7 +944,7 @@ class XtreamApiController extends Controller
                 }
 
                 // Metadata fetched successfully
-                $seriesItem->load('seasons.episodes', 'category');
+                $seriesItem->fresh('seasons.episodes', 'category'); // Refresh to get the latest metadata
             }
 
             $cover = $seriesItem->cover ? (filter_var($seriesItem->cover, FILTER_VALIDATE_URL) ? $seriesItem->cover : $baseUrl."/$seriesItem->cover") : LogoCacheService::getPlaceholderUrl('poster');
@@ -1390,6 +1390,7 @@ class XtreamApiController extends Controller
                 if ($results === false) {
                     return response()->json(['error' => 'Failed to fetch VOD metadata'], 500);
                 }
+                $channel->fresh(); // Refresh to get the latest metadata
             }
 
             // Build info section - use channel's info field if available, otherwise build from channel data
@@ -1398,6 +1399,9 @@ class XtreamApiController extends Controller
             $cover = $info['cover_big'] ?? $channel->logo ?? $channel->logo_internal;
             $movieImage = $info['movie_image'] ?? $channel->logo ?? $channel->logo_internal;
             $backdropPaths = $info['backdrop_path'] ?? [];
+            if (is_string($backdropPaths)) {
+                $backdropPaths = json_decode($backdropPaths, true) ?? [];
+            }
             if ($playlist->enable_logo_proxy) {
                 $cover = LogoProxyController::generateProxyUrl($cover);
                 $movieImage = LogoProxyController::generateProxyUrl($movieImage);

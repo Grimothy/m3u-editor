@@ -1628,11 +1628,18 @@ class PlaylistResource extends Resource
                 ->schema([
                     Toggle::make('import_prefs.preprocess')
                         ->label('Preprocess playlist')
-                        ->columnSpanFull()
                         ->live()
                         ->inline(true)
                         ->default(false)
                         ->helperText('When enabled, the playlist will be preprocessed before importing. You can then select which groups you would like to import.'),
+
+                    Toggle::make('import_prefs.import_via_category')
+                        ->label('Fetch by category')
+                        ->live()
+                        ->hidden(fn (Get $get): bool => ! $get('xtream'))
+                        ->inline(true)
+                        ->default(false)
+                        ->helperText('When enabled, the playlist will fetch items by category. This may slow down the import process but can help with larger playlists that time out when fetching all items at once.'),
 
                     Toggle::make('import_prefs.use_regex')
                         ->label('Use regex for filtering')
