@@ -244,6 +244,7 @@ class WebDavMediaService implements MediaServer
 
         foreach ($paths as $pathConfig) {
             $path = $pathConfig['path'] ?? '';
+            $libraryGenre = $pathConfig['name'] ?? basename($path);
 
             if (empty($path)) {
                 continue;
@@ -255,7 +256,7 @@ class WebDavMediaService implements MediaServer
             );
 
             foreach ($files as $file) {
-                $movieData = $this->parseMovieFile($file);
+                $movieData = $this->parseMovieFile($file, $libraryGenre);
                 if ($movieData) {
                     $movies->push($movieData);
                 }
@@ -278,12 +279,13 @@ class WebDavMediaService implements MediaServer
 
         foreach ($paths as $pathConfig) {
             $path = $pathConfig['path'] ?? '';
+            $libraryGenre = $pathConfig['name'] ?? basename($path);
 
             if (empty($path)) {
                 continue;
             }
 
-            $this->scanWebDavSeriesDirectory($path, $seriesMap);
+            $this->scanWebDavSeriesDirectory($path, $seriesMap, $libraryGenre);
         }
 
         foreach ($seriesMap as $seriesData) {
@@ -667,7 +669,7 @@ class WebDavMediaService implements MediaServer
      * @param  string  $basePath  Base path containing series folders
      * @param  array  &$seriesMap  Reference to series map to populate
      */
-    protected function scanWebDavSeriesDirectory(string $basePath, array &$seriesMap): void
+    protected function scanWebDavSeriesDirectory(string $basePath, array &$seriesMap, ?string $libraryGenre = null): void
     {
         $directories = $this->listWebDavDirectory($basePath);
 
@@ -679,6 +681,7 @@ class WebDavMediaService implements MediaServer
             $seriesName = $dir['name'];
             $seriesPath = $dir['path'];
             $seriesId = md5($seriesPath);
+            $genre = $libraryGenre ? trim($libraryGenre) : '';
 
             $cleanName = preg_replace('/[._]+/', ' ', $seriesName);
             $cleanName = trim($cleanName);
@@ -696,7 +699,7 @@ class WebDavMediaService implements MediaServer
                     'Path' => $seriesPath,
                     'ProductionYear' => $year,
                     'Type' => 'Series',
-                    'Genres' => ['Uncategorized'],
+                    'Genres' => $genre !== '' ? [$genre] : ['Uncategorized'],
                     'Overview' => null,
                     'CommunityRating' => null,
                 ];
@@ -778,7 +781,7 @@ class WebDavMediaService implements MediaServer
      * @param  array{name: string, path: string, size: int|null}  $file  File information from WebDAV
      * @return array|null Movie data array or null if parsing fails
      */
-    protected function parseMovieFile(array $file): ?array
+    protected function parseMovieFile(array $file, ?string $libraryGenre = null): ?array
     {
         $filename = $file['name'];
         $filePath = $file['path'];
@@ -806,6 +809,7 @@ class WebDavMediaService implements MediaServer
         }
 
         $itemId = base64_encode($filePath);
+        $genre = $libraryGenre ? trim($libraryGenre) : '';
 
         return [
             'Id' => $itemId,
@@ -815,7 +819,7 @@ class WebDavMediaService implements MediaServer
             'Path' => $filePath,
             'Container' => strtolower($extension),
             'Type' => 'Movie',
-            'Genres' => ['Uncategorized'],
+            'Genres' => $genre !== '' ? [$genre] : ['Uncategorized'],
             'Overview' => null,
             'CommunityRating' => null,
             'RunTimeTicks' => null,

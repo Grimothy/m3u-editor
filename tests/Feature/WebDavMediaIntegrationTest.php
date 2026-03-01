@@ -267,3 +267,45 @@ it('keeps full nested paths from webdav hrefs', function () {
     expect($items[0]['path'])->toBe('/media/movies/In Your Dreams/In Your Dreams');
     expect($items[0]['name'])->toBe('In Your Dreams');
 });
+
+it('uses library name as default genre for webdav movies and series', function () {
+    $integration = MediaServerIntegration::create([
+        'name' => 'WebDAV Server',
+        'type' => 'webdav',
+        'host' => 'webdav.local',
+        'port' => 80,
+        'user_id' => $this->user->id,
+        'local_media_paths' => [
+            ['name' => 'Action', 'path' => '/movies', 'type' => 'movies'],
+            ['name' => 'Drama', 'path' => '/tvshows', 'type' => 'tvshows'],
+        ],
+    ]);
+
+    $service = new class($integration) extends WebDavMediaService
+    {
+        protected function listWebDavDirectory(string $path): array
+        {
+            if ($path === '/movies') {
+                return [
+                    ['name' => 'Test.Movie.2024.mkv', 'path' => '/movies/Test.Movie.2024.mkv', 'isDirectory' => false, 'size' => 1234],
+                ];
+            }
+
+            if ($path === '/tvshows') {
+                return [
+                    ['name' => 'Breaking Bad', 'path' => '/tvshows/Breaking Bad', 'isDirectory' => true, 'size' => null],
+                ];
+            }
+
+            return [];
+        }
+    };
+
+    $movies = $service->fetchMovies();
+    expect($movies)->toHaveCount(1);
+    expect($movies->first()['Genres'])->toBe(['Action']);
+
+    $series = $service->fetchSeries();
+    expect($series)->toHaveCount(1);
+    expect($series->first()['Genres'])->toBe(['Drama']);
+});
