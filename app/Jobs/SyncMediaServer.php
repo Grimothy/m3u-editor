@@ -17,6 +17,7 @@ use App\Services\MediaServerService;
 use App\Services\TmdbService;
 use Exception;
 use Filament\Notifications\Notification;
+use Illuminate\Contracts\Queue\ShouldBeUnique;
 use Illuminate\Contracts\Queue\ShouldQueue;
 use Illuminate\Foundation\Queue\Queueable;
 use Illuminate\Support\Facades\Log;
@@ -28,7 +29,7 @@ use Illuminate\Support\Str;
  * Fetches content from a media server and syncs it into the M3U Editor's
  * standard tables (playlists, groups, channels, categories, series, episodes).
  */
-class SyncMediaServer implements ShouldQueue
+class SyncMediaServer implements ShouldBeUnique, ShouldQueue
 {
     use Queueable;
 
@@ -60,12 +61,25 @@ class SyncMediaServer implements ShouldQueue
     protected string $batchNo;
 
     /**
+     * The number of seconds after which the job's unique lock will be released.
+     */
+    public int $uniqueFor = 1800;
+
+    /**
      * Create a new job instance.
      */
     public function __construct(
         public int $integrationId,
     ) {
         $this->batchNo = Str::orderedUuid()->toString();
+    }
+
+    /**
+     * Get the unique ID for this job (prevents duplicate syncs for the same integration).
+     */
+    public function uniqueId(): string
+    {
+        return 'sync-media-server-'.$this->integrationId;
     }
 
     /**

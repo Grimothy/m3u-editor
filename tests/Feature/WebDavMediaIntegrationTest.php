@@ -1,9 +1,13 @@
 <?php
 
+use App\Jobs\SyncMediaServer;
 use App\Models\MediaServerIntegration;
+use App\Models\Playlist;
+use App\Models\Series;
 use App\Models\User;
 use App\Services\MediaServerService;
 use App\Services\WebDavMediaService;
+use Illuminate\Contracts\Queue\ShouldBeUnique;
 use Illuminate\Foundation\Testing\RefreshDatabase;
 use Illuminate\Support\Facades\Queue;
 
@@ -308,4 +312,66 @@ it('uses library name as default genre for webdav movies and series', function (
     $series = $service->fetchSeries();
     expect($series)->toHaveCount(1);
     expect($series->first()['Genres'])->toBe(['Drama']);
+});
+
+it('implements ShouldBeUnique to prevent concurrent sync jobs', function () {
+    $job = new SyncMediaServer(integrationId: 1);
+
+    expect($job)->toBeInstanceOf(ShouldBeUnique::class);
+    expect($job->uniqueId())->toBe('sync-media-server-1');
+    expect($job->uniqueFor)->toBe(1800);
+});
+
+it('generates different unique IDs for different integrations', function () {
+    $job1 = new SyncMediaServer(integrationId: 1);
+    $job2 = new SyncMediaServer(integrationId: 2);
+
+    expect($job1->uniqueId())->not->toBe($job2->uniqueId());
+});
+
+it('prevents duplicate series via unique database constraint', function () {
+    $playlist = Playlist::factory()->create(['user_id' => $this->user->id]);
+
+    $series = Series::create([
+        'name' => 'Test Series',
+        'playlist_id' => $playlist->id,
+        'source_series_id' => 12345,
+        'user_id' => $this->user->id,
+        'import_batch_no' => 'batch-1',
+    ]);
+
+    expect($series->exists)->toBeTrue();
+
+    // Attempting to create a second series with the same playlist_id + source_series_id should fail
+    expect(fn () => Series::create([
+        'name' => 'Test Series Duplicate',
+        'playlist_id' => $playlist->id,
+        'source_series_id' => 12345,
+        'user_id' => $this->user->id,
+        'import_batch_no' => 'batch-2',
+    ]))->toThrow(\Illuminate\Database\QueryException::class);
+});
+
+it('allows different source_series_id values on the same playlist', function () {
+    $playlist = Playlist::factory()->create(['user_id' => $this->user->id]);
+
+    $series1 = Series::create([
+        'name' => 'Series One',
+        'playlist_id' => $playlist->id,
+        'source_series_id' => 11111,
+        'user_id' => $this->user->id,
+        'import_batch_no' => 'batch-1',
+    ]);
+
+    $series2 = Series::create([
+        'name' => 'Series Two',
+        'playlist_id' => $playlist->id,
+        'source_series_id' => 22222,
+        'user_id' => $this->user->id,
+        'import_batch_no' => 'batch-1',
+    ]);
+
+    expect($series1->exists)->toBeTrue();
+    expect($series2->exists)->toBeTrue();
+    expect(Series::where('playlist_id', $playlist->id)->count())->toBe(2);
 });
