@@ -396,8 +396,16 @@ class SyncMediaServer implements ShouldBeUnique, ShouldQueue
             $existingInfo = $channel->info ?? [];
             $info = $existingInfo;
 
+            // Fields that should be preserved when TMDB has enriched them
+            $tmdbProtectedKeys = ['genre'];
+
             // Only overwrite fields from sync if they have meaningful (non-empty) values
             foreach ($syncInfo as $key => $value) {
+                // Skip TMDB-protected fields on existing channels that have been enriched
+                if (in_array($key, $tmdbProtectedKeys) && $channel->last_metadata_fetch !== null && isset($existingInfo[$key]) && $existingInfo[$key] !== $value) {
+                    continue;
+                }
+
                 if ($value !== '' && $value !== null && $value !== []) {
                     $info[$key] = $value;
                 } elseif (! isset($info[$key])) {
@@ -407,15 +415,20 @@ class SyncMediaServer implements ShouldBeUnique, ShouldQueue
             }
         }
 
+        // For existing channels that have been TMDB-enriched, preserve the TMDB group/genre
+        // instead of overwriting with the library folder name (e.g., "Movies")
+        $hasTmdbGroup = ! $isNew && $channel->last_metadata_fetch !== null
+            && ! empty($channel->group) && $channel->group !== $group->name;
+
         $channel->fill([
             'name' => $movie['Name'],
             'title' => $movie['Name'],
             'url' => $streamUrl,
             'logo' => ($isNew || ! empty($imageUrl)) ? $imageUrl : $channel->logo,
             'logo_internal' => ($isNew || ! empty($imageUrl)) ? $imageUrl : $channel->logo_internal,
-            'group' => $group->name,
-            'group_internal' => $group->name,
-            'group_id' => $group->id,
+            'group' => $hasTmdbGroup ? $channel->group : $group->name,
+            'group_internal' => $hasTmdbGroup ? $channel->group_internal : $group->name,
+            'group_id' => $hasTmdbGroup ? $channel->group_id : $group->id,
             'user_id' => $playlist->user_id,
             'enabled' => true,
             'is_vod' => true,
@@ -585,16 +598,23 @@ class SyncMediaServer implements ShouldBeUnique, ShouldQueue
         $syncCast = ! empty($actors) ? implode(', ', $actors) : null;
         $syncDirector = ! empty($directors) ? implode(', ', $directors) : null;
 
+        // For existing series that have been TMDB-enriched, preserve the TMDB genre/category
+        // instead of overwriting with the library folder name (e.g., "tv")
+        $hasTmdbGenre = ! $isNewSeries && $series->last_metadata_fetch !== null
+            && ! empty($series->genre) && $series->genre !== implode(', ', $genres);
+
         $series->fill([
             'name' => $seriesData['Name'],
             'user_id' => $playlist->user_id,
-            'category_id' => $category->id,
-            'source_category_id' => $category->source_category_id ?? $category->id,
+            'category_id' => $hasTmdbGenre ? $series->category_id : $category->id,
+            'source_category_id' => $hasTmdbGenre
+                ? ($series->source_category_id ?? $series->category_id)
+                : ($category->source_category_id ?? $category->id),
             'import_batch_no' => $this->batchNo,
             'enabled' => true,
             'cover' => ($isNewSeries || ! empty($syncCover)) ? $syncCover : $series->cover,
             'plot' => ($isNewSeries || ! empty($syncPlot)) ? $syncPlot : $series->plot,
-            'genre' => implode(', ', $genres),
+            'genre' => $hasTmdbGenre ? $series->genre : implode(', ', $genres),
             'release_date' => $seriesData['PremiereDate'] ?? $seriesData['ProductionYear'] ?? null,
             'cast' => ($isNewSeries || ! empty($syncCast)) ? $syncCast : $series->cast,
             'director' => ($isNewSeries || ! empty($syncDirector)) ? $syncDirector : $series->director,

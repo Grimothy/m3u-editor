@@ -352,6 +352,198 @@ it('prevents duplicate series via unique database constraint', function () {
     ]))->toThrow(\Illuminate\Database\QueryException::class);
 });
 
+it('preserves TMDB-enriched genre on series re-sync', function () {
+    $playlist = Playlist::factory()->create(['user_id' => $this->user->id]);
+
+    $integration = MediaServerIntegration::withoutEvents(function () {
+        return MediaServerIntegration::create([
+            'name' => 'Local TV',
+            'type' => 'local',
+            'user_id' => $this->user->id,
+        ]);
+    });
+
+    // Create a category for the TMDB-enriched genre
+    $tmdbCategory = \App\Models\Category::create([
+        'playlist_id' => $playlist->id,
+        'user_id' => $this->user->id,
+        'name' => 'Drama',
+        'name_internal' => 'Drama',
+    ]);
+
+    // Create an existing series that has been TMDB-enriched
+    $sourceSeriesId = crc32("media-server-{$integration->id}-series-123");
+    $series = Series::create([
+        'playlist_id' => $playlist->id,
+        'source_series_id' => $sourceSeriesId,
+        'user_id' => $this->user->id,
+        'name' => 'Breaking Bad',
+        'genre' => 'Drama, Crime',
+        'category_id' => $tmdbCategory->id,
+        'source_category_id' => $tmdbCategory->id,
+        'last_metadata_fetch' => now()->subDay(),
+        'import_batch_no' => 'batch-1',
+    ]);
+
+    // Mock the MediaServer service
+    $service = Mockery::mock(\App\Interfaces\MediaServer::class);
+    $service->shouldReceive('fetchSeriesDetails')->with('series-123')->andReturn([]);
+    $service->shouldReceive('extractGenres')->andReturn(['tv']);
+    $service->shouldReceive('getImageUrl')->andReturn('');
+    $service->shouldReceive('ticksToSeconds')->andReturn(null);
+    $service->shouldReceive('fetchSeasons')->with('series-123')->andReturn(collect([]));
+
+    // Prepare seriesData as SyncMediaServer would receive it
+    $seriesData = [
+        'Id' => 'series-123',
+        'Name' => 'Breaking Bad',
+        'People' => [],
+    ];
+
+    $job = new SyncMediaServer($integration->id);
+
+    // Call syncOneSeries via reflection
+    $reflection = new ReflectionClass($job);
+    $method = $reflection->getMethod('syncOneSeries');
+
+    $method->invoke($job, $integration, $playlist, $service, $seriesData);
+
+    $series->refresh();
+
+    // Genre should be preserved as 'Drama, Crime' (TMDB-enriched), NOT overwritten to 'tv'
+    expect($series->genre)->toBe('Drama, Crime')
+        ->and($series->category_id)->toBe($tmdbCategory->id);
+});
+
+it('preserves TMDB-enriched group on movie re-sync', function () {
+    $playlist = Playlist::factory()->create(['user_id' => $this->user->id]);
+
+    $integration = MediaServerIntegration::withoutEvents(function () {
+        return MediaServerIntegration::create([
+            'name' => 'Local Movies',
+            'type' => 'local',
+            'user_id' => $this->user->id,
+        ]);
+    });
+
+    // Create the library group
+    $libraryGroup = \App\Models\Group::create([
+        'playlist_id' => $playlist->id,
+        'user_id' => $this->user->id,
+        'name' => 'Movies',
+        'name_internal' => 'Movies',
+        'type' => 'vod',
+    ]);
+
+    // Create the TMDB-enriched group
+    $tmdbGroup = \App\Models\Group::create([
+        'playlist_id' => $playlist->id,
+        'user_id' => $this->user->id,
+        'name' => 'Action',
+        'name_internal' => 'Action',
+        'type' => 'vod',
+    ]);
+
+    // Create an existing channel that has been TMDB-enriched
+    $sourceId = "media-server-{$integration->id}-movie-456";
+    $channel = \App\Models\Channel::create([
+        'playlist_id' => $playlist->id,
+        'source_id' => $sourceId,
+        'user_id' => $this->user->id,
+        'name' => 'The Matrix',
+        'title' => 'The Matrix',
+        'url' => 'http://example.com/stream',
+        'group' => 'Action',
+        'group_internal' => 'Action',
+        'group_id' => $tmdbGroup->id,
+        'is_vod' => true,
+        'enabled' => true,
+        'last_metadata_fetch' => now()->subDay(),
+        'info' => [
+            'genre' => 'Action, Sci-Fi',
+            'plot' => 'A hacker discovers reality is a simulation.',
+        ],
+    ]);
+
+    // Mock the MediaServer service
+    $service = Mockery::mock(\App\Interfaces\MediaServer::class);
+    $service->shouldReceive('extractGenres')->andReturn(['Movies']);
+    $service->shouldReceive('getContainerExtension')->andReturn('mkv');
+    $service->shouldReceive('getStreamUrl')->andReturn('http://example.com/new-stream');
+    $service->shouldReceive('getImageUrl')->andReturn('');
+    $service->shouldReceive('ticksToSeconds')->andReturn(null);
+
+    // Prepare movie data as SyncMediaServer would receive it
+    $movieData = [
+        'Id' => 'movie-456',
+        'Name' => 'The Matrix',
+        'People' => [],
+        'Genres' => ['Movies'],
+        'ProductionLocations' => [],
+    ];
+
+    $job = new SyncMediaServer($integration->id);
+
+    // Call syncMovie via reflection
+    $reflection = new ReflectionClass($job);
+    $method = $reflection->getMethod('syncMovie');
+
+    $method->invoke($job, $integration, $playlist, $service, $movieData);
+
+    $channel->refresh();
+
+    // Group should be preserved as 'Action' (TMDB-enriched), NOT overwritten to 'Movies'
+    expect($channel->group)->toBe('Action')
+        ->and($channel->group_internal)->toBe('Action')
+        ->and($channel->group_id)->toBe($tmdbGroup->id);
+
+    // Info genre should also be preserved (TMDB-protected key)
+    expect($channel->info['genre'])->toBe('Action, Sci-Fi');
+});
+
+it('overwrites genre on new series (not TMDB-enriched)', function () {
+    $playlist = Playlist::factory()->create(['user_id' => $this->user->id]);
+
+    $integration = MediaServerIntegration::withoutEvents(function () {
+        return MediaServerIntegration::create([
+            'name' => 'Local TV',
+            'type' => 'local',
+            'user_id' => $this->user->id,
+        ]);
+    });
+
+    // Mock the MediaServer service
+    $service = Mockery::mock(\App\Interfaces\MediaServer::class);
+    $service->shouldReceive('fetchSeriesDetails')->with('new-series-789')->andReturn([]);
+    $service->shouldReceive('extractGenres')->andReturn(['tv']);
+    $service->shouldReceive('getImageUrl')->andReturn('');
+    $service->shouldReceive('ticksToSeconds')->andReturn(null);
+    $service->shouldReceive('fetchSeasons')->with('new-series-789')->andReturn(collect([]));
+
+    $seriesData = [
+        'Id' => 'new-series-789',
+        'Name' => 'New Show',
+        'People' => [],
+    ];
+
+    $job = new SyncMediaServer($integration->id);
+
+    $reflection = new ReflectionClass($job);
+    $method = $reflection->getMethod('syncOneSeries');
+
+    $method->invoke($job, $integration, $playlist, $service, $seriesData);
+
+    // A new series should have been created with genre 'tv'
+    $sourceSeriesId = crc32("media-server-{$integration->id}-new-series-789");
+    $series = Series::where('playlist_id', $playlist->id)
+        ->where('source_series_id', $sourceSeriesId)
+        ->first();
+
+    expect($series)->not->toBeNull()
+        ->and($series->genre)->toBe('tv')
+        ->and($series->last_metadata_fetch)->toBeNull();
+});
+
 it('allows different source_series_id values on the same playlist', function () {
     $playlist = Playlist::factory()->create(['user_id' => $this->user->id]);
 
