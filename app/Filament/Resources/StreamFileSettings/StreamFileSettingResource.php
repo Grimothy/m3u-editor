@@ -75,8 +75,10 @@ class StreamFileSettingResource extends Resource
                     ->afterStateUpdated(function ($state, callable $set) {
                         if ($state === 'series') {
                             $set('path_structure', ['category', 'series', 'season']);
+                            $set('folder_metadata', []);
                         } else {
                             $set('path_structure', ['group', 'title']);
+                            $set('folder_metadata', ['year', 'tmdb_id']);
                         }
                         $set('filename_metadata', []);
                     })
@@ -121,6 +123,7 @@ class StreamFileSettingResource extends Resource
                             $path = $get('location') ?? '';
                             $pathStructure = $get('path_structure') ?? [];
                             $filenameMetadata = $get('filename_metadata') ?? [];
+                            $folderMetadata = $get('folder_metadata') ?? [];
                             $tmdbIdFormat = $get('tmdb_id_format') ?? 'square';
                             $replaceChar = $map($get('replace_char') ?? 'space');
                             $titleFolderEnabled = in_array('title', $pathStructure);
@@ -134,11 +137,12 @@ class StreamFileSettingResource extends Resource
 
                             if ($titleFolderEnabled) {
                                 $titleFolder = PlaylistService::makeFilesystemSafe($vod->title ?? '', $replaceChar);
-                                if (! empty($vod->year) && strpos($titleFolder, "({$vod->year})") === false) {
+
+                                if (in_array('year', $folderMetadata) && ! empty($vod->year) && strpos($titleFolder, "({$vod->year})") === false) {
                                     $titleFolder .= " ({$vod->year})";
                                 }
 
-                                if (in_array('tmdb_id', $filenameMetadata)) {
+                                if (in_array('tmdb_id', $folderMetadata)) {
                                     $tmdbId = $vod->info['tmdb_id'] ?? $vod->info['tmdb'] ?? $vod->movie_data['tmdb_id'] ?? $vod->movie_data['tmdb'] ?? null;
                                     $imdbId = $vod->info['imdb_id'] ?? $vod->info['imdb'] ?? $vod->movie_data['imdb_id'] ?? $vod->movie_data['imdb'] ?? null;
                                     $bracket = $tmdbIdFormat === 'curly' ? ['{', '}'] : ['[', ']'];
@@ -162,7 +166,7 @@ class StreamFileSettingResource extends Resource
 
                             $tmdbId = $vod->info['tmdb_id'] ?? $vod->info['tmdb'] ?? $vod->movie_data['tmdb_id'] ?? $vod->movie_data['tmdb'] ?? null;
                             $imdbId = $vod->info['imdb_id'] ?? $vod->info['imdb'] ?? $vod->movie_data['imdb_id'] ?? $vod->movie_data['imdb'] ?? null;
-                            if (in_array('tmdb_id', $filenameMetadata) && ! $titleFolderEnabled) {
+                            if (in_array('tmdb_id', $filenameMetadata)) {
                                 $bracket = $tmdbIdFormat === 'curly' ? ['{', '}'] : ['[', ']'];
                                 if (! empty($tmdbId)) {
                                     $filename .= " {$bracket[0]}tmdb-{$tmdbId}{$bracket[1]}";
@@ -276,9 +280,15 @@ class StreamFileSettingResource extends Resource
                         : ['group', 'title']
                     )
                     ->afterStateUpdated(function ($state, Set $set, Get $get): void {
-                        if ($get('type') === 'vod') {
-                            $filenameMetadata = $get('filename_metadata') ?? [];
-                            $set('folder_metadata', in_array('tmdb_id', $filenameMetadata) ? ['tmdb_id'] : []);
+                        if ($get('type') !== 'vod') {
+                            return;
+                        }
+                        if (in_array('title', $state ?? [])) {
+                            if (empty($get('folder_metadata'))) {
+                                $set('folder_metadata', ['year', 'tmdb_id']);
+                            }
+                        } else {
+                            $set('folder_metadata', []);
                         }
                     })
                     ->hidden(fn ($get) => ! $get('enabled')),
@@ -288,29 +298,13 @@ class StreamFileSettingResource extends Resource
                     ->columns(2)
                     ->schema([
                         ToggleButtons::make('folder_metadata')
-                            ->label('Folder metadata')
+                            ->label('Title folder metadata')
                             ->helperText('Added to the title folder name')
                             ->live()
                             ->inline()
                             ->multiple()
-                            ->options(['tmdb_id' => 'TMDB ID'])
-                            ->dehydrated(false)
-                            ->afterStateHydrated(function (Set $set, Get $get): void {
-                                $set('folder_metadata',
-                                    in_array('tmdb_id', $get('filename_metadata') ?? []) ? ['tmdb_id'] : []
-                                );
-                            })
-                            ->afterStateUpdated(function ($state, Set $set, Get $get): void {
-                                $metadata = $get('filename_metadata') ?? [];
-                                $hasTmdb = in_array('tmdb_id', $state ?? []);
-                                $metaHasTmdb = in_array('tmdb_id', $metadata);
-                                if ($hasTmdb && ! $metaHasTmdb) {
-                                    $metadata[] = 'tmdb_id';
-                                    $set('filename_metadata', array_values($metadata));
-                                } elseif (! $hasTmdb && $metaHasTmdb) {
-                                    $set('filename_metadata', array_values(array_filter($metadata, fn ($v) => $v !== 'tmdb_id')));
-                                }
-                            })
+                            ->options(['year' => 'Year', 'tmdb_id' => 'TMDB ID'])
+                            ->default(['year', 'tmdb_id'])
                             ->visible(fn (Get $get): bool => $get('type') === 'vod' && in_array('title', $get('path_structure') ?? [])),
                         ToggleButtons::make('filename_metadata')
                             ->label('Filename metadata')
