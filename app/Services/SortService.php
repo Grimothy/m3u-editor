@@ -163,14 +163,14 @@ class SortService
     {
         $offset = max(0, $start - 1);
         $driver = DB::getPdo()->getAttribute(\PDO::ATTR_DRIVER_NAME);
-    
+
         $ids = $channels->pluck('id')->map(fn ($id) => (int) $id)->unique()->values()->all();
         if (empty($ids)) {
             return;
         }
-    
+
         $idsSql = implode(',', $ids);
-    
+
         // MySQL (8+)
         if ($driver === 'mysql') {
             DB::statement(
@@ -188,10 +188,10 @@ class SortService
                    AND ccp.channel_id IN ({$idsSql})",
                 [$playlist->id, $offset, $playlist->id]
             );
-    
+
             return;
         }
-    
+
         // Postgres
         if (str_starts_with($driver, 'pgsql') || $driver === 'postgresql' || $driver === 'postgres') {
             DB::statement(
@@ -210,10 +210,10 @@ class SortService
                    AND ccp.channel_id IN ({$idsSql})",
                 [$offset, $playlist->id, $playlist->id]
             );
-    
+
             return;
         }
-    
+
         // SQLite
         if ($driver === 'sqlite') {
             DB::statement(
@@ -231,10 +231,10 @@ class SortService
                    AND channel_id IN ({$idsSql})",
                 [$playlist->id, $offset, $playlist->id]
             );
-    
+
             return;
         }
-    
+
         // Fallback: CASE update (other DB drivers)
         $orderedIds = DB::table('channel_custom_playlist as ccp')
             ->join('channels as c', 'c.id', '=', 'ccp.channel_id')
@@ -246,21 +246,21 @@ class SortService
             ->pluck('ccp.channel_id')
             ->map(fn ($id) => (int) $id)
             ->all();
-    
+
         if (empty($orderedIds)) {
             return;
         }
-    
+
         $cases = [];
         $i = $start;
         foreach ($orderedIds as $id) {
             $cases[] = "WHEN {$id} THEN {$i}";
             $i++;
         }
-    
+
         $casesSql = implode(' ', $cases);
         $orderedIdsSql = implode(',', $orderedIds);
-    
+
         DB::statement(
             "UPDATE channel_custom_playlist
              SET channel_number = CASE channel_id {$casesSql} END

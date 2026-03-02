@@ -134,7 +134,7 @@ class ChannelsRelationManager extends RelationManager
                     ->sortable(query: function (Builder $query, string $direction): Builder {
                         return $query->orderBy('channel_custom_playlist.channel_number', $direction);
                     });
-        
+
                 break;
             }
         }
