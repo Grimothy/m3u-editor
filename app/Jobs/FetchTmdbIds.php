@@ -400,6 +400,49 @@ class FetchTmdbIds implements ShouldQueue
             if (empty($channel->tmdb_id)) {
                 $channel->update(['tmdb_id' => $tmdbId]);
             }
+
+            // Check if genre/group needs TMDB enrichment (e.g., still set to library folder name)
+            $currentGenre = $info['genre'] ?? $channel->group ?? '';
+            if (! empty($currentGenre) && ! str_contains($currentGenre, ',') && strlen($currentGenre) <= 20) {
+                $details = $tmdb->getMovieDetails((int) $tmdbId);
+                if ($details && ! empty($details['genres'])) {
+                    $tmdbGenres = is_string($details['genres'])
+                        ? array_map('trim', explode(',', $details['genres']))
+                        : (array) $details['genres'];
+
+                    if (! in_array(trim($currentGenre), $tmdbGenres)) {
+                        Log::info('FetchTmdbIds: VOD genre appears to be a library name, updating from TMDB', [
+                            'channel_id' => $channel->id,
+                            'current_genre' => $currentGenre,
+                            'tmdb_genres' => $details['genres'],
+                        ]);
+
+                        $info['genre'] = $details['genres'];
+                        $updateData = ['info' => $info];
+
+                        $primaryGenre = $tmdbGenres[0] ?? null;
+                        if ($primaryGenre) {
+                            $group = Group::firstOrCreate(
+                                [
+                                    'playlist_id' => $channel->playlist_id,
+                                    'name' => $primaryGenre,
+                                ],
+                                [
+                                    'name_internal' => $primaryGenre,
+                                    'user_id' => $channel->user_id,
+                                    'type' => 'vod',
+                                ]
+                            );
+                            $updateData['group'] = $primaryGenre;
+                            $updateData['group_internal'] = $primaryGenre;
+                            $updateData['group_id'] = $group->id;
+                        }
+
+                        $channel->update($updateData);
+                    }
+                }
+            }
+
             $this->skippedCount++;
 
             return;
@@ -634,15 +677,64 @@ class FetchTmdbIds implements ShouldQueue
         $hasMetadata = ! empty($series->plot) && ! empty($series->cover);
 
         if (($existingTvdbId || $existingTmdbId) && $hasMetadata && ! $this->overwriteExisting) {
-            // Series-level metadata is complete, but episodes may still need enrichment.
-            // Check if any episodes are missing TMDB data and process them if so.
+            $needsEnrichment = false;
+
+            // Check if episodes need TMDB data
             if ($existingTmdbId && $series->episodes()->whereNull('tmdb_id')->exists()) {
                 Log::info('FetchTmdbIds: Series metadata complete but episodes need enrichment', [
                     'series_id' => $series->id,
                     'tmdb_id' => $existingTmdbId,
                 ]);
                 $this->processSeriesEpisodes($tmdb, $series, (int) $existingTmdbId);
-            } else {
+                $needsEnrichment = true;
+            }
+
+            // Check if genre needs TMDB enrichment (e.g., still set to library folder name)
+            // A TMDB-enriched genre typically contains a comma (multiple genres) or matches known TMDB genres.
+            // If the genre is a single short word that doesn't contain a comma, it's likely a library name placeholder.
+            if ($existingTmdbId && ! empty($series->genre) && ! str_contains($series->genre, ',') && strlen($series->genre) <= 20) {
+                // Fetch TMDB details to check if the current genre matches a TMDB genre
+                $details = $tmdb->getTvSeriesDetails((int) $existingTmdbId);
+                if ($details && ! empty($details['genres'])) {
+                    $tmdbGenres = is_string($details['genres'])
+                        ? array_map('trim', explode(',', $details['genres']))
+                        : (array) $details['genres'];
+                    $currentGenreTrimmed = trim($series->genre);
+
+                    // If the current genre is NOT one of the TMDB genres, it's a placeholder — update it
+                    if (! in_array($currentGenreTrimmed, $tmdbGenres)) {
+                        Log::info('FetchTmdbIds: Series genre appears to be a library name, updating from TMDB', [
+                            'series_id' => $series->id,
+                            'current_genre' => $series->genre,
+                            'tmdb_genres' => $details['genres'],
+                        ]);
+
+                        $updateData = ['genre' => $details['genres']];
+
+                        // Update category to match the primary TMDB genre
+                        $primaryGenre = $tmdbGenres[0] ?? null;
+                        if ($primaryGenre) {
+                            $category = Category::firstOrCreate(
+                                [
+                                    'playlist_id' => $series->playlist_id,
+                                    'name' => $primaryGenre,
+                                ],
+                                [
+                                    'name_internal' => $primaryGenre,
+                                    'user_id' => $series->user_id,
+                                ]
+                            );
+                            $updateData['category_id'] = $category->id;
+                            $updateData['source_category_id'] = $category->id;
+                        }
+
+                        $series->update($updateData);
+                        $needsEnrichment = true;
+                    }
+                }
+            }
+
+            if (! $needsEnrichment) {
                 Log::debug('FetchTmdbIds: Skipping series (already has IDs and metadata)', [
                     'series_id' => $series->id,
                     'name' => $series->name,

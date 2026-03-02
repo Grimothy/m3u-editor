@@ -670,6 +670,166 @@ it('enriches episodes even when series is skipped due to complete metadata', fun
         ->and($episode->cover)->toBe('https://image.tmdb.org/t/p/original/bb_pilot.jpg');
 });
 
+it('re-enriches series genre when it is a library name placeholder', function () {
+    Http::fake([
+        'https://api.themoviedb.org/3/tv/1396?*' => Http::response([
+            'id' => 1396,
+            'name' => 'Breaking Bad',
+            'genres' => [
+                ['name' => 'Drama'],
+                ['name' => 'Crime'],
+            ],
+            'seasons' => [],
+        ], 200),
+        // getSeasonDetails should not be called since there are no seasons with episodes needing enrichment
+    ]);
+
+    $series = Series::factory()->create([
+        'playlist_id' => $this->playlist->id,
+        'user_id' => $this->user->id,
+        'name' => 'Breaking Bad',
+        'tmdb_id' => 1396,
+        'plot' => 'A high school chemistry teacher turned drug lord.',
+        'cover' => 'https://image.tmdb.org/t/p/w500/breakingbad.jpg',
+        'genre' => 'tv', // Library name placeholder — should be replaced
+        'last_metadata_fetch' => now()->subDay(),
+        'metadata' => ['tmdb_id' => 1396],
+    ]);
+
+    $libraryCategory = Category::factory()->create([
+        'playlist_id' => $this->playlist->id,
+        'user_id' => $this->user->id,
+        'name' => 'tv',
+        'name_internal' => 'tv',
+    ]);
+    $series->update(['category_id' => $libraryCategory->id]);
+
+    $job = new FetchTmdbIds(
+        seriesIds: [$series->id],
+        overwriteExisting: false,
+        user: $this->user,
+    );
+
+    $job->handle(app(TmdbService::class));
+
+    $series->refresh();
+
+    // Genre should be updated from 'tv' to TMDB genres
+    expect($series->genre)->toContain('Drama')
+        ->and($series->genre)->toContain('Crime');
+
+    // Category should be updated to the primary TMDB genre
+    $updatedCategory = Category::find($series->category_id);
+    expect($updatedCategory->name)->toBe('Drama');
+});
+
+it('re-enriches VOD genre when it is a library name placeholder', function () {
+    Http::fake([
+        'https://api.themoviedb.org/3/movie/603*' => Http::response([
+            'id' => 603,
+            'title' => 'The Matrix',
+            'overview' => 'A computer hacker learns about the true nature of reality.',
+            'poster_path' => '/matrix.jpg',
+            'genres' => [
+                ['name' => 'Action'],
+                ['name' => 'Sci-Fi'],
+            ],
+        ], 200),
+    ]);
+
+    $libraryGroup = Group::factory()->create([
+        'playlist_id' => $this->playlist->id,
+        'user_id' => $this->user->id,
+        'name' => 'Movies',
+        'name_internal' => 'Movies',
+        'type' => 'vod',
+    ]);
+
+    $channel = Channel::factory()->create([
+        'playlist_id' => $this->playlist->id,
+        'user_id' => $this->user->id,
+        'is_vod' => true,
+        'title' => 'The Matrix',
+        'tmdb_id' => 603,
+        'group' => 'Movies',
+        'group_internal' => 'Movies',
+        'group_id' => $libraryGroup->id,
+        'last_metadata_fetch' => now()->subDay(),
+        'info' => [
+            'tmdb_id' => 603,
+            'plot' => 'A computer hacker learns about the true nature of reality.',
+            'cover_big' => 'https://image.tmdb.org/t/p/w500/matrix.jpg',
+            'genre' => 'Movies', // Library name placeholder
+        ],
+    ]);
+
+    $job = new FetchTmdbIds(
+        vodChannelIds: [$channel->id],
+        seriesIds: null,
+        overwriteExisting: false,
+        user: $this->user,
+    );
+
+    $job->handle(app(TmdbService::class));
+
+    $channel->refresh();
+
+    // Group should be updated from 'Movies' to TMDB primary genre
+    expect($channel->group)->toBe('Action')
+        ->and($channel->group_internal)->toBe('Action');
+
+    // Info genre should be updated to TMDB genres
+    expect($channel->info['genre'])->toContain('Action');
+});
+
+it('skips genre re-enrichment when genre is already a TMDB genre', function () {
+    Http::fake([
+        'https://api.themoviedb.org/3/tv/1396?*' => Http::response([
+            'id' => 1396,
+            'name' => 'Breaking Bad',
+            'genres' => [
+                ['name' => 'Drama'],
+                ['name' => 'Crime'],
+            ],
+            'seasons' => [],
+        ], 200),
+    ]);
+
+    $series = Series::factory()->create([
+        'playlist_id' => $this->playlist->id,
+        'user_id' => $this->user->id,
+        'name' => 'Breaking Bad',
+        'tmdb_id' => 1396,
+        'plot' => 'A high school chemistry teacher turned drug lord.',
+        'cover' => 'https://image.tmdb.org/t/p/w500/breakingbad.jpg',
+        'genre' => 'Drama', // Single word but IS a valid TMDB genre — should NOT be replaced
+        'last_metadata_fetch' => now()->subDay(),
+        'metadata' => ['tmdb_id' => 1396],
+    ]);
+
+    $dramaCategory = Category::factory()->create([
+        'playlist_id' => $this->playlist->id,
+        'user_id' => $this->user->id,
+        'name' => 'Drama',
+        'name_internal' => 'Drama',
+    ]);
+    $series->update(['category_id' => $dramaCategory->id]);
+
+    $job = new FetchTmdbIds(
+        seriesIds: [$series->id],
+        overwriteExisting: false,
+        user: $this->user,
+    );
+
+    $job->handle(app(TmdbService::class));
+
+    $series->refresh();
+
+    // Genre should remain as 'Drama' (it's a valid TMDB genre, not a placeholder)
+    expect($series->genre)->toBe('Drama')
+        ->and($series->category_id)->toBe($dramaCategory->id);
+});
+
 it('skips episode enrichment when all episodes already have tmdb_id', function () {
     Http::fake();
 
@@ -680,6 +840,7 @@ it('skips episode enrichment when all episodes already have tmdb_id', function (
         'tmdb_id' => 1396,
         'plot' => 'A high school chemistry teacher turned drug lord.',
         'cover' => 'https://image.tmdb.org/t/p/w500/breakingbad.jpg',
+        'genre' => 'Drama, Crime',
         'last_metadata_fetch' => now()->subDay(),
         'metadata' => ['tmdb_id' => 1396],
     ]);
