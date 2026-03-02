@@ -70,6 +70,14 @@ class StreamFileSettingResource extends Resource
                     ->required()
                     ->live()
                     ->disabledOn('edit')
+                    ->afterStateUpdated(function ($state, callable $set) {
+                        if ($state === 'series') {
+                            $set('path_structure', ['category', 'series', 'season']);
+                        } else {
+                            $set('path_structure', ['group', 'title']);
+                        }
+                        $set('filename_metadata', []);
+                    })
                     ->helperText('Determines which path structure options are available and where this profile can be assigned'),
 
                 Textarea::make('description')
