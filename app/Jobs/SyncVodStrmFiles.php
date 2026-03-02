@@ -281,6 +281,7 @@ class SyncVodStrmFiles implements ShouldQueue
             $replaceChar = $sync_settings['replace_char'] ?? 'space';
             $cleanSpecialChars = $sync_settings['clean_special_chars'] ?? false;
             $filenameMetadata = $sync_settings['filename_metadata'] ?? [];
+            $folderMetadata = $sync_settings['folder_metadata'] ?? [];
             $tmdbIdFormat = $sync_settings['tmdb_id_format'] ?? 'square';
             $removeConsecutiveChars = $sync_settings['remove_consecutive_chars'] ?? false;
 
@@ -332,29 +333,27 @@ class SyncVodStrmFiles implements ShouldQueue
             if ($titleFolderCreated) {
                 $titleFolder = $title;
 
-                // Add year to folder name if available
-                if (! empty($channel->year) && strpos($titleFolder, "({$channel->year})") === false) {
+                // Add year to folder name if configured in folder_metadata
+                if (in_array('year', $folderMetadata) && ! empty($channel->year) && strpos($titleFolder, "({$channel->year})") === false) {
                     $titleFolder .= " ({$channel->year})";
                 }
 
-                // Add TMDB/IMDB ID to folder name for Trash Guides compatibility
-                // Check multiple possible locations for IDs (priority: TMDB > IMDB)
-                $tmdbId = $channel->info['tmdb_id']
-                    ?? $channel->info['tmdb']
-                    ?? $channel->movie_data['tmdb_id']
-                    ?? $channel->movie_data['tmdb']
-                    ?? null;
-                $imdbId = $channel->info['imdb_id']
-                    ?? $channel->info['imdb']
-                    ?? $channel->movie_data['imdb_id']
-                    ?? $channel->movie_data['imdb']
-                    ?? null;
-                // Ensure IDs are scalar values (not arrays)
-                $tmdbId = is_scalar($tmdbId) ? $tmdbId : null;
-                $imdbId = is_scalar($imdbId) ? $imdbId : null;
+                // Add TMDB/IMDB ID to folder name if configured in folder_metadata
+                if (in_array('tmdb_id', $folderMetadata)) {
+                    $tmdbId = $channel->info['tmdb_id']
+                        ?? $channel->info['tmdb']
+                        ?? $channel->movie_data['tmdb_id']
+                        ?? $channel->movie_data['tmdb']
+                        ?? null;
+                    $imdbId = $channel->info['imdb_id']
+                        ?? $channel->info['imdb']
+                        ?? $channel->movie_data['imdb_id']
+                        ?? $channel->movie_data['imdb']
+                        ?? null;
+                    $tmdbId = is_scalar($tmdbId) ? $tmdbId : null;
+                    $imdbId = is_scalar($imdbId) ? $imdbId : null;
 
-                $bracket = $tmdbIdFormat === 'curly' ? ['{', '}'] : ['[', ']'];
-                if (in_array('tmdb_id', $filenameMetadata)) {
+                    $bracket = $tmdbIdFormat === 'curly' ? ['{', '}'] : ['[', ']'];
                     if (! empty($tmdbId)) {
                         $titleFolder .= " {$bracket[0]}tmdb-{$tmdbId}{$bracket[1]}";
                     } elseif (! empty($imdbId)) {
@@ -373,7 +372,7 @@ class SyncVodStrmFiles implements ShouldQueue
                 $path = $titlePath;
             }
 
-            // Add metadata to filename
+            // Add year to filename if configured in filename_metadata
             if (in_array('year', $filenameMetadata) && ! empty($channel->year)) {
                 // Only add year if it's not already in the title
                 if (strpos($fileName, "({$channel->year})") === false) {
@@ -381,9 +380,9 @@ class SyncVodStrmFiles implements ShouldQueue
                 }
             }
 
-            // Only add TMDB/IMDB ID to filename if title folder is NOT created
-            // (If title folder exists, ID is already in the folder name)
-            if (in_array('tmdb_id', $filenameMetadata) && ! $titleFolderCreated) {
+            // Add TMDB/IMDB ID to filename if configured in filename_metadata
+            // (When a title folder exists, TMDB ID belongs in folder_metadata instead)
+            if (in_array('tmdb_id', $filenameMetadata)) {
                 // Check multiple possible locations for IDs (priority: TMDB > IMDB)
                 $tmdbId = $channel->info['tmdb_id']
                     ?? $channel->info['tmdb']
