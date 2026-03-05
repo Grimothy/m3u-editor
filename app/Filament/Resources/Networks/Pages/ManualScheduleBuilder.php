@@ -235,7 +235,7 @@ class ManualScheduleBuilder extends Page
      *
      * The date and startTime are in the user's local timezone. We convert to UTC for storage.
      */
-    public function addProgramme(string $date, string $startTime, string $timezone, string $contentableType, int $contentableId, ?int $durationOverride = null): array
+    public function addProgramme(string $date, string $startTime, string $timezone, string $contentableType, int $contentableId, ?int $durationOverride = null, bool $pinAnchor = false): array
     {
         $network = $this->getRecord();
         $tz = $this->resolveTimezone($timezone);
@@ -302,7 +302,7 @@ class ManualScheduleBuilder extends Page
         ]);
 
         // Cascade-bump any subsequent programmes that now overlap
-        $this->cascadeBump($network, $programme, $tz);
+        $this->cascadeBump($network, $programme, $tz, $pinAnchor);
 
         // Update schedule timestamp
         $network->update(['schedule_generated_at' => Carbon::now()]);
@@ -433,7 +433,7 @@ class ManualScheduleBuilder extends Page
         $localTimeStr = $localStart->format('H:i');
         $localDateStr = $localStart->format('Y-m-d');
 
-        return $this->addProgramme($localDateStr, $localTimeStr, $timezone, $contentableType, $contentableId, $durationOverride);
+        return $this->addProgramme($localDateStr, $localTimeStr, $timezone, $contentableType, $contentableId, $durationOverride, pinAnchor: true);
     }
 
     /**
@@ -592,24 +592,69 @@ class ManualScheduleBuilder extends Page
     }
 
     /**
-     * Cascade-bump all programmes that overlap with the given programme.
+     * Cascade-bump to resolve all overlaps involving the anchor programme.
      *
-     * After placing/moving a programme, walk forward through subsequent programmes
-     * and shift any that overlap so they start immediately after the previous one
-     * (plus the configured gap). This ensures no overlaps and maintains the gap.
+     * Two-pass approach:
+     * 1. If the anchor was placed inside a prior programme's time range,
+     *    bump the anchor forward so it starts after that programme ends (+ gap).
+     *    Only considers programmes that were clearly placed before the anchor
+     *    (start_time strictly less than anchor's start_time).
+     *    Skipped when $pinAnchor is true (e.g. insertAfterProgramme already
+     *    computed the correct position).
+     * 2. Walk all programmes starting at or after the (possibly adjusted) anchor
+     *    and bump any that overlap forward (+ gap).
+     *
+     * @param  bool  $pinAnchor  When true, skip Pass 1 (anchor position is authoritative).
      */
-    protected function cascadeBump(Network $network, NetworkProgramme $anchor, DateTimeZone $tz): void
+    protected function cascadeBump(Network $network, NetworkProgramme $anchor, DateTimeZone $tz, bool $pinAnchor = false): void
     {
         $gap = (int) ($network->schedule_gap_seconds ?? 0);
 
-        // Get all programmes for this network on the same UTC day range,
-        // ordered by start_time, excluding the anchor itself.
-        // We need all programmes that start at or after the anchor's start_time.
-        $subsequent = $network->programmes()
+        // ── Pass 1: Check if anchor overlaps a prior programme ──────────
+        // Find any programme that starts strictly before the anchor but ends
+        // after the anchor starts. Pick the one with the latest end_time.
+        // Skipped when the anchor position is authoritative (insertAfterProgramme).
+        if (! $pinAnchor) {
+            $prior = $network->programmes()
+                ->where('id', '!=', $anchor->id)
+                ->where('start_time', '<', $anchor->start_time)
+                ->where('end_time', '>', $anchor->start_time)
+                ->orderByDesc('end_time')
+                ->first();
+
+            if ($prior) {
+                // Bump the anchor forward to after the prior programme ends (+ gap)
+                $newStart = $prior->end_time->copy()->addSeconds($gap);
+                $newEnd = $newStart->copy()->addSeconds($anchor->duration_seconds);
+
+                $anchor->update([
+                    'start_time' => $newStart,
+                    'end_time' => $newEnd,
+                ]);
+
+                $anchor->refresh();
+            }
+        }
+
+        // ── Pass 2: Walk forward from anchor, bumping overlaps ──────────
+        // When pinAnchor is true (insert-after), we need to also catch
+        // programmes that start before the anchor but overlap with it,
+        // since the anchor position is authoritative and everything else yields.
+        $subsequentQuery = $network->programmes()
             ->where('id', '!=', $anchor->id)
-            ->where('start_time', '>=', $anchor->start_time)
             ->orderBy('start_time')
-            ->get();
+            ->orderBy('id');
+
+        if ($pinAnchor) {
+            // Include any programme that ends after the anchor starts
+            // (i.e. overlaps with the anchor or comes after it)
+            $subsequentQuery->where('end_time', '>', $anchor->start_time);
+        } else {
+            // Original behavior: only programmes starting at or after the anchor
+            $subsequentQuery->where('start_time', '>=', $anchor->start_time);
+        }
+
+        $subsequent = $subsequentQuery->get();
 
         // The "fence" is the earliest time the next programme can start
         $fence = $anchor->end_time->copy()->addSeconds($gap);

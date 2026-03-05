@@ -157,10 +157,12 @@ it('cascade-bumps a chain of programmes', function () {
         'duration_seconds' => 3600,
     ]);
 
-    // Now add a new 1-hour programme at 10:30 which overlaps Prog A's slot
-    // This anchor sits at 10:30-11:30, so Prog A (at 10:00) is before it — NOT bumped.
-    // Prog B at 11:00 overlaps anchor's end 11:30 — bumped to 11:30.
-    // Prog C at 12:00 still ok after B's new end 12:30? No, 12:00 < 12:30 — bumped to 12:30.
+    // Now add a new 1-hour programme at 10:30 which is inside Prog A's range (10:00-11:00).
+    // The full-day cascade walks chronologically:
+    //   A (10:00-11:00) — no prev, stays
+    //   New (10:30) — prev A ends 11:00, 10:30 < 11:00, bumped to 11:00-12:00
+    //   B (11:00) — prev New ends 12:00, 11:00 < 12:00, bumped to 12:00-13:00
+    //   C (12:00) — prev B ends 13:00, 12:00 < 13:00, bumped to 13:00-14:00
     Livewire::test(ManualScheduleBuilder::class, ['record' => $this->network->id])
         ->call('addProgramme', $date, '10:30', 'UTC', Channel::class, $this->channel->id, 3600);
 
@@ -171,11 +173,11 @@ it('cascade-bumps a chain of programmes', function () {
     expect($programmes)->toHaveCount(4);
     expect($programmes[0]->title)->toBe('Prog A');
     expect($programmes[0]->start_time->format('H:i'))->toBe('10:00'); // Untouched (before anchor)
-    expect($programmes[1]->start_time->format('H:i'))->toBe('10:30'); // New anchor
+    expect($programmes[1]->start_time->format('H:i'))->toBe('11:00'); // New anchor, bumped after A
     expect($programmes[2]->title)->toBe('Prog B');
-    expect($programmes[2]->start_time->format('H:i'))->toBe('11:30'); // Bumped
+    expect($programmes[2]->start_time->format('H:i'))->toBe('12:00'); // Bumped after new
     expect($programmes[3]->title)->toBe('Prog C');
-    expect($programmes[3]->start_time->format('H:i'))->toBe('12:30'); // Cascade bumped
+    expect($programmes[3]->start_time->format('H:i'))->toBe('13:00'); // Cascade bumped after B
 });
 
 it('cascade-bumps respects schedule_gap_seconds', function () {
@@ -417,6 +419,47 @@ it('insert after non-existent programme returns failure', function () {
     Livewire::test(ManualScheduleBuilder::class, ['record' => $this->network->id])
         ->call('insertAfterProgramme', 99999, $date, 'UTC', Channel::class, $this->channel->id, 1800)
         ->assertNotified();
+});
+
+it('cascade-bumps programme dropped inside an existing programme range', function () {
+    $date = '2026-03-06';
+    $timezone = 'UTC';
+
+    // Create programme A at 10:00-11:30 (90 min)
+    NetworkProgramme::create([
+        'network_id' => $this->network->id,
+        'contentable_type' => Channel::class,
+        'contentable_id' => $this->channel->id,
+        'title' => 'Long Movie',
+        'start_time' => Carbon::parse("{$date} 10:00:00", 'UTC'),
+        'end_time' => Carbon::parse("{$date} 11:30:00", 'UTC'),
+        'duration_seconds' => 5400,
+    ]);
+
+    // Drop a new programme at 10:30 — inside Long Movie's range
+    // The new programme becomes anchor at 10:30-11:30 (1 hr).
+    // Long Movie at 10:00 starts BEFORE anchor — but anchor ends at 11:30,
+    // and Long Movie also ends at 11:30. Since Long Movie precedes anchor
+    // in chronological order, anchor should be bumped to after Long Movie.
+    Livewire::test(ManualScheduleBuilder::class, ['record' => $this->network->id])
+        ->call('addProgramme', $date, '10:30', 'UTC', Channel::class, $this->channel->id, 3600);
+
+    $programmes = NetworkProgramme::where('network_id', $this->network->id)
+        ->orderBy('start_time')
+        ->get();
+
+    expect($programmes)->toHaveCount(2);
+
+    // Long Movie should remain at 10:00
+    expect($programmes[0]->title)->toBe('Long Movie');
+    expect($programmes[0]->start_time->format('H:i'))->toBe('10:00');
+
+    // New programme should be bumped to 11:30 (after Long Movie ends)
+    expect($programmes[1]->start_time->format('H:i'))->toBe('11:30');
+
+    // No overlap
+    $gapSecs = $programmes[1]->start_time->diffInSeconds($programmes[0]->end_time, false);
+    expect($gapSecs)->toBeGreaterThanOrEqual(0);
 });
 
 it('clears programmes for a specific day', function () {

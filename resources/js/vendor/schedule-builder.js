@@ -274,15 +274,15 @@ function scheduleBuilder(config) {
             // Calculate how many 5-minute slots this programme spans
             const durationMinutes = (prog.duration_seconds || 1800) / 60;
             const slots = Math.max(1, Math.ceil(durationMinutes / this.SLOT_MINUTES));
-            const height = slots * this.SLOT_HEIGHT - 2; // subtract small padding
+            const height = slots * this.SLOT_HEIGHT - 4; // gap between blocks
             return `height: ${height}px; z-index: 10; pointer-events: none;`;
         },
 
         getTypeColor(contentableType) {
             if (contentableType && contentableType.includes('Episode')) {
-                return 'bg-blue-100 dark:bg-blue-900/40 border-blue-300 dark:border-blue-700 text-blue-900 dark:text-blue-100';
+                return 'bg-blue-50 dark:bg-blue-900/40 border-blue-200 dark:border-blue-700 text-blue-900 dark:text-blue-100 ring-blue-300/50 dark:ring-blue-700/50';
             }
-            return 'bg-green-100 dark:bg-green-900/40 border-green-300 dark:border-green-700 text-green-900 dark:text-green-100';
+            return 'bg-purple-50 dark:bg-purple-900/40 border-purple-200 dark:border-purple-700 text-purple-900 dark:text-purple-100 ring-purple-300/50 dark:ring-purple-700/50';
         },
 
         formatDuration(seconds) {
@@ -293,6 +293,16 @@ function scheduleBuilder(config) {
                 return `${hours}h ${minutes}m`;
             }
             return `${minutes}m`;
+        },
+
+        formatTimeRange(prog) {
+            const pad = (n) => String(n).padStart(2, '0');
+            const startH = prog.start_hour ?? 0;
+            const startM = prog.start_minute ?? 0;
+            const endMinutes = startH * 60 + startM + ((prog.duration_seconds || 0) / 60);
+            const endH = Math.floor(endMinutes / 60) % 24;
+            const endM = Math.floor(endMinutes % 60);
+            return `${this.formatTimeLabel(startH, startM)} - ${this.formatTimeLabel(endH, endM)}`;
         },
 
         // ── Drag & Drop: Media Pool → Grid ──────────────────────────
