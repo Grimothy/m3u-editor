@@ -159,6 +159,16 @@ function streamPlayer() {
             this._resumePosition = 0;
             this.hideResumePrompt();
         },
+
+        formatSeconds(seconds) {
+            if (seconds <= 0) return '0:00';
+            const h = Math.floor(seconds / 3600);
+            const m = Math.floor((seconds % 3600) / 60);
+            const s = seconds % 60;
+            const mm = String(m).padStart(2, '0');
+            const ss = String(s).padStart(2, '0');
+            return h > 0 ? `${h}:${mm}:${ss}` : `${m}:${ss}`;
+        },
         // ─────────────────────────────────────────────────────────────────
 
         initPlayer(url, format, playerId) {
