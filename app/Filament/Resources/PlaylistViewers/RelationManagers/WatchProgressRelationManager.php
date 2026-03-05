@@ -5,6 +5,7 @@ namespace App\Filament\Resources\PlaylistViewers\RelationManagers;
 use App\Models\ViewerWatchProgress;
 use App\Services\LogoService;
 use Filament\Actions\BulkActionGroup;
+use Filament\Actions\DeleteAction;
 use Filament\Actions\DeleteBulkAction;
 use Filament\Resources\RelationManagers\RelationManager;
 use Filament\Schemas\Components\Tabs\Tab;
@@ -12,6 +13,7 @@ use Filament\Schemas\Schema;
 use Filament\Tables\Columns\IconColumn;
 use Filament\Tables\Columns\ImageColumn;
 use Filament\Tables\Columns\TextColumn;
+use Filament\Tables\Enums\RecordActionsPosition;
 use Filament\Tables\Filters\TernaryFilter;
 use Filament\Tables\Table;
 
@@ -186,6 +188,10 @@ class WatchProgressRelationManager extends RelationManager
                     ->since()
                     ->sortable(),
             ])
+            ->recordActions([
+                DeleteAction::make()
+                    ->button()->hiddenLabel()->size('sm'),
+            ], position: RecordActionsPosition::BeforeColumns)
             ->filters([
                 TernaryFilter::make('completed')
                     ->label('Completed')
