@@ -104,9 +104,9 @@ function streamPlayer() {
             }
         },
 
-        async _saveProgress(force = false) {
+        async _saveProgress(force = false, positionOverride = null) {
             if (! this.progressConfig || ! this.player || this.progressConfig.contentType === 'live') return;
-            const position = Math.floor(this.player.currentTime || 0);
+            const position = positionOverride !== null ? positionOverride : Math.floor(this.player.currentTime || 0);
             const duration = isFinite(this.player.duration) ? Math.floor(this.player.duration) : null;
             if (! force && Math.abs(position - this._lastSavedPosition) < 5) return;
             this._lastSavedPosition = position;
@@ -151,6 +151,7 @@ function streamPlayer() {
             if (this.player && this._resumePosition > 0) {
                 this.player.currentTime = this._resumePosition;
                 this.player.play();
+                this._saveProgress(true, this._resumePosition);
             }
             this.hideResumePrompt();
         },
