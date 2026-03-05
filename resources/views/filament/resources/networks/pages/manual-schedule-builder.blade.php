@@ -4,6 +4,7 @@
             networkId: {{ $network->id }},
             scheduleWindowDays: {{ $scheduleWindowDays }},
             recurrenceMode: '{{ $recurrenceMode }}',
+            gapSeconds: {{ $gapSeconds }},
         })"
         x-cloak
         class="schedule-builder"

@@ -4,6 +4,7 @@ function scheduleBuilder(config) {
         networkId: config.networkId,
         scheduleWindowDays: config.scheduleWindowDays || 7,
         recurrenceMode: config.recurrenceMode || 'per_day',
+        gapSeconds: config.gapSeconds || 0,
 
         // Browser timezone (IANA name, e.g. "America/New_York")
         timezone: Intl.DateTimeFormat().resolvedOptions().timeZone,
@@ -420,9 +421,14 @@ function scheduleBuilder(config) {
                     durationSeconds || null
                 );
 
-                if (result.success && result.programme) {
-                    this.programmes.push(result.programme);
-                    this.sortProgrammes();
+                if (result.success) {
+                    // Backend returns the full day's programmes (cascade bump may have shifted others)
+                    if (result.programmes) {
+                        this.programmes = result.programmes;
+                    } else if (result.programme) {
+                        this.programmes.push(result.programme);
+                        this.sortProgrammes();
+                    }
                 }
             } catch (err) {
                 console.error('Failed to add programme:', err);
@@ -441,13 +447,17 @@ function scheduleBuilder(config) {
                     this.timezone
                 );
 
-                if (result.success && result.programme) {
-                    // Replace the programme in our local array
-                    const idx = this.programmes.findIndex(p => p.id === programmeId);
-                    if (idx !== -1) {
-                        this.programmes[idx] = result.programme;
+                if (result.success) {
+                    // Backend returns the full day's programmes (cascade bump may have shifted others)
+                    if (result.programmes) {
+                        this.programmes = result.programmes;
+                    } else if (result.programme) {
+                        const idx = this.programmes.findIndex(p => p.id === programmeId);
+                        if (idx !== -1) {
+                            this.programmes[idx] = result.programme;
+                        }
+                        this.sortProgrammes();
                     }
-                    this.sortProgrammes();
                 }
             } catch (err) {
                 console.error('Failed to move programme:', err);

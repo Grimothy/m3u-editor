@@ -202,6 +202,17 @@ class NetworkResource extends Resource
                                             ->native(false)
                                             ->visible(fn (Get $get): bool => $get('schedule_type') === 'manual'),
 
+                                        TextInput::make('schedule_gap_seconds')
+                                            ->label('Gap Between Programmes')
+                                            ->numeric()
+                                            ->default(0)
+                                            ->suffix('seconds')
+                                            ->minValue(0)
+                                            ->maxValue(3600)
+                                            ->helperText('Configurable space between consecutive programmes (coming soon)')
+                                            ->visible(fn (Get $get): bool => $get('schedule_type') === 'manual')
+                                            ->disabled(),
+
                                         Toggle::make('loop_content')
                                             ->label('Loop Content')
                                             ->inline(false)
@@ -361,6 +372,17 @@ class NetworkResource extends Resource
                                     ->helperText('How the manual schedule repeats')
                                     ->native(false)
                                     ->visible(fn (Get $get): bool => $get('schedule_type') === 'manual'),
+
+                                TextInput::make('schedule_gap_seconds')
+                                    ->label('Gap Between Programmes')
+                                    ->numeric()
+                                    ->default(0)
+                                    ->suffix('seconds')
+                                    ->minValue(0)
+                                    ->maxValue(3600)
+                                    ->helperText('Configurable space between consecutive programmes (coming soon)')
+                                    ->visible(fn (Get $get): bool => $get('schedule_type') === 'manual')
+                                    ->disabled(),
 
                                 Toggle::make('loop_content')
                                     ->label('Loop Content')

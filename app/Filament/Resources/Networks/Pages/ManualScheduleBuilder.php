@@ -275,18 +275,7 @@ class ManualScheduleBuilder extends Page
         $formatted = $this->formatMediaItem($content, $contentableType);
         $duration = $durationOverride ?? ($formatted['duration_seconds'] ?? 1800);
 
-        // Auto-stack: if the requested slot overlaps, find the next available slot
-        $startDateTime = $this->findNextAvailableSlot($network, $startDateTime, $duration);
         $endDateTime = $startDateTime->copy()->addSeconds($duration);
-
-        // Bail if auto-stacking pushed us past the end of the day (in user's timezone)
-        $localDate = Carbon::parse($date, $tz)->toDateString();
-        $startInLocalTz = $startDateTime->copy()->setTimezone($tz)->toDateString();
-        if ($startInLocalTz !== $localDate) {
-            Notification::make()->warning()->title('No available time remaining on this day')->send();
-
-            return ['success' => false];
-        }
 
         // Get title
         $title = $formatted['title'] ?? 'Unknown';
@@ -312,12 +301,17 @@ class ManualScheduleBuilder extends Page
             'contentable_id' => $contentableId,
         ]);
 
+        // Cascade-bump any subsequent programmes that now overlap
+        $this->cascadeBump($network, $programme, $tz);
+
         // Update schedule timestamp
         $network->update(['schedule_generated_at' => Carbon::now()]);
 
+        // Return the full day so the frontend can re-render all shifted programmes
         return [
             'success' => true,
             'programme' => $this->formatProgrammeResponse($programme, $tz),
+            'programmes' => $this->getScheduleForDate($date, $timezone),
         ];
     }
 
@@ -339,19 +333,7 @@ class ManualScheduleBuilder extends Page
         // Parse in user's timezone, convert to UTC
         $newStart = Carbon::parse("{$date} {$startTime}", $tz)->utc();
         $duration = $durationOverride ?? $programme->duration_seconds;
-
-        // Auto-stack: if the requested slot overlaps, find the next available slot (excluding self)
-        $newStart = $this->findNextAvailableSlot($network, $newStart, $duration, $programmeId);
         $newEnd = $newStart->copy()->addSeconds($duration);
-
-        // Bail if auto-stacking pushed us past the end of the day (in user's timezone)
-        $localDate = Carbon::parse($date, $tz)->toDateString();
-        $startInLocalTz = $newStart->copy()->setTimezone($tz)->toDateString();
-        if ($startInLocalTz !== $localDate) {
-            Notification::make()->warning()->title('No available time remaining on this day')->send();
-
-            return ['success' => false];
-        }
 
         $programme->update([
             'start_time' => $newStart,
@@ -359,9 +341,13 @@ class ManualScheduleBuilder extends Page
             'duration_seconds' => $duration,
         ]);
 
+        // Cascade-bump any subsequent programmes that now overlap
+        $this->cascadeBump($network, $programme, $tz);
+
         return [
             'success' => true,
-            'programme' => $this->formatProgrammeResponse($programme, $tz),
+            'programme' => $this->formatProgrammeResponse($programme->fresh(), $tz),
+            'programmes' => $this->getScheduleForDate($date, $timezone),
         ];
     }
 
@@ -540,45 +526,46 @@ class ManualScheduleBuilder extends Page
     }
 
     /**
-     * Find the next available slot starting from the given time.
+     * Cascade-bump all programmes that overlap with the given programme.
      *
-     * If the requested time overlaps with existing programmes, walk forward
-     * past them until a gap large enough for the new duration is found.
+     * After placing/moving a programme, walk forward through subsequent programmes
+     * and shift any that overlap so they start immediately after the previous one
+     * (plus the configured gap). This ensures no overlaps and maintains the gap.
      */
-    protected function findNextAvailableSlot(Network $network, Carbon $desiredStart, int $durationSeconds, ?int $excludeProgrammeId = null): Carbon
+    protected function cascadeBump(Network $network, NetworkProgramme $anchor, DateTimeZone $tz): void
     {
-        $candidate = $desiredStart->copy();
-        $dayEnd = $desiredStart->copy()->endOfDay();
+        $gap = (int) ($network->schedule_gap_seconds ?? 0);
 
-        // Safety: limit iterations to prevent infinite loops
-        $maxIterations = 100;
-        $iteration = 0;
+        // Get all programmes for this network on the same UTC day range,
+        // ordered by start_time, excluding the anchor itself.
+        // We need all programmes that start at or after the anchor's start_time.
+        $subsequent = $network->programmes()
+            ->where('id', '!=', $anchor->id)
+            ->where('start_time', '>=', $anchor->start_time)
+            ->orderBy('start_time')
+            ->get();
 
-        while ($iteration < $maxIterations && $candidate->lt($dayEnd)) {
-            $candidateEnd = $candidate->copy()->addSeconds($durationSeconds);
+        // The "fence" is the earliest time the next programme can start
+        $fence = $anchor->end_time->copy()->addSeconds($gap);
 
-            $query = $network->programmes()
-                ->where('start_time', '<', $candidateEnd)
-                ->where('end_time', '>', $candidate);
+        foreach ($subsequent as $prog) {
+            if ($prog->start_time->lt($fence)) {
+                // This programme overlaps or violates the gap — bump it forward
+                $newStart = $fence->copy();
+                $newEnd = $newStart->copy()->addSeconds($prog->duration_seconds);
 
-            if ($excludeProgrammeId !== null) {
-                $query->where('id', '!=', $excludeProgrammeId);
+                $prog->update([
+                    'start_time' => $newStart,
+                    'end_time' => $newEnd,
+                ]);
+
+                // Advance the fence past this newly-bumped programme
+                $fence = $newEnd->copy()->addSeconds($gap);
+            } else {
+                // No overlap — but update fence in case a later programme does overlap
+                $fence = $prog->end_time->copy()->addSeconds($gap);
             }
-
-            $blocker = $query->orderBy('end_time', 'desc')->first();
-
-            if (! $blocker) {
-                // No overlap — this slot is available
-                return $candidate;
-            }
-
-            // Move candidate to right after the blocking programme ends
-            $candidate = $blocker->end_time->copy();
-            $iteration++;
         }
-
-        // Fell through — return a time past end-of-day so caller can detect failure
-        return $dayEnd->copy()->addSecond();
     }
 
     /**
@@ -632,6 +619,7 @@ class ManualScheduleBuilder extends Page
             'network' => $network,
             'scheduleWindowDays' => $network->schedule_window_days ?? 7,
             'recurrenceMode' => $network->manual_schedule_recurrence ?? 'per_day',
+            'gapSeconds' => (int) ($network->schedule_gap_seconds ?? 0),
         ];
     }
 }

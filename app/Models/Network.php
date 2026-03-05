@@ -46,6 +46,7 @@ class Network extends Model
         'broadcast_discontinuity_sequence' => 'integer',
         // Manual schedule
         'manual_schedule_recurrence' => 'string',
+        'schedule_gap_seconds' => 'integer',
     ];
 
     /**
