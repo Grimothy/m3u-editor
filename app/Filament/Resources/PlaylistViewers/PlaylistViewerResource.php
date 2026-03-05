@@ -10,7 +10,10 @@ use App\Models\MergedPlaylist;
 use App\Models\Playlist;
 use App\Models\PlaylistAlias;
 use App\Models\PlaylistViewer;
+use Filament\Actions\Action;
+use Filament\Actions\BulkAction;
 use Filament\Actions\BulkActionGroup;
+use Filament\Actions\DeleteAction;
 use Filament\Actions\DeleteBulkAction;
 use Filament\Actions\ViewAction;
 use Filament\Resources\Resource;
@@ -112,7 +115,21 @@ class PlaylistViewerResource extends Resource
                     ]),
             ])
             ->recordActions([
+                DeleteAction::make()
+                    ->disabled(fn (PlaylistViewer $record) => $record->is_admin)
+                    ->tooltip('Admin viewers cannot be deleted')
+                    ->button()->hiddenLabel()->size('sm'),
                 ViewAction::make()
+                    ->button()->hiddenLabel()->size('sm'),
+                Action::make('clear_watch_progress')
+                    ->label('Clear Watch Progress')
+                    ->icon('heroicon-o-eye-slash')
+                    ->color('warning')
+                    ->action(function (PlaylistViewer $record) {
+                        $record->watchProgress()->delete();
+                    })
+                    ->disabled(fn (PlaylistViewer $record) => $record->watchProgress()->count() === 0)
+                    ->requiresConfirmation(true)
                     ->button()->hiddenLabel()->size('sm'),
             ], position: RecordActionsPosition::BeforeCells)
             ->toolbarActions([
@@ -120,6 +137,15 @@ class PlaylistViewerResource extends Resource
                     DeleteBulkAction::make()
                         ->disabled(fn ($records) => $records->contains('is_admin', true))
                         ->tooltip('Admin viewers cannot be deleted'),
+                    BulkAction::make('clear_watch_progress')
+                        ->label('Clear Watch Progress')
+                        ->icon('heroicon-o-eye-slash')
+                        ->color('warning')
+                        ->action(function ($records) {
+                            $records->each(fn (PlaylistViewer $viewer) => $viewer->watchProgress()->delete());
+                        })
+                        ->requiresConfirmation(true)
+                        ->disabled(fn ($records) => $records->every(fn ($record) => $record->watchProgress()->count() === 0)),
                 ]),
             ]);
     }
