@@ -171,8 +171,6 @@ class NetworkResource extends Resource
                                             Action::make('uploadLogo')
                                                 ->label('Upload')
                                                 ->icon('heroicon-o-arrow-up-tray')
-                                                ->button()
-                                                ->color('primary')
                                                 ->schema([
                                                     FileUpload::make('logo_file')
                                                         ->label('Logo image')
