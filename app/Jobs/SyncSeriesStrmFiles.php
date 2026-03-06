@@ -192,7 +192,7 @@ class SyncSeriesStrmFiles implements ShouldQueue
         foreach (array_chunk($seriesIds, 10) as $chunkIds) {
             $seriesChunk = Series::query()
                 ->whereIn('id', $chunkIds)
-                ->with(['enabled_episodes', 'playlist', 'user', 'category'])
+                ->with(['enabled_episodes', 'playlist.user', 'user', 'category', 'streamFileSetting', 'category.streamFileSetting'])
                 ->get();
 
             foreach ($seriesChunk as $series) {
@@ -529,11 +529,27 @@ class SyncSeriesStrmFiles implements ShouldQueue
                 $tvdbId = $series->tvdb_id ?? $series->metadata['tvdb_id'] ?? $series->metadata['tvdb'] ?? null;
                 $tmdbId = $series->tmdb_id ?? $series->metadata['tmdb_id'] ?? $series->metadata['tmdb'] ?? null;
                 $imdbId = $series->imdb_id ?? $series->metadata['imdb_id'] ?? $series->metadata['imdb'] ?? null;
+
                 // Ensure IDs are scalar values (not arrays)
                 $tvdbId = is_scalar($tvdbId) ? $tvdbId : null;
                 $tmdbId = is_scalar($tmdbId) ? $tmdbId : null;
                 $imdbId = is_scalar($imdbId) ? $imdbId : null;
+
+                // Determine bracket style based on settings
                 $bracket = $tmdbIdFormat === 'curly' ? ['{', '}'] : ['[', ']'];
+
+                // When applying TMDB ID to the series folder and the series has no IDs,
+                // fall back to the first episode's TMDB ID
+                if ($applyTmdbToSeriesFolder && empty($tvdbId) && empty($tmdbId) && empty($imdbId)) {
+                    $firstEpisode = $episodes->first();
+                    if ($firstEpisode) {
+                        $epInfo = $firstEpisode->info ?? [];
+                        $fallbackTmdb = $firstEpisode->tmdb_id ?? $epInfo['tmdb_id'] ?? $epInfo['tmdb'] ?? null;
+                        $tmdbId = \is_scalar($fallbackTmdb) ? $fallbackTmdb : null;
+                    }
+                }
+
+                // Add TMDB/TVDB/IMDB ID to series folder name if enabled and available (TMDB only if tmdb_id_apply_to includes series)
                 if ($applyTmdbToSeriesFolder) {
                     if (! empty($tmdbId)) {
                         $seriesFolder .= " {$bracket[0]}tmdb-{$tmdbId}{$bracket[1]}";
@@ -542,10 +558,6 @@ class SyncSeriesStrmFiles implements ShouldQueue
                     } elseif (! empty($imdbId)) {
                         $seriesFolder .= " {$bracket[0]}imdb-{$imdbId}{$bracket[1]}";
                     }
-                } elseif (! empty($tvdbId)) {
-                    $seriesFolder .= " {$bracket[0]}tvdb-{$tvdbId}{$bracket[1]}";
-                } elseif (! empty($imdbId)) {
-                    $seriesFolder .= " {$bracket[0]}imdb-{$imdbId}{$bracket[1]}";
                 }
 
                 $cleanName = $cleanSpecialChars
@@ -576,8 +588,17 @@ class SyncSeriesStrmFiles implements ShouldQueue
             // Cache frequently accessed values to avoid repeated property lookups in the episode loop
             $seriesReleaseDate = $series->release_date;
             $seriesMetadata = $series->metadata ?? [];
-            $playlistUser = $playlist->user;
-            $playlistUuid = $playlist->uuid;
+            $playlistUser = $playlist?->user;
+            $playlistUuid = $playlist?->uuid;
+
+            if (! $playlistUser || ! $playlistUuid) {
+                Log::warning('STRM Sync: Series has no associated playlist user, skipping episode URL generation', [
+                    'series_id' => $series->id,
+                    'playlist_id' => $series->playlist_id,
+                ]);
+
+                return;
+            }
 
             // Loop through each episode
             foreach ($episodes as $ep) {
@@ -597,7 +618,7 @@ class SyncSeriesStrmFiles implements ShouldQueue
                 }
 
                 if ($applyTmdbToEpisodes) {
-                    $tmdbId = $seriesMetadata['tmdb_id'] ?? $ep->info['tmdb_id'] ?? null;
+                    $tmdbId = $ep->info['tmdb_id'] ?? $seriesMetadata['tmdb_id'] ?? null;
                     // Ensure ID is a scalar value (not an array)
                     $tmdbId = is_scalar($tmdbId) ? $tmdbId : null;
                     if (! empty($tmdbId)) {
@@ -652,7 +673,9 @@ class SyncSeriesStrmFiles implements ShouldQueue
                 ];
 
                 // Use intelligent sync with pre-loaded cache - handles create, rename, and URL updates
-                StrmFileMapping::syncFileWithCache(
+                // Capture the returned mapping so the NFO generator can use it for hash optimization,
+                // since $mappingCache was built before this sync and won't contain newly-created entries.
+                $episodeMapping = StrmFileMapping::syncFileWithCache(
                     $ep,
                     $syncLocation,
                     $filePath,
@@ -664,7 +687,6 @@ class SyncSeriesStrmFiles implements ShouldQueue
                 // Generate episode NFO file if enabled (pass mapping for hash optimization)
                 // Pass name filter settings for consistent title filtering
                 if ($nfoService) {
-                    $episodeMapping = $mappingCache[$ep->id] ?? null;
                     $nfoService->generateEpisodeNfo($ep, $series, $filePath, $episodeMapping, $nameFilterEnabled, $nameFilterPatterns);
                 }
             }

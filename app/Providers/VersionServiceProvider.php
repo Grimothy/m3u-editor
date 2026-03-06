@@ -71,7 +71,7 @@ class VersionServiceProvider extends ServiceProvider
         if ($remoteVersion === null || $refresh) {
             $remoteVersion = '';
             try {
-                $response = Http::get('https://raw.githubusercontent.com/sparkison/m3u-editor/refs/heads/'.self::$branch.'/config/dev.php');
+                $response = Http::get('https://raw.githubusercontent.com/m3ue/m3u-editor/refs/heads/'.self::$branch.'/config/dev.php');
                 if ($response->ok()) {
                     $results = $response->body();
                     switch (self::$branch) {
@@ -125,7 +125,7 @@ class VersionServiceProvider extends ServiceProvider
         ];
 
         try {
-            $response = Http::withHeaders($headers)->get('https://api.github.com/repos/sparkison/m3u-editor/releases', [
+            $response = Http::withHeaders($headers)->get('https://api.github.com/repos/m3ue/m3u-editor/releases', [
                 'per_page' => $perPage,
             ]);
             if ($response->ok()) {
