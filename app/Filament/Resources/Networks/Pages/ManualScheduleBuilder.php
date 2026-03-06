@@ -36,25 +36,6 @@ class ManualScheduleBuilder extends Page
     }
 
     /**
-     * Only show the Schedule Builder tab when schedule_type is manual.
-     */
-    public static function canAccess(array $parameters = []): bool
-    {
-        if (! parent::canAccess($parameters)) {
-            return false;
-        }
-
-        if (isset($parameters['record'])) {
-            $record = $parameters['record'];
-            if ($record instanceof Network) {
-                return $record->schedule_type === 'manual';
-            }
-        }
-
-        return true;
-    }
-
-    /**
      * Resolve a validated timezone from the browser, falling back to UTC.
      */
     protected function resolveTimezone(string $tz): DateTimeZone
@@ -238,8 +219,12 @@ class ManualScheduleBuilder extends Page
 
     /**
      * Get the media pool (network content + optionally all media).
+     * When showAll is true, results are paginated (50 movies + 50 episodes per page)
+     * and optionally filtered by a search term.
+     *
+     * @return array{items: array<int, array<string, mixed>>, has_more: bool}
      */
-    public function getMediaPool(bool $showAll = false): array
+    public function getMediaPool(bool $showAll = false, string $search = '', int $page = 1): array
     {
         $network = $this->getRecord();
 
@@ -249,41 +234,58 @@ class ManualScheduleBuilder extends Page
                 ->orderBy('sort_order')
                 ->get();
 
-            return $content->map(function (NetworkContent $item) {
-                return $this->formatMediaItem($item->contentable, $item->contentable_type);
-            })->filter()->values()->toArray();
+            return [
+                'items' => $content->map(function (NetworkContent $item) {
+                    return $this->formatMediaItem($item->contentable, $item->contentable_type);
+                })->filter()->values()->toArray(),
+                'has_more' => false,
+            ];
         }
 
         $playlistId = $network->mediaServerIntegration?->playlist_id;
         if (! $playlistId) {
-            return [];
+            return ['items' => [], 'has_more' => false];
         }
 
-        $items = collect();
+        $search = trim($search);
+        $perPage = 50;
+        $offset = ($page - 1) * $perPage;
 
         $movies = Channel::where('playlist_id', $playlistId)
             ->whereNotNull('movie_data')
+            ->when($search !== '', fn ($q) => $q->where('title', 'like', "%{$search}%"))
             ->orderBy('title')
-            ->limit(500)
+            ->offset($offset)
+            ->limit($perPage)
             ->get();
-
-        foreach ($movies as $movie) {
-            $items->push($this->formatMediaItem($movie, Channel::class));
-        }
 
         $episodes = Episode::whereHas('series', function ($q) use ($playlistId) {
             $q->where('playlist_id', $playlistId);
         })
             ->with('series')
+            ->when($search !== '', function ($q) use ($search) {
+                $q->where(function ($inner) use ($search) {
+                    $inner->where('title', 'like', "%{$search}%")
+                        ->orWhereHas('series', fn ($sq) => $sq->where('name', 'like', "%{$search}%"));
+                });
+            })
             ->orderBy('title')
-            ->limit(500)
+            ->offset($offset)
+            ->limit($perPage)
             ->get();
 
+        $items = collect();
+        foreach ($movies as $movie) {
+            $items->push($this->formatMediaItem($movie, Channel::class));
+        }
         foreach ($episodes as $episode) {
             $items->push($this->formatMediaItem($episode, Episode::class));
         }
 
-        return $items->filter()->values()->toArray();
+        return [
+            'items' => $items->filter()->sortBy('title')->values()->toArray(),
+            'has_more' => ($movies->count() === $perPage) || ($episodes->count() === $perPage),
+        ];
     }
 
     /**

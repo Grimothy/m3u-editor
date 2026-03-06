@@ -12,15 +12,16 @@ function scheduleBuilder(config) {
         // State
         loading: false,
         loadingPool: false,
+        loadingMorePool: false,
         currentDate: '',
         programmes: [],
         mediaPool: [],
+        mediaPage: 1,
+        mediaHasMore: false,
         mediaSearch: '',
         showAllMedia: false,
-        showCopyModal: false,
+        _mediaSearchTimer: null,
         copyTargetDate: '',
-        showClearModal: false,
-        showTemplateModal: false,
 
         // Now-playing status
         nowPlaying: null,
@@ -50,6 +51,14 @@ function scheduleBuilder(config) {
             this.loadNowPlaying();
 
             setInterval(() => this.loadNowPlaying(), 60000);
+
+            // When showAll is enabled, re-fetch server-side as search term changes.
+            // (Client-side filtering handles the non-showAll case.)
+            this.$watch('mediaSearch', () => {
+                if (!this.showAllMedia) { return; }
+                clearTimeout(this._mediaSearchTimer);
+                this._mediaSearchTimer = setTimeout(() => this.loadMediaPool(), 300);
+            });
         },
 
         // ── Date Helpers ──────────────────────────────────────────────
@@ -141,15 +150,35 @@ function scheduleBuilder(config) {
         },
 
         async loadMediaPool() {
+            this.mediaPage = 1;
+            this.mediaPool = [];
+            this.mediaHasMore = false;
             this.loadingPool = true;
             try {
-                const result = await this.$wire.getMediaPool(this.showAllMedia);
-                this.mediaPool = result || [];
+                const result = await this.$wire.getMediaPool(this.showAllMedia, this.mediaSearch.trim(), 1);
+                this.mediaPool = result.items || [];
+                this.mediaHasMore = result.has_more || false;
             } catch (err) {
                 console.error('Failed to load media pool:', err);
                 this.mediaPool = [];
             } finally {
                 this.loadingPool = false;
+            }
+        },
+
+        async loadMoreMedia() {
+            if (!this.mediaHasMore || this.loadingMorePool || this.loadingPool) { return; }
+            this.loadingMorePool = true;
+            try {
+                this.mediaPage++;
+                const result = await this.$wire.getMediaPool(this.showAllMedia, this.mediaSearch.trim(), this.mediaPage);
+                this.mediaPool = [...this.mediaPool, ...(result.items || [])];
+                this.mediaHasMore = result.has_more || false;
+            } catch (err) {
+                console.error('Failed to load more media:', err);
+                this.mediaPage--;
+            } finally {
+                this.loadingMorePool = false;
             }
         },
 
@@ -165,6 +194,10 @@ function scheduleBuilder(config) {
         // ── Filtered Media Pool ──────────────────────────────────────
 
         get filteredMediaPool() {
+            if (this.showAllMedia) {
+                // Server-side search already applied; just return the loaded pool.
+                return this.mediaPool;
+            }
             if (!this.mediaSearch.trim()) {
                 return this.mediaPool;
             }
@@ -457,11 +490,11 @@ function scheduleBuilder(config) {
         // ── Day Actions ──────────────────────────────────────────────
 
         clearCurrentDay() {
-            this.showClearModal = true;
+            window.dispatchEvent(new CustomEvent('open-modal', { detail: { id: 'schedule-clear-day' } }));
         },
 
         async confirmClearDay() {
-            this.showClearModal = false;
+            window.dispatchEvent(new CustomEvent('close-modal', { detail: { id: 'schedule-clear-day' } }));
             this.loading = true;
             try {
                 const result = await this.$wire.clearDay(this.currentDate, this.timezone);
@@ -479,15 +512,15 @@ function scheduleBuilder(config) {
         openCopyModal() {
             const firstOther = this.availableDates.find(d => d.value !== this.currentDate);
             this.copyTargetDate = firstOther ? firstOther.value : '';
-            this.showCopyModal = true;
+            window.dispatchEvent(new CustomEvent('open-modal', { detail: { id: 'schedule-copy-day' } }));
         },
 
         async copyDay() {
-            if (!this.copyTargetDate || this.copyTargetDate === this.currentDate) return;
+            if (!this.copyTargetDate || this.copyTargetDate === this.currentDate) { return; }
 
             const targetDate = this.copyTargetDate;
+            window.dispatchEvent(new CustomEvent('close-modal', { detail: { id: 'schedule-copy-day' } }));
             this.loading = true;
-            this.showCopyModal = false;
             try {
                 const result = await this.$wire.copyDaySchedule(this.currentDate, targetDate, this.timezone);
                 if (result.success) {
@@ -502,11 +535,11 @@ function scheduleBuilder(config) {
         },
 
         applyWeeklyTemplate() {
-            this.showTemplateModal = true;
+            window.dispatchEvent(new CustomEvent('open-modal', { detail: { id: 'schedule-apply-template' } }));
         },
 
         async confirmApplyTemplate() {
-            this.showTemplateModal = false;
+            window.dispatchEvent(new CustomEvent('close-modal', { detail: { id: 'schedule-apply-template' } }));
             this.loading = true;
             try {
                 await this.$wire.applyWeeklyTemplate();
