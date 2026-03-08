@@ -16,6 +16,7 @@ use App\Models\ChannelFailover;
 use App\Models\CustomPlaylist;
 use App\Models\Group;
 use App\Models\Playlist;
+use App\Services\EpgCacheService;
 use App\Services\LogoCacheService;
 use App\Services\PlaylistService;
 use App\Traits\HasUserFiltering;
@@ -734,8 +735,32 @@ class ChannelResource extends Resource
                 BulkAction::make('unmap')
                     ->label('Undo EPG Map')
                     ->action(function (Collection $records, array $data): void {
-                        Channel::whereIn('id', $records->pluck('id')->toArray())
+                        $channelIds = $records->pluck('id')->toArray();
+
+                        // Clear the EPG mapping
+                        Channel::whereIn('id', $channelIds)
                             ->update(['epg_channel_id' => null]);
+
+                        // Invalidate cached EPG XML for all playlists containing these channels
+                        // (regular, custom, and merged) so Xtream API clients receive updated
+                        // XMLTV data immediately instead of waiting for the cache TTL to expire
+                        $affectedPlaylists = collect();
+                        $channels = Channel::whereIn('id', $channelIds)
+                            ->with(['playlist.mergedPlaylists', 'customPlaylists'])
+                            ->get();
+                        foreach ($channels as $channel) {
+                            if ($channel->playlist) {
+                                $affectedPlaylists->push($channel->playlist);
+                                foreach ($channel->playlist->mergedPlaylists as $merged) {
+                                    $affectedPlaylists->push($merged);
+                                }
+                            }
+                            foreach ($channel->customPlaylists as $custom) {
+                                $affectedPlaylists->push($custom);
+                            }
+                        }
+                        $affectedPlaylists->unique(fn ($p) => $p->getTable().'-'.$p->id)
+                            ->each(fn ($p) => EpgCacheService::clearPlaylistEpgCacheFile($p));
                     })->after(function () {
                         Notification::make()
                             ->success()
