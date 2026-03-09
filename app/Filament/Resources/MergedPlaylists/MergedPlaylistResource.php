@@ -6,7 +6,6 @@ use App\Facades\PlaylistFacade;
 use App\Filament\Resources\MergedPlaylistResource\Pages;
 use App\Filament\Resources\MergedPlaylists\Pages\EditMergedPlaylist;
 use App\Filament\Resources\MergedPlaylists\Pages\ListMergedPlaylists;
-use App\Filament\Resources\MergedPlaylists\RelationManagers\NetworksRelationManager;
 use App\Filament\Resources\MergedPlaylists\RelationManagers\PlaylistsRelationManager;
 use App\Forms\Components\MediaFlowProxyUrl;
 use App\Forms\Components\PlaylistEpgUrl;
@@ -158,7 +157,6 @@ class MergedPlaylistResource extends Resource
     {
         return [
             PlaylistsRelationManager::class,
-            NetworksRelationManager::class,
         ];
     }
 
@@ -245,16 +243,6 @@ class MergedPlaylistResource extends Resource
                         ->type('number')
                         ->hidden(fn (Get $get): bool => ! $get('auto_channel_increment'))
                         ->required(),
-                    Toggle::make('include_networks_in_m3u')
-                        ->label('Include networks in M3U output')
-                        ->columnSpan(2)
-                        ->inline(false)
-                        ->hintIcon(
-                            'heroicon-m-question-mark-circle',
-                            tooltip: 'When enabled, the networks you\'ve attached to this playlist will be included in the M3U output.'
-                        )
-                        ->default(false)
-                        ->helperText('Include your selected networks (personal TV stations) in the M3U output. Attach networks to this playlist via the Networks tab.'),
                 ]),
             Section::make('EPG Output')
                 ->description('EPG output options')

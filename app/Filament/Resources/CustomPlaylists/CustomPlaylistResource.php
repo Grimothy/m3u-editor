@@ -10,7 +10,6 @@ use App\Filament\Resources\CustomPlaylists\Pages\ViewCustomPlaylist;
 use App\Filament\Resources\CustomPlaylists\RelationManagers\CategoriesRelationManager;
 use App\Filament\Resources\CustomPlaylists\RelationManagers\ChannelsRelationManager;
 use App\Filament\Resources\CustomPlaylists\RelationManagers\GroupsRelationManager;
-use App\Filament\Resources\CustomPlaylists\RelationManagers\NetworksRelationManager;
 use App\Filament\Resources\CustomPlaylists\RelationManagers\SeriesRelationManager;
 use App\Filament\Resources\CustomPlaylists\RelationManagers\VodRelationManager;
 use App\Models\CustomPlaylist;
@@ -191,7 +190,6 @@ class CustomPlaylistResource extends Resource
             ChannelsRelationManager::class,
             VodRelationManager::class,
             SeriesRelationManager::class,
-            NetworksRelationManager::class,
             GroupsRelationManager::class,
             CategoriesRelationManager::class,
         ];
@@ -281,16 +279,6 @@ class CustomPlaylistResource extends Resource
                         ->type('number')
                         ->hidden(fn (Get $get): bool => ! $get('auto_channel_increment'))
                         ->required(),
-                    Toggle::make('include_networks_in_m3u')
-                        ->label('Include networks in M3U output')
-                        ->columnSpan(2)
-                        ->inline(false)
-                        ->hintIcon(
-                            'heroicon-m-question-mark-circle',
-                            tooltip: 'When enabled, the networks you\'ve attached to this playlist will be included in the M3U output.'
-                        )
-                        ->default(false)
-                        ->helperText('Include your selected networks (personal TV stations) in the M3U output. Attach networks to this playlist via the Networks tab.'),
                 ]),
             Section::make('EPG Output')
                 ->description('EPG output options')

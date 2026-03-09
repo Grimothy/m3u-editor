@@ -73,17 +73,6 @@ class CustomPlaylist extends Model
         return $this->belongsToMany(Series::class, 'series_custom_playlist');
     }
 
-    public function networks(): BelongsToMany
-    {
-        return $this->belongsToMany(Network::class, 'network_custom_playlist');
-    }
-
-    public function enabled_networks(): BelongsToMany
-    {
-        return $this->networks()
-            ->where('enabled', true);
-    }
-
     public function enabled_series(): BelongsToMany
     {
         return $this->series()

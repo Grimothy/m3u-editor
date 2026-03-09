@@ -322,55 +322,6 @@ class PlaylistGenerateController extends Controller
                     }
                 }
 
-                // Include selected networks in M3U output for custom/merged playlists
-                if ($playlist->include_networks_in_m3u && method_exists($playlist, 'enabled_networks')) {
-                    $networks = $playlist->enabled_networks()->get();
-
-                    foreach ($networks as $network) {
-                        $channelNo = $network->channel_number ?? ++$channelNumber;
-                        if (! $network->channel_number) {
-                            $channelNumber = $channelNo;
-                        }
-
-                        $name = $network->name;
-                        $title = $network->name;
-                        $group = $network->effective_group_name;
-                        $icon = $network->logo ?? url('/placeholder.png');
-
-                        if ($logoProxyEnabled) {
-                            $icon = LogoProxyController::generateProxyUrl($icon);
-                        }
-
-                        // Use the network's stream URL (HLS if broadcasting, legacy otherwise)
-                        $url = $network->stream_url;
-
-                        // Get the TVG ID based on channel ID preference
-                        switch ($idChannelBy) {
-                            case PlaylistChannelId::ChannelId:
-                                $tvgId = 'network-'.$network->id;
-                                break;
-                            case PlaylistChannelId::Number:
-                                $tvgId = $channelNo;
-                                break;
-                            case PlaylistChannelId::Name:
-                            case PlaylistChannelId::Title:
-                                $tvgId = $name;
-                                break;
-                            default:
-                                $tvgId = 'network-'.$network->uuid;
-                                break;
-                        }
-
-                        // Make sure TVG ID only contains characters and numbers
-                        $tvgId = preg_replace(config('dev.tvgid.regex'), '', $tvgId);
-
-                        $extInf = '#EXTINF:-1';
-                        $extInf .= " tvg-chno=\"$channelNo\" tvg-id=\"$tvgId\" tvg-name=\"$name\" tvg-logo=\"$icon\" group-title=\"$group\"";
-                        echo "$extInf,".$title."\n";
-                        echo $url."\n";
-                    }
-                }
-
                 // Networks are now synced as actual Channel records with network_id
                 // They will be included automatically in the channel query above
             },

@@ -23,7 +23,6 @@ use App\Services\LogoCacheService;
 use App\Services\M3uProxyService;
 use Carbon\Carbon;
 use Illuminate\Database\Eloquent\Collection;
-use Illuminate\Database\Eloquent\Model;
 use Illuminate\Http\RedirectResponse;
 use Illuminate\Http\Request;
 use Illuminate\Http\Response;
@@ -673,45 +672,6 @@ class XtreamApiController extends Controller
                 }
             }
 
-            // Add networks as live streams if include_networks_in_m3u is enabled
-            if ($playlist->include_networks_in_m3u && method_exists($playlist, 'enabled_networks')) {
-                $networks = $playlist->enabled_networks()->get();
-                if ($networks->isNotEmpty()) {
-                    $networkCategoryMap = $this->buildNetworkCategoryMap($networks);
-
-                    foreach ($networks as $network) {
-                        $streamIcon = $network->logo ?: $baseUrl.'/placeholder.png';
-                        if ($playlist->enable_logo_proxy) {
-                            $streamIcon = LogoProxyController::generateProxyUrl($streamIcon);
-                        }
-
-                        $networkCategoryId = $networkCategoryMap[$network->effective_group_name] ?? 'networks';
-
-                        // Skip if filtering by category and this network doesn't match
-                        if ($categoryId && $categoryId !== 'all' && $categoryId !== $networkCategoryId) {
-                            continue;
-                        }
-
-                        $liveStreams[] = [
-                            'num' => $network->channel_number ?? $network->id,
-                            'name' => $network->name,
-                            'stream_type' => 'live',
-                            'stream_id' => 'network-'.$network->id,
-                            'stream_icon' => $streamIcon,
-                            'epg_channel_id' => 'network-'.$network->id,
-                            'added' => (string) $network->created_at->timestamp,
-                            'category_id' => $networkCategoryId,
-                            'category_ids' => [$networkCategoryId],
-                            'tv_archive' => 0,
-                            'tv_archive_duration' => 0,
-                            'custom_sid' => '',
-                            'thumbnail' => $streamIcon,
-                            'direct_source' => $network->stream_url,
-                        ];
-                    }
-                }
-            }
-
             return response()->json($liveStreams);
         } elseif ($action === 'get_vod_streams') {
             // Network playlists don't have VOD streams
@@ -1199,25 +1159,6 @@ class XtreamApiController extends Controller
                 }
             }
 
-            // Add network categories if include_networks_in_m3u is enabled
-            if ($playlist->include_networks_in_m3u && method_exists($playlist, 'enabled_networks')) {
-                $networks = $playlist->enabled_networks()->get();
-                if ($networks->isNotEmpty()) {
-                    $networkCategoryMap = $this->buildNetworkCategoryMap($networks);
-                    foreach ($networkCategoryMap as $name => $categoryId) {
-                        // Avoid duplicate category names
-                        $existingNames = array_column($liveCategories, 'category_name');
-                        if (! in_array($name, $existingNames)) {
-                            $liveCategories[] = [
-                                'category_id' => $categoryId,
-                                'category_name' => $name,
-                                'parent_id' => 0,
-                            ];
-                        }
-                    }
-                }
-            }
-
             // Add a default "All" category if no specific groups exist
             if (empty($liveCategories)) {
                 $liveCategories[] = [
@@ -1549,11 +1490,6 @@ class XtreamApiController extends Controller
                 return response()->json(['error' => 'stream_id parameter is required for get_short_epg action'], 400);
             }
 
-            // Handle attached network EPG (stream_id format: network-{id})
-            if (is_string($streamId) && str_starts_with($streamId, 'network-')) {
-                return $this->getAttachedNetworkShortEpg($playlist, $streamId, $limit);
-            }
-
             // Find the channel
             $channel = $playlist->channels()
                 ->where('enabled', true)
@@ -1642,11 +1578,6 @@ class XtreamApiController extends Controller
 
             if (! $streamId) {
                 return response()->json(['error' => 'stream_id parameter is required for get_simple_data_table action'], 400);
-            }
-
-            // Handle attached network EPG (stream_id format: network-{id})
-            if (is_string($streamId) && str_starts_with($streamId, 'network-')) {
-                return $this->getAttachedNetworkSimpleDataTable($playlist, $streamId);
             }
 
             // Find the channel

@@ -60,17 +60,6 @@ class MergedPlaylist extends Model
         return $this->belongsToMany(Playlist::class, 'merged_playlist_playlist');
     }
 
-    public function networks(): BelongsToMany
-    {
-        return $this->belongsToMany(Network::class, 'network_merged_playlist');
-    }
-
-    public function enabled_networks(): BelongsToMany
-    {
-        return $this->networks()
-            ->where('enabled', true);
-    }
-
     public function channels(): HasManyThrough
     {
         return $this->hasManyThrough(
