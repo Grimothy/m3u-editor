@@ -1254,6 +1254,59 @@ class M3uProxyService
     }
 
     /**
+     * Request or build a network stream URL from the external m3u-proxy server.
+     * Creates a tracked stream entry for the network broadcast, enabling client tracking
+     * in the proxy stream monitor.
+     *
+     * @param  Playlist|CustomPlaylist|MergedPlaylist|PlaylistAlias  $playlist  The playlist context
+     * @param  Network  $network  The network to stream
+     * @param  string|null  $username  Optional Xtream username for client tracking
+     * @return string The proxy URL for the network stream
+     *
+     * @throws Exception when base URL missing or API returns an error
+     */
+    public function getNetworkUrl($playlist, Network $network, ?string $username = null): string
+    {
+        if (empty($this->apiBaseUrl)) {
+            throw new Exception('M3U Proxy base URL is not configured');
+        }
+
+        // Get the network's HLS broadcast URL
+        $primaryUrl = $network->stream_url;
+
+        if (empty($primaryUrl)) {
+            throw new Exception('Network stream URL is empty');
+        }
+
+        // Build metadata for client tracking
+        $metadata = [
+            'id' => $network->id,
+            'type' => 'network',
+            'network_id' => $network->id,
+            'playlist_uuid' => $playlist->uuid,
+        ];
+
+        Log::debug('Creating tracked network stream', [
+            'network_id' => $network->id,
+            'network_name' => $network->name,
+            'playlist_uuid' => $playlist->uuid,
+            'primary_url' => $primaryUrl,
+        ]);
+
+        // Create a stream entry in the proxy for tracking
+        // Networks don't have failovers or custom headers/user-agent
+        $streamId = $this->createStream($primaryUrl, false, null, [], $metadata);
+
+        Log::debug('Network stream created', [
+            'stream_id' => $streamId,
+            'network_id' => $network->id,
+        ]);
+
+        // Networks use HLS format
+        return $this->buildProxyUrl($streamId, 'hls', $username);
+    }
+
+    /**
      * Trigger a failover for a specific stream on the external proxy.
      * Returns true on success.
      */

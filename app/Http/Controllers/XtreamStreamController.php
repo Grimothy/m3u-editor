@@ -10,6 +10,7 @@ use App\Models\Network;
 use App\Models\Playlist;
 use App\Models\PlaylistAlias;
 use App\Models\PlaylistAuth;
+use App\Services\M3uProxyService;
 use App\Services\PlaylistService;
 use App\Services\PlaylistUrlService;
 use Illuminate\Database\Eloquent\Model;
@@ -204,6 +205,11 @@ class XtreamStreamController extends Controller
      */
     public function handleLive(Request $request, string $username, string $password, string|int $streamId, ?string $format = null)
     {
+        // Check if this is a network stream request (format: network-{id})
+        if (is_string($streamId) && str_starts_with($streamId, 'network-')) {
+            return $this->handleAttachedNetworkStream($request, $username, $password, $streamId);
+        }
+
         // Validate that streamId is numeric to prevent database errors
         if (! is_numeric($streamId)) {
             return response()->json(['error' => 'Invalid stream ID'], 400);
@@ -395,5 +401,103 @@ class XtreamStreamController extends Controller
 
         // Redirect to the network's HLS playlist
         return Redirect::to($network->stream_url);
+    }
+
+    /**
+     * Handle network stream requests for networks attached to custom/merged playlists.
+     * Stream ID format: network-{id}
+     */
+    private function handleAttachedNetworkStream(Request $request, string $username, string $password, string $streamId)
+    {
+        // Extract the network ID from the stream ID (format: network-{id})
+        $networkId = (int) str_replace('network-', '', $streamId);
+
+        // Authenticate and find the playlist
+        $playlist = $this->findPlaylistByCredentials($username, $password);
+
+        if (! $playlist) {
+            return response()->json(['error' => 'Unauthorized'], 403);
+        }
+
+        // Check if the playlist supports attached networks
+        if (! method_exists($playlist, 'enabled_networks') || ! $playlist->include_networks_in_m3u) {
+            return response()->json(['error' => 'Networks not enabled for this playlist'], 403);
+        }
+
+        // Find the network in the playlist's attached networks
+        $network = $playlist->enabled_networks()
+            ->where('networks.id', $networkId)
+            ->first();
+
+        if (! $network) {
+            return response()->json(['error' => 'Network not found or not enabled'], 404);
+        }
+
+        // Check if network is broadcasting
+        if (! $network->broadcast_enabled) {
+            return response()->json(['error' => 'Network broadcast not enabled'], 503);
+        }
+
+        // If proxy is enabled on the playlist, use the proxy service for client tracking
+        if ($playlist->enable_proxy) {
+            // Add username to request for proxy traceability
+            $request->merge(['username' => $username]);
+
+            $url = app(M3uProxyService::class)->getNetworkUrl($playlist, $network, $username);
+
+            return Redirect::to($url);
+        }
+
+        // Redirect directly to the network's HLS playlist (no client tracking)
+        return Redirect::to($network->stream_url);
+    }
+
+    /**
+     * Find a playlist by username and password credentials.
+     */
+    private function findPlaylistByCredentials(string $username, string $password): ?Model
+    {
+        // Method 1: Try PlaylistAuth credentials
+        $playlistAuth = PlaylistAuth::where('username', $username)
+            ->where('password', $password)
+            ->where('enabled', true)
+            ->first();
+
+        if ($playlistAuth && ! $playlistAuth->isExpired()) {
+            return $playlistAuth->getAssignedModel();
+        }
+
+        // Method 2: Try to find playlist by UUID (password parameter)
+        $playlistTypes = [
+            Playlist::class,
+            MergedPlaylist::class,
+            CustomPlaylist::class,
+        ];
+
+        foreach ($playlistTypes as $type) {
+            $playlist = $type::with(['user'])->where('uuid', $password)->first();
+            if ($playlist && $playlist->user->name === $username) {
+                return $playlist;
+            }
+        }
+
+        // Method 3: Try PlaylistAlias
+        $alias = PlaylistAlias::with(['user'])
+            ->where('uuid', $password)
+            ->orWhere(fn ($query) => $query->where([
+                ['username', $username],
+                ['password', $password],
+            ]))->first();
+
+        if ($alias) {
+            if ($alias->username === $username && $alias->password === $password) {
+                return $alias;
+            }
+            if ($alias->user->name === $username) {
+                return $alias;
+            }
+        }
+
+        return null;
     }
 }
