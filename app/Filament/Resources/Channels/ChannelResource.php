@@ -734,21 +734,18 @@ class ChannelResource extends Resource
                     ->modalSubmitActionLabel('Map now'),
                 BulkAction::make('unmap')
                     ->label('Undo EPG Map')
-                    ->action(function (Collection $records, array $data): void {
-                        $channelIds = $records->pluck('id')->toArray();
-
+                    ->action(function (Collection $records): void {
                         // Clear the EPG mapping
-                        Channel::whereIn('id', $channelIds)
+                        Channel::whereIn('id', $records->pluck('id'))
                             ->update(['epg_channel_id' => null]);
 
                         // Invalidate cached EPG XML for all playlists containing these channels
                         // (regular, custom, and merged) so Xtream API clients receive updated
                         // XMLTV data immediately instead of waiting for the cache TTL to expire
+                        $records->loadMissing(['playlist.mergedPlaylists', 'customPlaylists']);
+
                         $affectedPlaylists = collect();
-                        $channels = Channel::whereIn('id', $channelIds)
-                            ->with(['playlist.mergedPlaylists', 'customPlaylists'])
-                            ->get();
-                        foreach ($channels as $channel) {
+                        foreach ($records as $channel) {
                             if ($channel->playlist) {
                                 $affectedPlaylists->push($channel->playlist);
                                 foreach ($channel->playlist->mergedPlaylists as $merged) {
