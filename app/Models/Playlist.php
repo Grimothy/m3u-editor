@@ -96,6 +96,21 @@ class Playlist extends Model
         return $this->processing['series_processing'] ?? false;
     }
 
+    /**
+     * Returns true if this playlist is backed by a media server integration
+     * (Emby, Jellyfin, Plex, LocalMedia). Standard playlists (m3u, xtream, local, null)
+     * return false.
+     */
+    public function isMediaServerPlaylist(): bool
+    {
+        return in_array($this->source_type, [
+            PlaylistSourceType::Emby,
+            PlaylistSourceType::Jellyfin,
+            PlaylistSourceType::Plex,
+            PlaylistSourceType::LocalMedia,
+        ]);
+    }
+
     public function user(): BelongsTo
     {
         return $this->belongsTo(User::class);
@@ -107,14 +122,6 @@ class Playlist extends Model
     public function mediaServerIntegration(): \Illuminate\Database\Eloquent\Relations\HasOne
     {
         return $this->hasOne(MediaServerIntegration::class);
-    }
-
-    /**
-     * Check if this playlist belongs to a media server integration.
-     */
-    public function isMediaServerPlaylist(): bool
-    {
-        return $this->mediaServerIntegration()->exists();
     }
 
     /**
