@@ -830,11 +830,11 @@ class ProcessM3uImport implements ShouldQueue
                     ];
 
                     // Parse the M3U file
-                    // NOTE: max line length is set to 2048 to prevent memory issues
+                    // NOTE: max line length is set to 65536 to prevent memory issues
                     $this->m3uParser = new M3uParser;
                     $this->m3uParser->addDefaultTags();
                     $count = 0;
-                    foreach ($this->m3uParser->parseFile($filePath, max_length: 2048) as $item) {
+                    foreach ($this->m3uParser->parseFile($filePath, max_length: 65536) as $item) {
                         // Increment channel number
                         $channelNo++;
 
