@@ -55,62 +55,10 @@
                     target="_blank">
                     Releases
                 </x-filament::button>
-                <x-filament::modal width="4xl">
-                    <x-slot name="trigger">
-                        <x-filament::button class="mt-2" color="gray" icon="heroicon-o-list-bullet">
-                            Release logs
-                        </x-filament::button>
-                    </x-slot>
-
-                    <div class="w-full min-w-0">
-                        @if (!empty($releases))
-                            <ul class="space-y-3 min-w-0">
-                                @foreach ($releases as $release)
-                                    <li
-                                        class="p-3 rounded-lg bg-gray-50 dark:bg-gray-900 border border-gray-200 dark:border-gray-700 min-w-0">
-                                        <div class="flex items-start justify-between gap-4">
-                                            <div>
-                                                <div class="flex items-center gap-2">
-                                                    <a href="{{ $release['url'] ?? '#' }}" target="_blank"
-                                                        rel="noopener noreferrer" class="font-semibold text-sm">
-                                                        {{ $release['name'] }}
-                                                    </a>
-                                                    @if (!empty($release['is_current']))
-                                                        <span
-                                                            class="ml-2 inline-flex items-center px-2 py-0.5 rounded text-xs bg-green-100 text-green-800">
-                                                            Current
-                                                        </span>
-                                                    @endif
-                                                </div>
-                                                @if (!empty($release['published_at']))
-                                                    <div class="text-xs text-gray-500 mt-1">
-                                                        Released
-                                                        {{ \Illuminate\Support\Carbon::parse($release['published_at'])->diffForHumans() }}
-                                                    </div>
-                                                @endif
-                                            </div>
-                                            <div class="text-right text-xs">
-                                                <x-filament::button href="{{ $release['url'] ?? '#' }}" tag="a"
-                                                    icon="heroicon-s-arrow-top-right-on-square" size="sm" target="_blank">
-                                                    View on GitHub
-                                                </x-filament::button>
-                                            </div>
-                                        </div>
-
-                                        @if (!empty($release['body']))
-                                            <div
-                                                class="mt-2 text-sm prose prose-sm dark:prose-invert font-mono release-body-content">
-                                                {!! $this->formatMarkdown($release['body']) !!}
-                                            </div>
-                                        @endif
-                                    </li>
-                                @endforeach
-                            </ul>
-                        @else
-                            <div class="text-sm text-gray-500">No release information available.</div>
-                        @endif
-                    </div>
-                </x-filament::modal>
+                <x-filament::button class="mt-2" color="gray" icon="heroicon-o-list-bullet" tag="a"
+                    href="{{ \App\Filament\Pages\ReleaseLogs::getUrl() }}">
+                    Release logs
+                </x-filament::button>
             </div>
         </div>
     </x-filament::section>
