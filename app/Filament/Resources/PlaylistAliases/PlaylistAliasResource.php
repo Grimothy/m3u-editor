@@ -17,6 +17,7 @@ use Carbon\Carbon;
 use Exception;
 use Filament\Actions;
 use Filament\Forms;
+use Filament\Notifications\Notification;
 use Filament\Resources\Resource;
 use Filament\Schemas;
 use Filament\Schemas\Components\Grid;
@@ -390,7 +391,30 @@ class PlaylistAliasResource extends Resource
                     Forms\Components\TextInput::make('server_timezone')
                         ->label('Provider Timezone')
                         ->helperText('The portal/provider timezone (DST-aware). Needed to correctly use timeshift functionality.')
-                        ->placeholder('Etc/UTC'),
+                        ->placeholder('Etc/UTC')
+                        ->hintAction(
+                            Actions\Action::make('get_provider_value')
+                                ->label('Get from playlist status')
+                                ->icon('heroicon-o-clock')
+                                ->action(action: function ($record, Set $set) {
+                                    $value = $record->getEffectivePlaylist()?->xtream_status['server_info']['timezone'] ?? null;
+                                    if ($value) {
+                                        $set('server_timezone', $value);
+                                        Notification::make()
+                                            ->title('Current Provider Timezone')
+                                            ->body("Provider timezone retrieved from playlist status: {$value}. Press save changes to apply this value, or you can manually enter a different timezone if needed.")
+                                            ->success()
+                                            ->send();
+
+                                        return;
+                                    }
+                                    Notification::make()
+                                        ->title('Provider Timezone Not Found')
+                                        ->body('Provider timezone not found in playlist status. Make sure the playlist is connected and has synced at least once to retrieve this information.')
+                                        ->danger()
+                                        ->send();
+                                })->hidden(fn ($record) => $record->playlist_id === null)
+                        ),
 
                     Grid::make()
                         ->columns(1)
