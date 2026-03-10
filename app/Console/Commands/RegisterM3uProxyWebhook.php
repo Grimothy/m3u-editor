@@ -44,10 +44,10 @@ class RegisterM3uProxyWebhook extends Command
         $this->info("Webhook URL: {$webhookUrl}");
 
         try {
-            $publicUrl = $service->getPublicUrl();
+            $apiBaseUrl = $service->getApiBaseUrl();
 
             // Check if webhook already exists
-            $listEndpoint = $publicUrl.'/webhooks';
+            $listEndpoint = $apiBaseUrl.'/webhooks';
             $listResponse = Http::timeout(5)->acceptJson()
                 ->withHeaders([
                     'X-API-Token' => $service->getApiToken(),
