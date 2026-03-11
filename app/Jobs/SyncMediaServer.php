@@ -52,6 +52,12 @@ class SyncMediaServer implements ShouldBeUnique, ShouldQueue
         'episodes_synced' => 0,
         'groups_created' => 0,
         'categories_created' => 0,
+        'movies_removed' => 0,
+        'series_removed' => 0,
+        'episodes_removed' => 0,
+        'seasons_removed' => 0,
+        'groups_removed' => 0,
+        'categories_removed' => 0,
         'errors' => [],
     ];
 
@@ -143,6 +149,9 @@ class SyncMediaServer implements ShouldBeUnique, ShouldQueue
             if ($integration->import_series) {
                 $this->syncSeries($integration, $playlist, $service);
             }
+
+            // Remove stale records no longer present on the media server
+            $this->cleanupStaleRecords($integration, $playlist);
 
             // Update integration with sync stats
             $integration->update([
@@ -466,8 +475,11 @@ class SyncMediaServer implements ShouldBeUnique, ShouldQueue
                 'user_id' => $playlist->user_id,
                 'playlist_id' => $playlist->id,
                 'type' => 'vod',
+                'import_batch_no' => $this->batchNo,
             ]);
             $this->stats['groups_created']++;
+        } else {
+            $group->update(['import_batch_no' => $this->batchNo]);
         }
 
         return $group;
@@ -776,11 +788,88 @@ class SyncMediaServer implements ShouldBeUnique, ShouldQueue
                 'name_internal' => $genreName,
                 'user_id' => $playlist->user_id,
                 'playlist_id' => $playlist->id,
+                'import_batch_no' => $this->batchNo,
             ]);
             $this->stats['categories_created']++;
+        } else {
+            $category->update(['import_batch_no' => $this->batchNo]);
         }
 
         return $category;
+    }
+
+    /**
+     * Remove stale records that were not touched during this sync.
+     *
+     * Any record with an import_batch_no different from the current batch
+     * was not present on the media server and should be removed.
+     */
+    protected function cleanupStaleRecords(
+        MediaServerIntegration $integration,
+        Playlist $playlist
+    ): void {
+        // Remove stale episodes (must be deleted before seasons/series to avoid FK issues)
+        if ($integration->import_series) {
+            $staleEpisodes = Episode::where('playlist_id', $playlist->id)
+                ->where('import_batch_no', '!=', $this->batchNo);
+            $this->stats['episodes_removed'] = $staleEpisodes->count();
+            $staleEpisodes->delete();
+
+            // Remove stale seasons
+            $staleSeasons = Season::where('playlist_id', $playlist->id)
+                ->where('import_batch_no', '!=', $this->batchNo);
+            $this->stats['seasons_removed'] = $staleSeasons->count();
+            $staleSeasons->delete();
+
+            // Remove stale series
+            $staleSeries = Series::where('playlist_id', $playlist->id)
+                ->where('import_batch_no', '!=', $this->batchNo);
+            $this->stats['series_removed'] = $staleSeries->count();
+            $staleSeries->delete();
+
+            // Remove stale categories (only those with no remaining series)
+            $staleCategories = Category::where('playlist_id', $playlist->id)
+                ->where('import_batch_no', '!=', $this->batchNo)
+                ->whereDoesntHave('series');
+            $this->stats['categories_removed'] = $staleCategories->count();
+            $staleCategories->delete();
+        }
+
+        // Remove stale channels (movies)
+        if ($integration->import_movies) {
+            $staleChannels = Channel::where('playlist_id', $playlist->id)
+                ->where('is_custom', false)
+                ->where('import_batch_no', '!=', $this->batchNo);
+            $this->stats['movies_removed'] = $staleChannels->count();
+            $staleChannels->delete();
+
+            // Remove stale groups (only those with no remaining channels)
+            $staleGroups = Group::where('playlist_id', $playlist->id)
+                ->where('custom', false)
+                ->where('import_batch_no', '!=', $this->batchNo)
+                ->whereDoesntHave('channels');
+            $this->stats['groups_removed'] = $staleGroups->count();
+            $staleGroups->delete();
+        }
+
+        $totalRemoved = $this->stats['movies_removed']
+            + $this->stats['series_removed']
+            + $this->stats['episodes_removed']
+            + $this->stats['seasons_removed']
+            + $this->stats['groups_removed']
+            + $this->stats['categories_removed'];
+
+        if ($totalRemoved > 0) {
+            Log::info('SyncMediaServer: Cleaned up stale records', [
+                'integration_id' => $integration->id,
+                'movies_removed' => $this->stats['movies_removed'],
+                'series_removed' => $this->stats['series_removed'],
+                'episodes_removed' => $this->stats['episodes_removed'],
+                'seasons_removed' => $this->stats['seasons_removed'],
+                'groups_removed' => $this->stats['groups_removed'],
+                'categories_removed' => $this->stats['categories_removed'],
+            ]);
+        }
     }
 
     /**

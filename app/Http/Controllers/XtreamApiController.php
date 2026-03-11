@@ -2327,6 +2327,113 @@ class XtreamApiController extends Controller
     }
 
     /**
+     * Get short EPG for an attached network on custom/merged playlists.
+     * Stream ID format: network-{id}
+     */
+    private function getAttachedNetworkShortEpg(Model $playlist, string $streamId, int $limit = 4): \Illuminate\Http\JsonResponse
+    {
+        // Extract network ID from stream_id (format: network-{id})
+        $networkId = (int) str_replace('network-', '', $streamId);
+
+        // Check if playlist supports attached networks
+        if (! method_exists($playlist, 'enabled_networks') || ! $playlist->include_networks_in_m3u) {
+            return response()->json(['epg_listings' => []]);
+        }
+
+        $network = $playlist->enabled_networks()
+            ->where('networks.id', $networkId)
+            ->first();
+
+        if (! $network) {
+            return response()->json(['epg_listings' => []]);
+        }
+
+        $now = Carbon::now();
+        $programmes = $network->programmes()
+            ->where('end_time', '>', $now)
+            ->orderBy('start_time')
+            ->limit($limit)
+            ->get();
+
+        $epgListings = [];
+        foreach ($programmes as $programme) {
+            $isCurrentProgramme = $programme->start_time->lte($now) && $programme->end_time->gt($now);
+
+            $epgListings[] = [
+                'id' => (string) $programme->id,
+                'epg_id' => (string) $network->id,
+                'title' => base64_encode($programme->title),
+                'lang' => 'en',
+                'start' => $programme->start_time->format('Y-m-d H:i:s'),
+                'end' => $programme->end_time->format('Y-m-d H:i:s'),
+                'description' => base64_encode($programme->description ?? ''),
+                'channel_id' => 'network-'.$network->id,
+                'start_timestamp' => (string) $programme->start_time->timestamp,
+                'stop_timestamp' => (string) $programme->end_time->timestamp,
+                'now_playing' => $isCurrentProgramme ? 1 : 0,
+                'has_archive' => 0,
+            ];
+        }
+
+        return response()->json(['epg_listings' => $epgListings]);
+    }
+
+    /**
+     * Get simple data table EPG for an attached network on custom/merged playlists.
+     * Stream ID format: network-{id}
+     */
+    private function getAttachedNetworkSimpleDataTable(Model $playlist, string $streamId): \Illuminate\Http\JsonResponse
+    {
+        // Extract network ID from stream_id (format: network-{id})
+        $networkId = (int) str_replace('network-', '', $streamId);
+
+        // Check if playlist supports attached networks
+        if (! method_exists($playlist, 'enabled_networks') || ! $playlist->include_networks_in_m3u) {
+            return response()->json(['epg_listings' => []]);
+        }
+
+        $network = $playlist->enabled_networks()
+            ->where('networks.id', $networkId)
+            ->first();
+
+        if (! $network) {
+            return response()->json(['epg_listings' => []]);
+        }
+
+        $today = Carbon::now()->startOfDay();
+        $tomorrow = $today->copy()->addDay();
+
+        $programmes = $network->programmes()
+            ->where('start_time', '>=', $today)
+            ->where('start_time', '<', $tomorrow)
+            ->orderBy('start_time')
+            ->get();
+
+        $now = Carbon::now();
+        $epgListings = [];
+        foreach ($programmes as $programme) {
+            $isCurrentProgramme = $programme->start_time->lte($now) && $programme->end_time->gt($now);
+
+            $epgListings[] = [
+                'id' => (string) $programme->id,
+                'epg_id' => (string) $network->id,
+                'title' => base64_encode($programme->title),
+                'lang' => 'en',
+                'start' => $programme->start_time->format('Y-m-d H:i:s'),
+                'end' => $programme->end_time->format('Y-m-d H:i:s'),
+                'description' => base64_encode($programme->description ?? ''),
+                'channel_id' => 'network-'.$network->id,
+                'start_timestamp' => (string) $programme->start_time->timestamp,
+                'stop_timestamp' => (string) $programme->end_time->timestamp,
+                'now_playing' => $isCurrentProgramme ? 1 : 0,
+                'has_archive' => 0,
+            ];
+        }
+
+        return response()->json(['epg_listings' => $epgListings]);
+    }
+
+    /**
      * Authenticate the user based on the provided credentials.
      *
      * This method checks for PlaylistAuth credentials first, then falls back to
