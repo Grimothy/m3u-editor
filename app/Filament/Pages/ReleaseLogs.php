@@ -4,6 +4,7 @@ namespace App\Filament\Pages;
 
 use App\Facades\GitInfo;
 use App\Providers\VersionServiceProvider;
+use Filament\Actions\Action;
 use Filament\Pages\Page;
 use Illuminate\Support\Str;
 
@@ -17,8 +18,6 @@ class ReleaseLogs extends Page
 
     protected static ?int $navigationSort = 3;
 
-    protected static string|\BackedEnum|null $navigationIcon = 'heroicon-o-list-bullet';
-
     public function getView(): string
     {
         return 'filament.pages.release-logs';
@@ -31,6 +30,19 @@ class ReleaseLogs extends Page
     public string $currentVersion = '';
 
     public string $currentBranch = '';
+
+    public function getHeaderActions(): array
+    {
+        return [
+            Action::make('refresh')
+                ->label('Refresh')
+                ->icon('heroicon-o-arrow-path')
+                ->action(function () {
+                    VersionServiceProvider::fetchReleases(50, refresh: true);
+                    $this->loadReleases();
+                }),
+        ];
+    }
 
     public function mount(): void
     {
