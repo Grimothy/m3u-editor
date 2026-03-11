@@ -461,6 +461,78 @@ class Preferences extends SettingsPage
                                                     ->helperText('Enable to allow new stream requests to automatically stop the oldest stream when a playlist reaches its connection limit. Disabled by default.'),
                                             ]),
 
+                                        Fieldset::make('Silence detection settings')
+                                            ->schema([
+                                                Toggle::make('enable_silence_detection')
+                                                    ->label('Enable silence detection')
+                                                    ->columnSpanFull()
+                                                    ->live()
+                                                    ->hintAction(
+                                                        Action::make('learn_more_strict_live_ts')
+                                                            ->label('Learn More')
+                                                            ->icon('heroicon-o-arrow-top-right-on-square')
+                                                            ->iconPosition('after')
+                                                            ->size('sm')
+                                                            ->url('https://m3ue.sparkison.dev/docs/proxy/silence-detection')
+                                                            ->openUrlInNewTab(true)
+                                                    )
+                                                    ->hintIcon(
+                                                        'heroicon-m-question-mark-circle',
+                                                        tooltip: 'When enabled, the proxy will monitor live streams for silent audio. If silence is detected for the configured number of consecutive checks, a failover is triggered.'
+                                                    )
+                                                    ->helperText('Automatically trigger failover when a stream\'s audio goes silent. Disabled by default.'),
+
+                                                TextInput::make('silence_threshold_db')
+                                                    ->label('Silence threshold (dB)')
+                                                    ->hidden(fn (Get $get) => ! (bool) $get('enable_silence_detection'))
+                                                    ->numeric()
+                                                    ->default(-50.0)
+                                                    ->step(0.1)
+                                                    ->suffix('dB')
+                                                    ->hintIcon(
+                                                        'heroicon-m-question-mark-circle',
+                                                        tooltip: 'Audio level below which audio is considered silent. -50 dB is a good default; raise to -40 dB for stricter detection.'
+                                                    )
+                                                    ->helperText('Audio level (in dB) below which audio is considered silent. Default: -50 dB.'),
+
+                                                TextInput::make('silence_duration')
+                                                    ->label('Silence duration (seconds)')
+                                                    ->hidden(fn (Get $get) => ! (bool) $get('enable_silence_detection'))
+                                                    ->numeric()
+                                                    ->default(3.0)
+                                                    ->step(0.5)
+                                                    ->suffix('s')
+                                                    ->helperText('Minimum continuous silence within a check window to count as a silent check. Default: 3 seconds.'),
+
+                                                TextInput::make('silence_check_interval')
+                                                    ->label('Check interval (seconds)')
+                                                    ->hidden(fn (Get $get) => ! (bool) $get('enable_silence_detection'))
+                                                    ->numeric()
+                                                    ->default(10.0)
+                                                    ->step(1)
+                                                    ->suffix('s')
+                                                    ->helperText('How often to run silence analysis. Each window buffers stream data and analyses it with ffmpeg. Default: 10 seconds.'),
+
+                                                TextInput::make('silence_failover_threshold')
+                                                    ->label('Consecutive silent checks before failover')
+                                                    ->hidden(fn (Get $get) => ! (bool) $get('enable_silence_detection'))
+                                                    ->numeric()
+                                                    ->integer()
+                                                    ->default(3)
+                                                    ->step(1)
+                                                    ->minValue(1)
+                                                    ->helperText('Number of consecutive silent checks required before triggering failover. Prevents failover on brief silent moments. Default: 3.'),
+
+                                                TextInput::make('silence_monitoring_grace_period')
+                                                    ->label('Monitoring grace period (seconds)')
+                                                    ->hidden(fn (Get $get) => ! (bool) $get('enable_silence_detection'))
+                                                    ->numeric()
+                                                    ->default(15.0)
+                                                    ->step(1)
+                                                    ->suffix('s')
+                                                    ->helperText('Delay after stream start before silence monitoring begins. Allows for initial buffering and audio decoder startup. Default: 15 seconds.'),
+                                            ]),
+
                                         Fieldset::make('In-app player transcoding settings')
                                             ->schema([
                                                 Select::make('default_stream_profile_id')

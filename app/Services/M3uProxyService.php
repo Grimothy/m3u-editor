@@ -1583,6 +1583,20 @@ class M3uProxyService
                 unset($metadata['use_sticky_session']);
             }
 
+            // Apply global silence detection settings from GeneralSettings
+            try {
+                $generalSettings = app(GeneralSettings::class);
+                if ($generalSettings->enable_silence_detection) {
+                    $payload['enable_silence_detection'] = true;
+                    $payload['silence_threshold_db'] = $generalSettings->silence_threshold_db ?? -50.0;
+                    $payload['silence_duration'] = $generalSettings->silence_duration ?? 3.0;
+                    $payload['silence_check_interval'] = $generalSettings->silence_check_interval ?? 10.0;
+                    $payload['silence_failover_threshold'] = $generalSettings->silence_failover_threshold ?? 3;
+                    $payload['silence_monitoring_grace_period'] = $generalSettings->silence_monitoring_grace_period ?? 15.0;
+                }
+            } catch (Exception $e) {
+            }
+
             // If using failovers, provide the callback URL for smart failover handling, or list of URLs
             if ($failovers) {
                 if (is_array($failovers)) {
@@ -1685,6 +1699,20 @@ class M3uProxyService
             if ($metadata['use_sticky_session'] ?? false) {
                 $payload['use_sticky_session'] = true;
                 unset($metadata['use_sticky_session']);
+            }
+
+            // Apply global silence detection settings from GeneralSettings
+            try {
+                $generalSettings = app(GeneralSettings::class);
+                if ($generalSettings->enable_silence_detection) {
+                    $payload['enable_silence_detection'] = true;
+                    $payload['silence_threshold_db'] = $generalSettings->silence_threshold_db ?? -50.0;
+                    $payload['silence_duration'] = $generalSettings->silence_duration ?? 3.0;
+                    $payload['silence_check_interval'] = $generalSettings->silence_check_interval ?? 10.0;
+                    $payload['silence_failover_threshold'] = $generalSettings->silence_failover_threshold ?? 3;
+                    $payload['silence_monitoring_grace_period'] = $generalSettings->silence_monitoring_grace_period ?? 15.0;
+                }
+            } catch (Exception $e) {
             }
 
             // If using failovers, provide the callback URL for smart failover handling, or list of URLs
