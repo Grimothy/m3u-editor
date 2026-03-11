@@ -251,6 +251,168 @@ it('clears broadcast_requested when proxy returns a permanent error', function (
 
 /*
 |--------------------------------------------------------------------------
+| Boot grace period tests
+|--------------------------------------------------------------------------
+*/
+
+it('performBootRecovery stamps broadcast_boot_recovery_until approximately 2 minutes in the future', function () {
+    $network = Network::factory()->create([
+        'enabled' => true,
+        'broadcast_enabled' => true,
+        'broadcast_requested' => false,
+        'broadcast_pid' => null,
+        'broadcast_started_at' => null,
+    ]);
+
+    $before = now()->addMinutes(2)->subSeconds(5);
+    $after = now()->addMinutes(2)->addSeconds(5);
+
+    $service = app(NetworkBroadcastService::class);
+    $service->performBootRecovery($network);
+
+    $gracePeriodUntil = $network->fresh()->broadcast_boot_recovery_until;
+
+    expect($gracePeriodUntil)->not->toBeNull();
+    expect($gracePeriodUntil->between($before, $after))->toBeTrue();
+});
+
+it('missing programme during grace period returns false and preserves broadcast_requested', function () {
+    $network = Network::factory()->create([
+        'enabled' => true,
+        'broadcast_enabled' => true,
+        'broadcast_requested' => true,
+        'broadcast_pid' => null,
+        'broadcast_started_at' => null,
+        'broadcast_boot_recovery_until' => now()->addMinutes(2),
+    ]);
+
+    // No programme created — simulates slow storage not yet loaded
+
+    $service = Mockery::mock(NetworkBroadcastService::class)->makePartial();
+    $service->shouldAllowMockingProtectedMethods();
+    $service->shouldReceive('isProcessRunning')->andReturn(false);
+
+    $result = $service->start($network);
+
+    expect($result)->toBeFalse();
+
+    $network->refresh();
+    expect($network->broadcast_requested)->toBeTrue();
+    expect($network->broadcast_error)->toBe('Waiting for schedule data (boot recovery)...');
+});
+
+it('missing stream URL during grace period returns false and preserves broadcast_requested', function () {
+    $network = Network::factory()->create([
+        'enabled' => true,
+        'broadcast_enabled' => true,
+        'broadcast_requested' => true,
+        'broadcast_pid' => null,
+        'broadcast_started_at' => null,
+        'broadcast_boot_recovery_until' => now()->addMinutes(2),
+    ]);
+
+    NetworkProgramme::factory()->create([
+        'network_id' => $network->id,
+        'start_time' => now()->subMinutes(5),
+        'end_time' => now()->addMinutes(55),
+        'duration_seconds' => 3600,
+    ]);
+
+    $service = Mockery::mock(NetworkBroadcastService::class)->makePartial();
+    $service->shouldAllowMockingProtectedMethods();
+    $service->shouldReceive('isProcessRunning')->andReturn(false);
+    $service->shouldReceive('getStreamUrl')->andReturn(null);
+
+    $result = $service->start($network);
+
+    expect($result)->toBeFalse();
+
+    $network->refresh();
+    expect($network->broadcast_requested)->toBeTrue();
+    expect($network->broadcast_error)->toBe('Waiting for stream URL (boot recovery)...');
+});
+
+it('missing programme after grace period expires disables broadcast_requested', function () {
+    $network = Network::factory()->create([
+        'enabled' => true,
+        'broadcast_enabled' => true,
+        'broadcast_requested' => true,
+        'broadcast_pid' => null,
+        'broadcast_started_at' => null,
+        'broadcast_boot_recovery_until' => now()->subSeconds(1),
+    ]);
+
+    // No programme created
+
+    $service = Mockery::mock(NetworkBroadcastService::class)->makePartial();
+    $service->shouldAllowMockingProtectedMethods();
+    $service->shouldReceive('isProcessRunning')->andReturn(false);
+
+    $service->start($network);
+
+    $network->refresh();
+    expect($network->broadcast_requested)->toBeFalse();
+});
+
+it('missing stream URL after grace period expires disables broadcast_requested', function () {
+    $network = Network::factory()->create([
+        'enabled' => true,
+        'broadcast_enabled' => true,
+        'broadcast_requested' => true,
+        'broadcast_pid' => null,
+        'broadcast_started_at' => null,
+        'broadcast_boot_recovery_until' => now()->subSeconds(1),
+    ]);
+
+    NetworkProgramme::factory()->create([
+        'network_id' => $network->id,
+        'start_time' => now()->subMinutes(5),
+        'end_time' => now()->addMinutes(55),
+        'duration_seconds' => 3600,
+    ]);
+
+    $service = Mockery::mock(NetworkBroadcastService::class)->makePartial();
+    $service->shouldAllowMockingProtectedMethods();
+    $service->shouldReceive('isProcessRunning')->andReturn(false);
+    $service->shouldReceive('getStreamUrl')->andReturn(null);
+
+    $service->start($network);
+
+    $network->refresh();
+    expect($network->broadcast_requested)->toBeFalse();
+});
+
+it('successful start clears broadcast_boot_recovery_until', function () {
+    $network = Network::factory()->create([
+        'enabled' => true,
+        'broadcast_enabled' => true,
+        'broadcast_requested' => true,
+        'broadcast_pid' => null,
+        'broadcast_started_at' => null,
+        'broadcast_boot_recovery_until' => now()->addMinutes(2),
+    ]);
+
+    NetworkProgramme::factory()->create([
+        'network_id' => $network->id,
+        'start_time' => now()->subMinutes(5),
+        'end_time' => now()->addMinutes(55),
+        'duration_seconds' => 3600,
+    ]);
+
+    $service = Mockery::mock(NetworkBroadcastService::class)->makePartial();
+    $service->shouldAllowMockingProtectedMethods();
+    $service->shouldReceive('isProcessRunning')->andReturn(false);
+    $service->shouldReceive('getStreamUrl')->andReturn('http://localhost:8096/video/stream.ts');
+    $service->shouldReceive('startViaProxy')->once()->andReturn(true);
+
+    $result = $service->start($network);
+
+    expect($result)->toBeTrue();
+    expect($network->fresh()->broadcast_boot_recovery_until)->toBeNull();
+});
+
+/*
+|--------------------------------------------------------------------------
 | Integration: boot recovery + tick loop
 |--------------------------------------------------------------------------
 */
