@@ -57,6 +57,19 @@ class GeneralSettings extends Settings
 
     public ?bool $proxy_stop_oldest_on_limit = false;
 
+    // Silence detection - detect silent audio streams and trigger failover
+    public ?bool $enable_silence_detection = false;
+
+    public ?float $silence_threshold_db = -50.0;
+
+    public ?float $silence_duration = 3.0;
+
+    public ?float $silence_check_interval = 10.0;
+
+    public ?int $silence_failover_threshold = 3;
+
+    public ?float $silence_monitoring_grace_period = 15.0;
+
     // Failover fail conditions - mark playlists invalid on specific HTTP status codes
     public ?bool $failover_fail_conditions_enabled = false;
 
