@@ -14,9 +14,11 @@ Pool multiple IPTV accounts from the same provider to multiply your available co
 6. [Using Multiple Server URLs](#using-multiple-server-urls)
 7. [Managing Your Profiles](#managing-your-profiles)
 8. [Understanding Pool Status](#understanding-pool-status)
-9. [Troubleshooting](#troubleshooting)
-10. [Best Practices](#best-practices)
-11. [FAQ](#faq)
+9. [Connection Management](#connection-management)
+10. [Configuration & Settings](#configuration--settings)
+11. [Best Practices](#best-practices)
+12. [Future Enhancements](#future-enhancements)
+13. [Frequently Asked Questions](#frequently-asked-questions)
 
 ---
 
@@ -25,7 +27,7 @@ Pool multiple IPTV accounts from the same provider to multiply your available co
 Before enabling Provider Profiles, ensure:
 
 - ✅ **Proxy mode is enabled** - Required for accurate connection tracking
-- ✅ **M3U_PROXY_URL and M3U_PROXY_TOKEN are configured** - Provider Profiles requires the m3u-proxy service
+- ✅ **M3U_PROXY_HOST and M3U_PROXY_TOKEN are configured** - Provider Profiles require the m3u-proxy service
 - ✅ **Playlist is Xtream API type** - Profiles only work with Xtream playlists, not plain M3U files
 - ✅ **Multiple accounts from the same provider** - You need additional IPTV accounts to pool
 
@@ -135,6 +137,99 @@ When multiple people watch the **same channel** with transcoding enabled, they c
 
 This leaves more connections available for watching different channels.
 
+### Full Request Lifecycle
+
+#### 1. User Requests a Channel
+
+```
+Client device sends a stream request
+    ↓
+m3u-editor receives the request
+    ↓
+Determines the source Playlist and StreamProfile
+    ↓
+Checks if profiles_enabled on the playlist
+```
+
+#### 2. Pool Reuse Check (Fast Path)
+
+Before selecting a new profile, the system checks whether an existing pooled stream can be reused:
+
+```
+Check Redis channel→stream cache
+    ↓ (cache hit)
+Return existing stream URL immediately (no HTTP call to proxy)
+
+    ↓ (cache miss)
+Query m3u-proxy /streams/by-metadata for active streams matching:
+  - Channel ID
+  - Playlist UUID
+  - StreamProfile ID
+  - Transcoding enabled
+    ↓ (match found)
+Return existing stream URL (bypasses profile capacity check)
+    ↓ (no match)
+Continue to profile selection
+```
+
+#### 3. Atomic Profile Selection & Reservation
+
+To prevent race conditions (TOCTOU), the system uses a per-playlist Redis lock:
+
+```
+Acquire per-playlist lock (max 2 second wait)
+    ↓
+Check if channel already has a pending reservation
+    ↓ (already reserved)
+Release lock → wait for proxy to confirm → reuse stream
+    ↓ (no reservation)
+Iterate profiles in priority order
+    ↓
+Find first profile where Redis count < max_streams
+    ↓
+Atomically increment connection count (reservation ID)
+Mark channel as "pending" with short 30s TTL
+Release lock
+    ↓ (no profile found)
+Call reconcileFromProxy() to correct stale counts → retry once
+    ↓ (still no profile)
+Return HTTP 503 "All provider profiles at maximum"
+```
+
+#### 4. Stream Creation
+
+```
+Send stream creation request to m3u-proxy
+  - Includes provider_profile_id in metadata
+  - Includes original_channel_id and original_playlist_uuid
+    ↓
+m3u-proxy returns real stream ID
+    ↓
+ProfileService::finalizeReservation()
+  - Replaces reservation ID with real stream ID in Redis
+  - Upgrades channel→stream mapping to real stream ID (24h TTL)
+    ↓
+Return stream URL to client
+```
+
+#### 5. Stream Ends
+
+```
+User stops watching
+    ↓
+m3u-proxy detects no clients (10s grace period)
+    ↓
+m3u-proxy sends stream_stopped webhook to m3u-editor
+    ↓
+ProfileService::decrementConnections($profile, $streamId)
+    ├─ Atomically decrement count (Lua script prevents going negative)
+    ├─ Delete stream→profile mapping from Redis
+    ├─ Delete stream→channel reverse mapping
+    └─ Clear channel→stream key (only if still pointing to this stream)
+    ↓
+Next stream request can use that capacity
+```
+
 ---
 
 ## Setting Up Provider Profiles
@@ -191,9 +286,9 @@ Toggle to activate this profile
 
 ### When to Use Different URLs
 
-### Use Cases
-
 **Important**: Provider Profiles is designed for **the same provider with multiple accounts**. The `url` field allows different servers/endpoints from that same provider, not different providers entirely.
+
+### Use Cases
 
 1. **Regional Server Failover**: Provider has multiple regional servers
    - Primary: `iptv1.provider.com:80` (Europe)
@@ -209,6 +304,14 @@ Toggle to activate this profile
    - Primary: `provider.com:80` (HTTP)
    - HTTP/2: `provider.com:8080` (Alt HTTP)
    - HTTPS: `provider.com:443` (Secure)
+
+### When NOT to Use Different URLs
+
+❌ **Don't mix completely different providers**  
+Different providers have different URL structures that won't work together.
+
+✅ **Do use same provider's multiple servers**  
+Regional mirrors, backup servers, and CDNs from the same provider work perfectly.
 
 ### Implementation Details
 
@@ -233,205 +336,22 @@ public function getXtreamConfigAttribute(): ?array
 
 #### URL Transformation
 
-When streaming a channel, the profile transforms the channel URL:
-
-```php
-public function transformUrl(string $originalUrl): string
-{
-    // Original: http://example.com/live/user1/pass1/channel123
-    // Profile URL: http://backup.com/live
-    
-    // Pattern match and replace:
-    // Result: http://backup.com/live/user2/pass2/channel123
-    
-    $pattern = '#^' . preg_quote($sourceBaseUrl, '#') .
-               '/(live|series|movie)/' . preg_quote($sourceUsername, '#') .
-               '/' . preg_quote($sourcePassword, '#') .
-               '/(.+)$#';
-    
-    if (preg_match($pattern, $originalUrl, $matches)) {
-        $streamType = $matches[1];
-        $streamIdAndExtension = $matches[2];
-        
-        // Use profile's URL (which may be different from source URL)
-        return "{$profileUrl}/{$streamType}/{$profileUsername}/{$profilePassword}/{$streamIdAndExtension}";
-    }
-    
-    return $originalUrl;
-}
-```
-
-#### Admin UI Changes
-
-The Filament form for adding profiles now includes:
-
-```php
-Repeater::make('additional_profiles')
-    ->schema([
-        TextInput::make('name'),
-        TextInput::make('url')
-            ->label('Provider URL')
-            ->placeholder(/* playlist default URL */)
-            ->helperText('Leave blank to use the same provider as the primary account.'),
-        TextInput::make('username'),
-        TextInput::make('password'),
-        TextInput::make('max_streams'),
-        TextInput::make('priority'),
-        Toggle::make('enabled'),
-    ])
-```
-
-**Key UI Features:**
-- URL field is optional (defaults to playlist URL)
-- Placeholder shows the primary account URL
-- Helper text clarifies the behavior
-- Test button validates the specific profile's credentials and URL
-
----
-
-## Connection Management
-
-### Redis-Based Connection Tracking
-
-Connections are tracked in Redis for real-time accuracy (database queries are slow for high-frequency updates).
-
-#### Redis Keys Structure
+When streaming a channel, the profile transforms the channel URL by replacing the playlist's primary credentials with the profile's credentials and (optionally) the base server URL:
 
 ```
-playlist_profile:{profile_id}:count
-    → Current active connections for this profile
-    
-stream:{stream_id}:profile_id
-    → Which profile is using this stream
-    
-playlist_profile:{profile_id}:streams
-    → Set of stream IDs using this profile (for cleanup)
+Original URL: http://example.com/live/user1/pass1/channel123.ts
+
+Profile with same server:
+→ http://example.com/live/user2/pass2/channel123.ts
+
+Profile with different server:
+→ http://backup.com/live/user2/pass2/channel123.ts
 ```
 
-#### Key Lifecycle
-
+The transformation uses regex pattern matching and expects the standard Xtream URL format:
 ```
-Stream Created:
-├─ increment playlist_profile:1:count                      [count=1]
-├─ set stream:abc123:profile_id = 1
-├─ sadd playlist_profile:1:streams abc123
-└─ expire all keys with TTL=86400 (24 hours)
-
-Stream Ended:
-├─ decrement playlist_profile:1:count                      [count=0]
-├─ del stream:abc123:profile_id
-└─ srem playlist_profile:1:streams abc123
+http://domain:port/(live|series|movie)/username/password/<stream_id>
 ```
-
-#### Why Redis?
-
-1. **Speed**: O(1) operations, no database query overhead
-2. **Real-time**: Immediate reflection of connection changes
-3. **Auto-cleanup**: TTL prevents stale keys from accumulating
-4. **Distributed**: Shared state across multiple app instances
-
-### Connection Increment/Decrement
-
-```php
-// When a new stream starts using a profile
-public static function incrementConnections(PlaylistProfile $profile, string $streamId): void
-{
-    Redis::pipeline(function ($pipe) use ($countKey, $streamKey, $streamsKey) {
-        $pipe->incr($countKey);
-        $pipe->expire($countKey, 86400);
-        $pipe->set($streamKey, $profile->id);
-        $pipe->expire($streamKey, 86400);
-        $pipe->sadd($streamsKey, $streamId);
-        $pipe->expire($streamsKey, 86400);
-    });
-}
-
-// When a stream ends
-public static function decrementConnections(PlaylistProfile $profile, string $streamId): void
-{
-    $currentCount = (int) Redis::get($countKey);
-    
-    if ($currentCount > 0) {
-        Redis::pipeline(function ($pipe) {
-            $pipe->decr($countKey);
-            $pipe->del($streamKey);
-            $pipe->srem($streamsKey, $streamId);
-        });
-    }
-}
-```
-
-### Pool Status Reporting
-
-Getting current pool status across all profiles:
-
-```php
-public static function getPoolStatus(Playlist $playlist): array
-{
-    $profiles = [];
-    $totalCapacity = 0;
-    $totalActive = 0;
-    
-    foreach ($playlist->profiles()->get() as $profile) {
-        $activeCount = static::getConnectionCount($profile);      // From Redis
-        $maxStreams = $profile->effective_max_streams;
-        
-        $profiles[] = [
-            'id' => $profile->id,
-            'name' => $profile->name ?? "Profile #{$profile->id}",
-            'username' => $profile->username,
-            'enabled' => $profile->enabled,
-            'priority' => $profile->priority,
-            'is_primary' => $profile->is_primary,
-            'max_streams' => $maxStreams,
-            'active_connections' => $activeCount,
-            'available' => max(0, $maxStreams - $activeCount),
-        ];
-        
-        if ($profile->enabled) {
-            $totalCapacity += $maxStreams;
-            $totalActive += $activeCount;
-        }
-    }
-    
-    return [
-        'enabled' => true,
-        'profiles' => $profiles,
-        'total_capacity' => $totalCapacity,
-        'total_active' => $totalActive,
-        'available' => max(0, $totalCapacity - $totalActive),
-    ];
-}
-```
-
----
-
-## Admin UI & Management
-
-### Filament Integration
-
-**Use different URLs when you have:**
-
-1. **Regional Servers from Same Provider**
-   - US Server: `us.provider.com`
-   - EU Server: `eu.provider.com`
-   - Asia Server: `asia.provider.com`
-
-2. **Backup/Failover Servers**
-   - Primary: `iptv1.provider.com`
-   - Backup: `iptv2.provider.com`
-
-3. **Different Ports**
-   - Standard: `provider.com:8080`
-   - Alternate: `provider.com:80`
-
-### When NOT to Use Different URLs
-
-❌ **Don't mix completely different providers**  
-Different providers have different URL structures that won't work together.
-
-✅ **Do use same provider's multiple servers**  
-Regional mirrors, backup servers, and CDNs from the same provider work perfectly.
 
 ---
 
@@ -469,6 +389,8 @@ Override auto-detected limits:
 - Prevent overloading a profile
 - Test with reduced capacity
 
+**Note**: If provider info has not yet been fetched (e.g. before the first "Test"), the system defaults to a max of 1 connection. Always use the **Test** button or wait for the background refresh job to populate provider info.
+
 ### Enabling/Disabling Profiles
 
 Toggle profiles on/off without deleting:
@@ -497,29 +419,89 @@ Total: 5/15 active | 10 available
 - ✗ = Profile disabled
 - ⭐ = Primary profile
 - **3/5** = 3 active of 5 maximum
-- **Total: 5/15** = 5 in use, 15 capacity, 10 availableTrack in Redis
-ProfileService::incrementConnections($selectedProfile, $streamId);
+- **Total: 5/15** = 5 in use out of 15 total capacity, 10 available
 
-// Return URL to client
-return buildTranscodeStreamUrl($streamId);
+Connection counts are read directly from Redis, reflecting the current state of active streams tracked by m3u-proxy. The proxy sends `stream_stopped` webhooks that trigger immediate decrements.
+
+---
+
+## Connection Management
+
+### Redis-Based Connection Tracking
+
+Connections are tracked in Redis for real-time accuracy (database queries are slow for high-frequency updates).
+
+#### Redis Keys Structure
+
+```
+playlist_profile:{profile_id}:connections
+    → Current active connection count for this profile
+
+stream:{stream_id}:profile_id
+    → Which provider profile is serving this stream
+
+playlist_profile:{profile_id}:streams
+    → Set of stream IDs currently using this profile
+
+channel_stream:{channel_id}:{playlist_uuid}
+    → The active (or pending) stream ID for this channel
+
+stream:{stream_id}:channel
+    → Reverse mapping: stream ID → channel coordinates (for cleanup)
 ```
 
-### 5. Stream Ends
+#### Key Lifecycle
 
 ```
-User stops watching
-    ↓
-m3u-proxy detects no clients
-    ↓
-m3u-proxy notifies app (or app polls)
-    ↓
-ProfileService::decrementConnectionsByStreamId($streamId)
-    ├─ Look up profile via Redis
-    ├─ Decrement connection count
-    └─ Clean up Redis keys
-    ↓
-Next stream request can use that capacity
+Profile Selection (inside atomic lock):
+├─ incr playlist_profile:1:connections            [count=1]
+├─ set  stream:reservation:abc:profile_id = 1
+├─ sadd playlist_profile:1:streams reservation:abc
+├─ setex channel_stream:123:uuid = reservation:abc  [TTL=30s]
+└─ setex stream:reservation:abc:channel = "123:uuid" [TTL=30s]
+
+Stream Created (finalizeReservation):
+├─ srem playlist_profile:1:streams reservation:abc
+├─ del  stream:reservation:abc:profile_id
+├─ sadd playlist_profile:1:streams abc123          [real stream ID]
+├─ set  stream:abc123:profile_id = 1
+├─ set  channel_stream:123:uuid = abc123           [TTL=24h]
+└─ set  stream:abc123:channel = "123:uuid"         [TTL=24h]
+
+Stream Ended (via stream_stopped webhook):
+├─ decr playlist_profile:1:connections             [count=0, atomic Lua]
+├─ del  stream:abc123:profile_id
+├─ srem playlist_profile:1:streams abc123
+├─ del  stream:abc123:channel
+└─ del  channel_stream:123:uuid  (only if still pointing to abc123)
 ```
+
+#### Why Redis?
+
+1. **Speed**: O(1) operations, no database query overhead
+2. **Real-time**: Immediate reflection of connection changes
+3. **Auto-cleanup**: TTL prevents stale keys from accumulating
+4. **Atomic operations**: Lua scripts prevent race conditions (count never goes negative)
+5. **Distributed**: Shared state across multiple app instances
+
+### Atomic Locking to Prevent Race Conditions
+
+When multiple clients request the same channel simultaneously, there is a race window where two requests might both see "capacity available" and both try to allocate slots. The system prevents this with a per-playlist Redis lock:
+
+1. **Lock acquired** — only one request can allocate at a time
+2. **Channel reuse check** — if channel already has a reservation, skip allocation
+3. **Profile selected and count incremented** — inside the lock, atomically
+4. **Lock released** — next request now sees updated count
+
+If capacity is still unavailable after the lock, the system calls `reconcileFromProxy()` to correct any stale Redis counts (e.g. from rapidly switching channels) and retries once before returning a 503.
+
+### Pool Status Reporting
+
+The `ProfileService::getPoolStatus()` method returns the live pool state for all profiles in a playlist, including:
+- Active connection count (from Redis)
+- Maximum connection capacity (from `effective_max_streams`)
+- Available slots
+- Profile expiration dates (for subscription monitoring)
 
 ---
 
@@ -529,10 +511,16 @@ Next stream request can use that capacity
 
 ```env
 # M3U Proxy Configuration (required for profiles)
-M3U_PROXY_URL=http://localhost:8085
-M3U-secret-token
+M3U_PROXY_HOST=localhost        # or container hostname (e.g. m3u-proxy)
+M3U_PROXY_PORT=8085
+M3U_PROXY_TOKEN=your-secret-token
 
-# Pl
+# Redis Configuration (required for pooling)
+REDIS_HOST=localhost
+REDIS_SERVER_PORT=6379
+```
+
+See [M3U Proxy Integration Guide](m3u-proxy-integration.md) for full Docker Compose setup.
 
 ### Database Migrations
 
@@ -540,7 +528,7 @@ M3U-secret-token
 # Create playlist_profiles table
 2025_12_17_000001_create_playlist_profiles_table.php
 
-# Add URL field (NEW in January 2026)
+# Add URL field (added January 2026)
 2026_01_03_181027_add_url_to_playlist_profiles_table.php
 ```
 
@@ -550,26 +538,19 @@ M3U-secret-token
 
 ### For End Users
 
-1. able profiles only if needed**: Adds complexity and requires proxy
+1. **Enable profiles only if needed**: Adds complexity and requires proxy
 2. **Test all profiles after adding**: Ensure credentials are correct
 3. **Set reasonable priorities**: Primary = 0, backups = 1, 2, etc.
-4. **Disable unused profiles**: Don't leave disabled profiles lying around
-5. **Monitor pool status**: Check the pool status widget regularly
+4. **Monitor pool status**: Check the pool status widget regularly
+5. **Check provider info expiry dates**: Expired subscriptions will fail silently
 
 ### For Developers
 
-1. **Cache provider info**: Don't call API on every request
+1. **Cache provider info**: Don't call API on every request — use `refreshProfile()` in background jobs
 2. **Use Redis for connections**: Avoid database for high-frequency updates
-3. **Handle profile URL transformation carefully**: Regex patterns must be robust
+3. **Handle profile URL transformation carefully**: Regex patterns must match standard Xtream URL format
 4. **Test failover scenarios**: Ensure graceful degradation when profiles fail
-5. **Log profile selection**: Help debug "no capacity" issues
-
-### For Documentation
-
-1. **Document the URL field**: Many users won't understand it's optional
-2. **Explain the pool status**: What do the numbers mean?
-3. **Provide troubleshooting**: Common issues and solutions
-4. **Show configuration examples**: Different provider setups
+5. **Log profile selection**: Use debug logging to trace "no capacity" issues
 
 ---
 
@@ -592,7 +573,7 @@ Potential improvements for future versions:
 
 ### Q: Can I use accounts from completely different IPTV providers?
 
-**AWhile technically possible by setting different URLs, it's **not recommended**. Provider Profiles is designed for the same provider with multiple accounts. Different providers may have:
+**A:** While technically possible by setting different URLs, it's **not recommended**. Provider Profiles is designed for the same provider with multiple accounts. Different providers may have:
 - Incompatible URL structures
 - Different API implementations  
 - Varying authentication methods
@@ -607,27 +588,31 @@ For different providers, create separate playlists instead.
 http://provider.com/live/username/password/stream123.ts
 ```
 
-If Provider B uses a different structure, the transformation will fail:
-```
-http://different.com/stream/username/password/123.ts  ← Won't match pattern
-```Proxy Not Enabled Error
+If a profile URL uses a different URL structure (different path format), the regex pattern won't match and the original URL will be used unchanged — which may fail to authenticate.
 
-**Symptoms:**  
-"Provider Profiles require proxy to be enabled"
+### Q: Why does the proxy need to be enabled for Provider Profiles?
 
-**Fix:**
-1. Edit your playlist
-2. Enable "Enable Proxy" toggle
-3. Ensure M3U_PROXY_URL and M3U_PROXY_TOKEN are configured
-4. Save playlist
-5. Try enabling profiles againReal-World Examples
+**A:** Provider Profiles requires the m3u-proxy for two reasons:
+1. **Connection tracking**: The proxy sends `stream_stopped` webhooks that trigger Redis decrements. Without the proxy, connections would never be decremented and all profiles would eventually appear "full".
+2. **Stream pooling**: The proxy manages shared FFmpeg processes so multiple clients can share one provider connection.
+
+### Q: The pool status shows connections but streams have ended — why?
+
+**A:** This usually means the `stream_stopped` webhook was not received. Common causes:
+- The proxy is not configured with a webhook URL back to m3u-editor
+- Network connectivity issue between proxy and editor
+- Redis count drift from a crash or restart
+
+**Fix:** Use the reconcile function or restart the proxy. See [Troubleshooting Guide](pooled-providers-troubleshooting.md).
+
+### Q: Real-World Configuration Examples
 
 **Family with 3 IPTV Accounts:**
 ```
 Provider: MyIPTV.com
-Account 1: user1 @ MyIPTV.com (5 connections)
-Account 2: user2 @ MyIPTV.com (5 connections)  
-Account 3: user3 @ MyIPTV.com (5 connections)
+Account 1: user1 @ MyIPTV.com (5 connections) — Priority 0
+Account 2: user2 @ MyIPTV.com (5 connections) — Priority 1
+Account 3: user3 @ MyIPTV.com (5 connections) — Priority 2
 
 Total Capacity: 15 simultaneous streams!
 ```
@@ -635,14 +620,14 @@ Total Capacity: 15 simultaneous streams!
 **Provider with Regional Servers:**
 ```
 Provider: GlobalIPTV
-Account 1: user1 @ us.global-iptv.com (primary)
-Same Account: user1 @ eu.global-iptv.com (backup URL)
-Same Account: user1 @ asia.global-iptv.com (backup URL)
+Account 1: user1 @ us.global-iptv.com (primary)     — Priority 0
+Account 2: user1 @ eu.global-iptv.com (backup URL)  — Priority 1
+Account 3: user1 @ asia.global-iptv.com (backup URL) — Priority 2
 
 Redundancy without extra cost!
-```AQQuick Reference
+```
 
-### Common Configurations
+### Q: Quick Reference — Common Configurations
 
 **Basic Setup (Same Provider, Same Server):**
 - Primary: username=user1, URL=(blank)
@@ -653,7 +638,7 @@ Redundancy without extra cost!
 - Backup 1: username=user2, URL=eu.provider.com
 - Backup 2: username=user3, URL=asia.provider.com
 
-### Capacity Planning
+### Q: Capacity Planning Guide
 
 - **Light use** (1-3 people): 2 accounts = 4-6 connections
 - **Medium use** (3-5 people): 3 accounts = 9-15 connections
@@ -664,4 +649,6 @@ Redundancy without extra cost!
 ## Related Documentation
 
 - [Stream Pooling Technical Details](stream-pooling.md)
-- [M3U Proxy Integration Guide](m3u-proxy-integration.md
+- [M3U Proxy Integration Guide](m3u-proxy-integration.md)
+- [Pooled Providers Troubleshooting](pooled-providers-troubleshooting.md)
+- [Pooled Providers Architecture](pooled-providers-architecture.md)
