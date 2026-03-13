@@ -211,6 +211,7 @@ This section summarizes what has already been implemented for the Network → HL
 
 ## Notes, caveats & best practices 💡
 
+- **External proxy HLS configuration**: When using an external m3u-proxy container (`M3U_PROXY_ENABLED=false`), the `HLS_TEMP_DIR`, `HLS_GC_ENABLED`, `HLS_GC_INTERVAL`, and `HLS_GC_AGE_THRESHOLD` env vars **must be set on the `m3u-proxy` service**, not just on `m3u-editor`. The proxy is a separate container and cannot see env vars from the editor. Without these, the proxy defaults to `/tmp/m3u-proxy-broadcasts`. See `docs/hls-storage-config.md` for details.
 - Configuration should be read via `config()` rather than `env()` in application code (config caching). `network_broadcast_enabled` lives in `config/app.php` and is controlled via `NETWORK_BROADCAST_ENABLED` env var.
 - Keep `HLS_GC_ENABLED=true` in environments where automatic cleanup is acceptable.
 - Always `--dry-run` the `hls:gc` command the first time you run it in a new environment.

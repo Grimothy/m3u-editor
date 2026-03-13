@@ -258,6 +258,31 @@ environment:
 
 ---
 
+## External Proxy: HLS Environment Variables
+
+When using an **external** m3u-proxy container (i.e. `M3U_PROXY_ENABLED=false`), you **must** set the HLS environment variables on the `m3u-proxy` service itself. Environment variables on the `m3u-editor` service are not visible to the separate proxy container.
+
+If these variables are missing from the proxy service, it falls back to its internal default (`/tmp/m3u-proxy-broadcasts`) and ignores any path you configured on the editor.
+
+```yaml
+services:
+  m3u-proxy:
+    image: sparkison/m3u-proxy:experimental
+    environment:
+      - API_TOKEN=${M3U_PROXY_TOKEN}
+      # ... other proxy env vars ...
+
+      # HLS Segment Storage & Garbage Collection
+      - HLS_TEMP_DIR=${HLS_TEMP_DIR:-/tmp/m3u-proxy-broadcasts}
+      - HLS_GC_ENABLED=${HLS_GC_ENABLED:-true}
+      - HLS_GC_INTERVAL=${HLS_GC_INTERVAL:-600}
+      - HLS_GC_AGE_THRESHOLD=${HLS_GC_AGE_THRESHOLD:-7200}
+```
+
+> **Note:** When using embedded proxy (`M3U_PROXY_ENABLED=true`), the `start-container` script and Supervisor automatically pass these values to the proxy process — no extra configuration is needed.
+
+---
+
 ## Next Steps
 
 1. **Stop your container**
