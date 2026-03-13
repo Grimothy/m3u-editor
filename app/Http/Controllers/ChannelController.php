@@ -1437,10 +1437,6 @@ class ChannelController extends Controller
      *   "success": false,
      *   "message": "Channel not found"
      * }
-     * @response 403 {
-     *   "success": false,
-     *   "message": "You do not have permission to update this channel"
-     * }
      * @response 422 {
      *   "message": "The given data was invalid.",
      *   "errors": {}
@@ -1450,20 +1446,13 @@ class ChannelController extends Controller
     {
         $user = $request->user();
 
-        $channel = Channel::find($id);
+        $channel = Channel::where('user_id', $user->id)->find($id);
 
         if (! $channel) {
             return response()->json([
                 'success' => false,
                 'message' => 'Channel not found',
             ], 404);
-        }
-
-        if ($channel->user_id !== $user->id) {
-            return response()->json([
-                'success' => false,
-                'message' => 'You do not have permission to update this channel',
-            ], 403);
         }
 
         $validated = $request->validate([
@@ -1479,7 +1468,7 @@ class ChannelController extends Controller
         $failoverIds = $validated['failover_channel_ids'];
         $metadata = $validated['metadata'] ?? null;
 
-        if (in_array($id, $failoverIds)) {
+        if (in_array($id, $failoverIds, true)) {
             return response()->json([
                 'success' => false,
                 'message' => 'A channel cannot be its own failover',
@@ -1487,7 +1476,9 @@ class ChannelController extends Controller
         }
 
         DB::transaction(function () use ($channel, $user, $failoverIds, $metadata) {
-            ChannelFailover::where('channel_id', $channel->id)->delete();
+            ChannelFailover::where('channel_id', $channel->id)
+                ->where('user_id', $user->id)
+                ->delete();
 
             $records = [];
             foreach ($failoverIds as $sort => $failoverChannelId) {
@@ -1540,29 +1531,18 @@ class ChannelController extends Controller
      *   "success": false,
      *   "message": "Channel not found"
      * }
-     * @response 403 {
-     *   "success": false,
-     *   "message": "You do not have permission to update this channel"
-     * }
      */
     public function clearFailovers(Request $request, int $id): JsonResponse
     {
         $user = $request->user();
 
-        $channel = Channel::find($id);
+        $channel = Channel::where('user_id', $user->id)->find($id);
 
         if (! $channel) {
             return response()->json([
                 'success' => false,
                 'message' => 'Channel not found',
             ], 404);
-        }
-
-        if ($channel->user_id !== $user->id) {
-            return response()->json([
-                'success' => false,
-                'message' => 'You do not have permission to update this channel',
-            ], 403);
         }
 
         $removedCount = ChannelFailover::where('channel_id', $channel->id)->delete();
@@ -1611,6 +1591,7 @@ class ChannelController extends Controller
             'mappings.*.primary_channel_id' => [
                 'required',
                 'integer',
+                'distinct',
                 Rule::exists('channels', 'id')->where('user_id', $user->id),
             ],
             'mappings.*.failover_channel_ids' => 'required|array|min:1',
@@ -1625,7 +1606,7 @@ class ChannelController extends Controller
         $mappings = $validated['mappings'];
 
         foreach ($mappings as $index => $mapping) {
-            if (in_array($mapping['primary_channel_id'], $mapping['failover_channel_ids'])) {
+            if (in_array($mapping['primary_channel_id'], $mapping['failover_channel_ids'], true)) {
                 return response()->json([
                     'success' => false,
                     'message' => "Mapping at index {$index}: a channel cannot be its own failover",
