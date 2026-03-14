@@ -294,6 +294,10 @@ class NetworkBroadcastService
             'preset' => $network->transcode_preset,
             'hwaccel' => $network->hwaccel,
             'callback_url' => $callbackUrl,
+            // Tell the proxy exactly where to write broadcast segments.
+            // Honors BROADCAST_TEMP_DIR (default /dev/shm) so ephemeral .ts files
+            // are written to RAM and never touch persistent disk.
+            'output_dir' => env('BROADCAST_TEMP_DIR', '/dev/shm'),
         ];
 
         // Attach provider-specific headers for Plex.
