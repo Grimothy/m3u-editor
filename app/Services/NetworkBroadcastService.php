@@ -297,7 +297,7 @@ class NetworkBroadcastService
             // Tell the proxy exactly where to write broadcast segments.
             // Honors BROADCAST_TEMP_DIR (default /dev/shm) so ephemeral .ts files
             // are written to RAM and never touch persistent disk.
-            'output_dir' => env('BROADCAST_TEMP_DIR', '/dev/shm'),
+            'output_dir' => config('proxy.broadcast_temp_dir'),
         ];
 
         // Attach provider-specific headers for Plex.

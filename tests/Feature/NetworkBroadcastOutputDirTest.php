@@ -4,6 +4,7 @@ use App\Enums\TranscodeMode;
 use App\Models\Network;
 use App\Models\NetworkProgramme;
 use App\Services\NetworkBroadcastService;
+use Illuminate\Support\Facades\Config;
 use Illuminate\Support\Facades\Http;
 
 beforeEach(function () {
@@ -61,8 +62,7 @@ it('sends output_dir in the broadcast start payload', function () {
 });
 
 it('sends output_dir defaulting to /dev/shm when BROADCAST_TEMP_DIR is not set', function () {
-    // Ensure the env var is absent for this test
-    putenv('BROADCAST_TEMP_DIR');
+    Config::set('proxy.broadcast_temp_dir', '/dev/shm');
 
     $payload = invokeStartViaProxyAndCapturePayload();
 
@@ -70,12 +70,9 @@ it('sends output_dir defaulting to /dev/shm when BROADCAST_TEMP_DIR is not set',
 });
 
 it('honors BROADCAST_TEMP_DIR env var and sends it as output_dir', function () {
-    putenv('BROADCAST_TEMP_DIR=/run/broadcast-segments');
+    Config::set('proxy.broadcast_temp_dir', '/run/broadcast-segments');
 
     $payload = invokeStartViaProxyAndCapturePayload();
 
     expect($payload['output_dir'])->toBe('/run/broadcast-segments');
-
-    // Clean up
-    putenv('BROADCAST_TEMP_DIR');
 });
