@@ -26,6 +26,8 @@ class SeriesFindAndReplace implements ShouldQueue
         public ?Collection $series = null,
         public ?bool $all_series = false,
         public ?int $series_id = null,
+        public ?int $playlist_id = null,
+        public bool $silent = false,
     ) {
         //
     }
@@ -45,6 +47,7 @@ class SeriesFindAndReplace implements ShouldQueue
             Series::query()
                 ->where('user_id', $this->user_id)
                 ->when(! $this->all_series && $this->series_id, fn ($query) => $query->where('id', $this->series_id))
+                ->when(! $this->all_series && $this->playlist_id, fn ($query) => $query->where('playlist_id', $this->playlist_id))
                 ->chunkById(1000, function ($series) use (&$updated) {
                     $updated += $this->processSeriesChunk($series);
                 });
@@ -63,16 +66,18 @@ class SeriesFindAndReplace implements ShouldQueue
         $user = User::find($this->user_id);
 
         // Send notification
-        Notification::make()
-            ->success()
-            ->title('Find & Replace completed')
-            ->body("Series find & replace has completed successfully. {$updated} series updated.")
-            ->broadcast($user);
-        Notification::make()
-            ->success()
-            ->title('Find & Replace completed')
-            ->body("Series find & replace has completed successfully. Operation completed in {$completedInRounded} seconds and updated {$updated} series.")
-            ->sendToDatabase($user);
+        if (! $this->silent) {
+            Notification::make()
+                ->success()
+                ->title('Find & Replace completed')
+                ->body("Series find & replace has completed successfully. {$updated} series updated.")
+                ->broadcast($user);
+            Notification::make()
+                ->success()
+                ->title('Find & Replace completed')
+                ->body("Series find & replace has completed successfully. Operation completed in {$completedInRounded} seconds and updated {$updated} series.")
+                ->sendToDatabase($user);
+        }
     }
 
     /**

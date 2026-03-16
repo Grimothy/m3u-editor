@@ -24,6 +24,7 @@ use Filament\Notifications\Notification;
 use Filament\Resources\Pages\ListRecords;
 use Filament\Schemas\Components\Tabs\Tab;
 use Filament\Schemas\Components\Utilities\Get;
+use Filament\Schemas\Components\Utilities\Set;
 use Illuminate\Database\Eloquent\Builder;
 use Illuminate\Support\Facades\Log;
 
@@ -222,50 +223,85 @@ class ListSeries extends ListRecords
                     ->modalSubmitActionLabel('Yes, sync now'),
                 Action::make('find-replace')
                     ->label('Find & Replace')
-                    ->schema([
-                        Toggle::make('all_series')
-                            ->label('All Series')
-                            ->live()
-                            ->helperText('Apply find and replace to all Series? If disabled, it will only apply to the selected Series.')
-                            ->default(true),
-                        Select::make('series')
-                            ->label('Series')
-                            ->required()
-                            ->helperText('Select the Series you would like to apply changes to.')
-                            ->options(Series::where(['user_id' => auth()->id()])->get(['name', 'id'])->pluck('name', 'id'))
-                            ->hidden(fn (Get $get) => $get('all_series') === true)
-                            ->searchable(),
-                        Toggle::make('use_regex')
-                            ->label('Use Regex')
-                            ->live()
-                            ->helperText('Use regex patterns to find and replace. If disabled, will use direct string comparison.')
-                            ->default(true),
-                        Select::make('column')
-                            ->label('Column to modify')
-                            ->options([
-                                'name' => 'Series Name',
-                                'genre' => 'Genre',
-                                'plot' => 'Plot',
-                            ])
-                            ->default('name')
-                            ->required()
-                            ->columnSpan(1),
-                        TextInput::make('find_replace')
-                            ->label(fn (Get $get) => ! $get('use_regex') ? 'String to replace' : 'Pattern to replace')
-                            ->required()
-                            ->placeholder(
-                                fn (Get $get) => $get('use_regex')
-                                    ? '^(US- |UK- |CA- )'
-                                    : 'US -'
-                            )->helperText(
-                                fn (Get $get) => ! $get('use_regex')
-                                    ? 'This is the string you want to find and replace.'
-                                    : 'This is the regex pattern you want to find. Make sure to use valid regex syntax.'
-                            ),
-                        TextInput::make('replace_with')
-                            ->label('Replace with (optional)')
-                            ->placeholder('Leave empty to remove'),
-                    ])
+                    ->schema(function (): array {
+                        $savedPatterns = [];
+                        $savedPatternRules = [];
+                        $counter = 0;
+                        foreach (Playlist::where('user_id', auth()->id())->get() as $playlist) {
+                            foreach ($playlist->find_replace_rules ?? [] as $rule) {
+                                if (is_array($rule) && ($rule['target'] ?? 'channels') === 'series') {
+                                    $savedPatterns[$counter] = "{$playlist->name} - ".($rule['name'] ?? 'Unnamed');
+                                    $savedPatternRules[$counter] = $rule;
+                                    $counter++;
+                                }
+                            }
+                        }
+
+                        return [
+                            Select::make('saved_pattern')
+                                ->label('Load saved pattern')
+                                ->placeholder('Select a saved pattern...')
+                                ->options($savedPatterns)
+                                ->hidden(empty($savedPatterns))
+                                ->live()
+                                ->afterStateUpdated(function (?string $state, Set $set) use ($savedPatternRules): void {
+                                    if ($state === null || $state === '') {
+                                        return;
+                                    }
+                                    $rule = $savedPatternRules[(int) $state] ?? null;
+                                    if (! $rule) {
+                                        return;
+                                    }
+                                    $set('use_regex', $rule['use_regex'] ?? true);
+                                    $set('column', $rule['column'] ?? 'name');
+                                    $set('find_replace', $rule['find_replace'] ?? '');
+                                    $set('replace_with', $rule['replace_with'] ?? '');
+                                })
+                                ->dehydrated(false),
+                            Toggle::make('all_series')
+                                ->label('All Series')
+                                ->live()
+                                ->helperText('Apply find and replace to all Series? If disabled, it will only apply to the selected Series.')
+                                ->default(true),
+                            Select::make('series')
+                                ->label('Series')
+                                ->required()
+                                ->helperText('Select the Series you would like to apply changes to.')
+                                ->options(Series::where(['user_id' => auth()->id()])->get(['name', 'id'])->pluck('name', 'id'))
+                                ->hidden(fn (Get $get) => $get('all_series') === true)
+                                ->searchable(),
+                            Toggle::make('use_regex')
+                                ->label('Use Regex')
+                                ->live()
+                                ->helperText('Use regex patterns to find and replace. If disabled, will use direct string comparison.')
+                                ->default(true),
+                            Select::make('column')
+                                ->label('Column to modify')
+                                ->options([
+                                    'name' => 'Series Name',
+                                    'genre' => 'Genre',
+                                    'plot' => 'Plot',
+                                ])
+                                ->default('name')
+                                ->required()
+                                ->columnSpan(1),
+                            TextInput::make('find_replace')
+                                ->label(fn (Get $get) => ! $get('use_regex') ? 'String to replace' : 'Pattern to replace')
+                                ->required()
+                                ->placeholder(
+                                    fn (Get $get) => $get('use_regex')
+                                        ? '^(US- |UK- |CA- )'
+                                        : 'US -'
+                                )->helperText(
+                                    fn (Get $get) => ! $get('use_regex')
+                                        ? 'This is the string you want to find and replace.'
+                                        : 'This is the regex pattern you want to find. Make sure to use valid regex syntax.'
+                                ),
+                            TextInput::make('replace_with')
+                                ->label('Replace with (optional)')
+                                ->placeholder('Leave empty to remove'),
+                        ];
+                    })
                     ->action(function (array $data): void {
                         app('Illuminate\Contracts\Bus\Dispatcher')
                             ->dispatch(new SeriesFindAndReplace(

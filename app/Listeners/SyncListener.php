@@ -6,6 +6,7 @@ use App\Enums\Status;
 use App\Events\SyncCompleted;
 use App\Jobs\GenerateEpgCache;
 use App\Jobs\MergeChannels;
+use App\Jobs\RunPlaylistFindReplaceRules;
 use App\Jobs\RunPostProcess;
 use App\Models\Epg;
 use Filament\Notifications\Notification;
@@ -25,6 +26,11 @@ class SyncListener
             // Handle auto-merge channels if enabled
             if ($playlist->auto_merge_channels_enabled && $playlist->status === Status::Completed) {
                 $this->handleAutoMergeChannels($playlist);
+            }
+
+            // Handle saved find & replace rules
+            if (collect($playlist->find_replace_rules ?? [])->contains(fn ($r) => $r['enabled'] ?? false)) {
+                dispatch(new RunPlaylistFindReplaceRules($playlist));
             }
 
             // Handle post-processes

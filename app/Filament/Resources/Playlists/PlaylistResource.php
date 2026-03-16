@@ -2293,6 +2293,80 @@ class PlaylistResource extends Resource
                                 }),
                         ]),
                 ]),
+            Section::make('Find & Replace Rules')
+                ->description('Define find & replace rules that automatically run after each playlist sync. Rules execute in order.')
+                ->columnSpanFull()
+                ->collapsible()
+                ->collapsed($creating)
+                ->schema([
+                    Repeater::make('find_replace_rules')
+                        ->label('')
+                        ->schema([
+                            TextInput::make('name')
+                                ->label('Rule Name')
+                                ->required()
+                                ->placeholder('e.g. Remove country prefix')
+                                ->columnSpan(2),
+                            Toggle::make('enabled')
+                                ->label('Enabled')
+                                ->default(true)
+                                ->inline(false)
+                                ->columnSpan(1),
+                            Toggle::make('use_regex')
+                                ->label('Use Regex')
+                                ->default(true)
+                                ->inline(false)
+                                ->live()
+                                ->columnSpan(1),
+                            Select::make('target')
+                                ->label('Target')
+                                ->options([
+                                    'channels' => 'Channels (Live & VOD)',
+                                    'series' => 'Series',
+                                ])
+                                ->default('channels')
+                                ->required()
+                                ->live()
+                                ->columnSpan(1),
+                            Select::make('column')
+                                ->label('Column to modify')
+                                ->options(fn (Get $get): array => match ($get('target')) {
+                                    'series' => [
+                                        'name' => 'Series Name',
+                                        'genre' => 'Genre',
+                                        'plot' => 'Plot',
+                                    ],
+                                    default => [
+                                        'title' => 'Channel Title',
+                                        'name' => 'Channel Name (tvg-name)',
+                                        'info->description' => 'Description (metadata)',
+                                        'info->genre' => 'Genre (metadata)',
+                                    ],
+                                })
+                                ->default('title')
+                                ->required()
+                                ->columnSpan(1),
+                            TextInput::make('find_replace')
+                                ->label(fn (Get $get): string => ($get('use_regex') ?? true) ? 'Pattern to find' : 'String to find')
+                                ->required()
+                                ->placeholder(fn (Get $get): string => ($get('use_regex') ?? true) ? '^(US- |UK- |CA- )' : 'US -')
+                                ->columnSpan(3),
+                            TextInput::make('replace_with')
+                                ->label('Replace with')
+                                ->placeholder('Leave empty to remove')
+                                ->columnSpan(3),
+                        ])
+                        ->columns(6)
+                        ->reorderable()
+                        ->reorderableWithButtons()
+                        ->collapsible()
+                        ->defaultItems(0)
+                        ->addActionLabel('Add find & replace rule')
+                        ->itemLabel(fn (array $state): ?string => ($state['name'] ?? null)
+                            ? ($state['name'].($state['enabled'] ?? true ? '' : ' (disabled)'))
+                            : null
+                        ),
+                ]),
         ];
 
         $outputFields = [

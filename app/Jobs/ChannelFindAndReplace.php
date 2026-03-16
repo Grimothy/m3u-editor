@@ -26,6 +26,7 @@ class ChannelFindAndReplace implements ShouldQueue
         public ?Collection $channels = null,
         public ?bool $all_playlists = false,
         public ?int $playlist_id = null,
+        public bool $silent = false,
     ) {
         //
     }
@@ -82,16 +83,18 @@ class ChannelFindAndReplace implements ShouldQueue
         $user = User::find($this->user_id);
 
         // Send notification
-        Notification::make()
-            ->success()
-            ->title('Find & Replace completed')
-            ->body("Channel find & replace has completed successfully. {$updated} channels updated.")
-            ->broadcast($user);
-        Notification::make()
-            ->success()
-            ->title('Find & Replace completed')
-            ->body("Channel find & replace has completed successfully. Operation completed in {$completedInRounded} seconds and updated {$updated} channels.")
-            ->sendToDatabase($user);
+        if (! $this->silent) {
+            Notification::make()
+                ->success()
+                ->title('Find & Replace completed')
+                ->body("Channel find & replace has completed successfully. {$updated} channels updated.")
+                ->broadcast($user);
+            Notification::make()
+                ->success()
+                ->title('Find & Replace completed')
+                ->body("Channel find & replace has completed successfully. Operation completed in {$completedInRounded} seconds and updated {$updated} channels.")
+                ->sendToDatabase($user);
+        }
     }
 
     /**
