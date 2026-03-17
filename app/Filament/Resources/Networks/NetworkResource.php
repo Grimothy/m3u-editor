@@ -1153,6 +1153,51 @@ class NetworkResource extends Resource
                                 ->send();
                         }),
 
+                    BulkAction::make('startBroadcastSelected')
+                        ->label('Start Broadcast')
+                        ->icon('heroicon-s-play')
+                        ->color('success')
+                        ->requiresConfirmation()
+                        ->modalHeading('Start Broadcasting')
+                        ->modalDescription('Start broadcasting for the selected networks.')
+                        ->action(function (Collection $records): void {
+                            $service = app(NetworkBroadcastService::class);
+
+                            foreach ($records as $record) {
+                                $record->update(['broadcast_requested' => true]);
+                                $service->startNow($record);
+                            }
+
+                            Notification::make()
+                                ->success()
+                                ->title('Broadcast Started')
+                                ->body('Broadcast start requested for '.$records->count().' networks.')
+                                ->send();
+                        })
+                        ->deselectRecordsAfterCompletion(),
+
+                    BulkAction::make('stopBroadcastSelected')
+                        ->label('Stop Broadcast')
+                        ->icon('heroicon-s-stop')
+                        ->color('danger')
+                        ->requiresConfirmation()
+                        ->modalHeading('Stop Broadcasting')
+                        ->modalDescription('Stop broadcasting for the selected networks.')
+                        ->action(function (Collection $records): void {
+                            $service = app(NetworkBroadcastService::class);
+
+                            foreach ($records as $record) {
+                                $service->stop($record);
+                            }
+
+                            Notification::make()
+                                ->warning()
+                                ->title('Broadcast Stopped')
+                                ->body('Broadcast stopped for '.$records->count().' networks.')
+                                ->send();
+                        })
+                        ->deselectRecordsAfterCompletion(),
+
                     BulkAction::make('set_logo_url')
                         ->label('Set logo URL')
                         ->schema([
