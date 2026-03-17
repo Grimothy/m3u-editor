@@ -4,6 +4,7 @@ namespace App\Services;
 
 use App\Models\Playlist;
 use App\Models\PlaylistProfile;
+use App\Services\M3uProxyService;
 use Illuminate\Support\Facades\Cache;
 use Illuminate\Support\Facades\Log;
 use Illuminate\Support\Facades\Redis;
@@ -657,7 +658,13 @@ class ProfileService
         $totalActive = 0;
 
         foreach ($playlist->profiles()->get() as $profile) {
-            $activeCount = static::getConnectionCount($profile);
+            // Query the proxy API for actual upstream stream count per profile.
+            // This reflects real provider connections (1 for pooled streams),
+            // unlike the Redis counter which increments per client request.
+            $activeCount = M3uProxyService::getActiveStreamsCountByMetadata(
+                'provider_profile_id',
+                (string) $profile->id
+            );
             $maxStreams = $profile->effective_max_streams;
 
             // Get expiration date from provider_info (stored in database)

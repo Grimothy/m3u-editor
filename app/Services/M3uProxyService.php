@@ -174,7 +174,11 @@ class M3uProxyService
             if ($response->successful()) {
                 $data = $response->json();
 
-                return $data['total_clients'] ?? 0; // Return total client count across all streams
+                // Return the number of active streams (upstream provider connections),
+                // NOT total_clients (which counts proxy-level client connections).
+                // When multiple clients share a pooled stream, there is only one
+                // upstream provider connection regardless of how many clients watch.
+                return $data['total_matching'] ?? 0;
             }
 
             Log::warning('Failed to fetch playlist streams from m3u-proxy: HTTP '.$response->status());
@@ -301,7 +305,8 @@ class M3uProxyService
     }
 
     /**
-     * Get active streams count by any metadata field/value combination
+     * Get active streams count by any metadata field/value combination.
+     * Returns the number of distinct upstream connections (streams), not proxy client count.
      */
     public static function getActiveStreamsCountByMetadata(string $field, string $value): int
     {
@@ -326,7 +331,10 @@ class M3uProxyService
             if ($response->successful()) {
                 $data = $response->json();
 
-                return $data['total_clients'] ?? 0;
+                // Use total_matching (stream count = provider connections), not
+                // total_clients (which counts all proxy-level client connections
+                // and over-reports when streams are pooled across multiple clients).
+                return $data['total_matching'] ?? 0;
             }
 
             return 0;
@@ -715,6 +723,39 @@ class M3uProxyService
                     'provider_profile_id' => $selectedProfile?->id,
                     'channel_id' => $id,
                 ]);
+            }
+        }
+
+        // IMPORTANT: Check for existing pooled non-transcoded stream BEFORE capacity check.
+        // If a pooled stream exists, we can reuse it without consuming additional capacity.
+        // (Same logic as the transcoded pool check above, but for direct streams)
+        if (! $profile) {
+            $existingStreamId = $this->findExistingPooledStream($originalChannelId, $originalPlaylistUuid, null, null);
+
+            if ($existingStreamId) {
+                Log::debug('Reusing existing pooled direct stream (bypassing capacity check)', [
+                    'stream_id' => $existingStreamId,
+                    'original_channel_id' => $originalChannelId,
+                    'original_playlist_uuid' => $originalPlaylistUuid,
+                    'note' => 'Pool reuse works across any provider profile',
+                ]);
+
+                $url = PlaylistUrlService::getChannelUrl($channel, $playlist);
+                $format = pathinfo($url, PATHINFO_EXTENSION);
+                $format = $format === 'm3u8' ? 'hls' : $format;
+
+                return $this->buildProxyUrl($existingStreamId, $format, $username);
+            }
+
+            // If Redis has a channel stream key but the proxy returned no active stream above,
+            // the key is stale (proxy was restarted, stream died, webhook missed). Clear it so
+            // the capacity check and profile selection below can proceed correctly.
+            if (ProfileService::isChannelStreamActive($originalChannelId, $originalPlaylistUuid)) {
+                Log::debug('Clearing stale channel stream key (direct path, no proxy stream found)', [
+                    'original_channel_id' => $originalChannelId,
+                    'original_playlist_uuid' => $originalPlaylistUuid,
+                ]);
+                ProfileService::clearChannelStreamMapping($originalChannelId, $originalPlaylistUuid);
             }
         }
 
