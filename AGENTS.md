@@ -59,52 +59,6 @@ This project has domain-specific skills available. You MUST activate the relevan
 
 - Be concise in your explanations - focus on what's important rather than explaining obvious details.
 
-=== context rules ===
-
-# Context File Requirements
-
-> **Critical**: See `.opencode/instructions.md` for the full context-first workflow policy.
-
-Before implementing any code, documentation, or tests, you MUST load the relevant context files from `.opencode/context/core/`:
-
-## Required Context by Task Type
-
-- **Code changes**: Load `.opencode/context/core/standards/code-quality.md`
-- **Writing tests**: Load `.opencode/context/core/standards/test-coverage.md`
-- **Documentation**: Load `.opencode/context/core/standards/documentation.md`
-- **Code reviews**: Load `.opencode/context/core/workflows/code-review.md`
-- **Domain-specific work**: Load relevant files from `.opencode/context/domain/`
-
-## Why This Matters
-
-Context files contain project-specific standards, patterns, and conventions. Skipping them results in:
-- ❌ Code that doesn't match project conventions
-- ❌ Tests that use wrong patterns
-- ❌ Documentation with inconsistent structure
-- ❌ Wasted effort and rework
-
-## Workflow
-
-1. **Before starting**: Read `.opencode/context/navigation.md` to find relevant context files
-2. **Load context**: Use Read tool to load appropriate context file(s) for your task type
-3. **Review standards**: Understand patterns, conventions, and gotchas from the loaded context
-4. **Implement**: Follow the loaded standards and patterns
-5. **Update context**: After implementation, update context files with new patterns discovered (see `.opencode/context/core/standards/workflows/context-maintenance.md`)
-
-## Quick Lookup
-
-| If you're doing... | Load these files |
-|-------------------|------------------|
-| Writing PHP/Laravel code | `code-quality.md` |
-| Creating Filament resources | `code-quality.md` (Filament section) |
-| Writing Pest tests | `test-coverage.md` |
-| Network broadcast features | `domain/network-broadcasts.md`, `code-quality.md` |
-| Proxy integration work | `domain/proxy-integration.md`, `code-quality.md` |
-| Code reviews | `workflows/code-review.md` |
-| Writing documentation | `documentation.md` |
-
-**Remember**: This is not optional. Context loading is MANDATORY before bash/write/edit/task execution.
-
 === boost rules ===
 
 # Laravel Boost
