@@ -151,9 +151,11 @@ class NetworkHlsController extends Controller
             return $response;
         }
 
-        $deadline = microtime(true) + $waitSeconds;
+        // Use iteration count rather than wall-clock time so the loop is
+        // deterministic under fake sleeps in tests and on slow CI machines.
+        $maxIterations = (int) ceil($waitSeconds * 1000 / $pollMs);
 
-        while (microtime(true) < $deadline) {
+        for ($i = 0; $i < $maxIterations; $i++) {
             Sleep::for($pollMs)->milliseconds();
             /** @var \Illuminate\Http\Client\Response $response */
             $response = $request->get($playlistUrl);

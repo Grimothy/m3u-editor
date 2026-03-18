@@ -5,6 +5,7 @@ use App\Models\User;
 use Illuminate\Support\Carbon;
 use Illuminate\Support\Facades\Cache;
 use Illuminate\Support\Facades\Http;
+use Illuminate\Support\Sleep;
 
 beforeEach(function () {
     $this->user = User::factory()->create();
@@ -171,6 +172,7 @@ it('playlist fetch does not refresh on-demand connection heartbeat while already
 
 it('waits briefly for first on-demand playlist after start', function () {
     Carbon::setTestNow(now());
+    Sleep::fake();
 
     config()->set('proxy.broadcast_on_demand_startup_wait_seconds', 2);
     config()->set('proxy.broadcast_on_demand_startup_poll_ms', 100);
@@ -214,6 +216,7 @@ it('waits briefly for first on-demand playlist after start', function () {
     $playlistResp->assertStatus(200);
     expect(str_contains($playlistResp->getContent(), '#EXTM3U'))->toBeTrue();
 
+    Sleep::fake(false);
     Carbon::setTestNow();
 })->group('serial');
 
@@ -251,6 +254,7 @@ it('playlist cold-start is skipped when lock is already held by a concurrent req
 
 it('waits for runway even when startup playlist initially returns 200 with too few segments', function () {
     Carbon::setTestNow(now());
+    Sleep::fake();
 
     config()->set('proxy.broadcast_on_demand_startup_wait_seconds', 2);
     config()->set('proxy.broadcast_on_demand_startup_poll_ms', 100);
@@ -280,5 +284,6 @@ it('waits for runway even when startup playlist initially returns 200 with too f
     $playlistResp->assertStatus(200);
     expect(substr_count($playlistResp->getContent(), '.ts'))->toBeGreaterThanOrEqual(3);
 
+    Sleep::fake(false);
     Carbon::setTestNow();
 })->group('serial');
