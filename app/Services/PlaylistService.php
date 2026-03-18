@@ -88,8 +88,9 @@ class PlaylistService
         $playlistAuth = null;
         if (method_exists($playlist, 'playlistAuths')) {
             $playlistAuth = $playlist->playlistAuths()->where('enabled', true)->first();
-        } elseif ($playlist instanceof PlaylistAlias) {
-            // If PlaylistAlias, check if direct authentication is set
+        }
+        // For PlaylistAlias, fall back to direct alias credentials if no PlaylistAuth found
+        if (! $playlistAuth && $playlist instanceof PlaylistAlias) {
             $playlistAuth = $playlist->username && $playlist->password
                 ? (object) ['username' => $playlist->username, 'password' => $playlist->password]
                 : null;
@@ -281,7 +282,7 @@ class PlaylistService
         }
 
         // Finally try playlist alias
-        $alias = PlaylistAlias::where('uuid', $uuid)->where('enabled', true)->first();
+        $alias = PlaylistAlias::where('uuid', $uuid)->first();
         if ($alias) {
             return $alias; // Return the alias itself, not the underlying playlist
         }
@@ -436,25 +437,27 @@ class PlaylistService
         }
 
         // Method 1b: Direct authentication with PlaylistAlias credentials
-        $alias = PlaylistAlias::where('enabled', true)
-            ->where('username', $username)
-            ->where('password', $password)
-            ->with(['user', 'playlist', 'customPlaylist'])
-            ->first();
+        // Only check if Method 1 didn't find a result
+        if (! $playlist) {
+            $alias = PlaylistAlias::where('enabled', true)
+                ->where('username', $username)
+                ->where('password', $password)
+                ->with(['user', 'playlist', 'customPlaylist'])
+                ->first();
 
-        if ($alias) {
-            // If alias found but expired, treat as not found
-            if ($alias->isExpired()) {
-                return false;
+            if ($alias) {
+                // If alias found but expired, fall through to Method 2
+                if (! $alias->isExpired()) {
+                    return [
+                        $alias,
+                        'alias_auth',
+                        $username,
+                        $password,
+                    ];
+                }
             }
-
-            return [
-                $alias,
-                'alias_auth',
-                $username,
-                $password,
-            ];
         }
+
         // Method 2: Fall back to original authentication:
         //      (username = playlist owner, password = playlist UUID)
         if (! $playlist) {

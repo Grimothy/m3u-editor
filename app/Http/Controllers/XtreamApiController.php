@@ -426,9 +426,12 @@ class XtreamApiController extends Controller
             }
             $outputFormats = ['m3u8', 'ts'];
             if ($playlist->enable_proxy) {
-                if ($playlist->xtream_config ?? false) {
-                    // We'll restrict the format to the format the playlist was imported in
-                    $proxyOutput = $playlist->xtream_config['output'] ?? 'ts';
+                // For PlaylistAlias, xtream_config is a list of configs — use effective playlist's config for output format
+                $xtreamConfig = $playlist instanceof PlaylistAlias
+                    ? ($playlist->getEffectivePlaylist()?->xtream_config ?? null)
+                    : ($playlist->xtream_config ?? null);
+                if ($xtreamConfig) {
+                    $proxyOutput = $xtreamConfig['output'] ?? 'ts';
                     $outputFormats = $proxyOutput === 'hls' ? ['m3u8'] : [$proxyOutput];
                 }
                 $activeConnections = M3uProxyService::getPlaylistActiveStreamsCount($playlist);

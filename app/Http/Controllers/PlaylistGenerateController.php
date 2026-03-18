@@ -47,15 +47,13 @@ class PlaylistGenerateController extends Controller
         }
 
         // Check auth
-        if ($playlist instanceof PlaylistAlias) {
+        $auths = $playlist->playlistAuths()->where('enabled', true)->get();
+        // For PlaylistAlias, also check direct alias credentials as fallback
+        if ($auths->isEmpty() && $playlist instanceof PlaylistAlias) {
             $auth = $playlist->authObject;
             if ($auth) {
                 $auths = collect([$auth]);
-            } else {
-                $auths = collect();
             }
-        } else {
-            $auths = $playlist->playlistAuths()->where('enabled', true)->get();
         }
 
         $usedAuth = null;
@@ -372,15 +370,12 @@ class PlaylistGenerateController extends Controller
         $providedUsername = $username ?? $request->get('username');
         $providedPassword = $password ?? $request->get('password');
 
-        if ($playlist instanceof PlaylistAlias) {
+        $auths = $playlist->playlistAuths()->where('enabled', true)->get();
+        if ($auths->isEmpty() && $playlist instanceof PlaylistAlias) {
             $auth = $playlist->authObject;
             if ($auth) {
                 $auths = collect([$auth]);
-            } else {
-                $auths = collect();
             }
-        } else {
-            $auths = $playlist->playlistAuths()->where('enabled', true)->get();
         }
 
         if ($auths->isNotEmpty()) {
@@ -437,15 +432,12 @@ class PlaylistGenerateController extends Controller
         $providedPassword = $password ?? $request->get('password');
 
         $usedAuth = null;
-        if ($playlist instanceof PlaylistAlias) {
+        $auths = $playlist->playlistAuths()->where('enabled', true)->get();
+        if ($auths->isEmpty() && $playlist instanceof PlaylistAlias) {
             $auth = $playlist->authObject;
             if ($auth) {
                 $auths = collect([$auth]);
-            } else {
-                $auths = collect();
             }
-        } else {
-            $auths = $playlist->playlistAuths()->where('enabled', true)->get();
         }
 
         if ($auths->isNotEmpty()) {
@@ -570,15 +562,12 @@ class PlaylistGenerateController extends Controller
         $providedUsername = $username ?? $request->get('username');
         $providedPassword = $password ?? $request->get('password');
 
-        if ($playlist instanceof PlaylistAlias) {
+        $auths = $playlist->playlistAuths()->where('enabled', true)->get();
+        if ($auths->isEmpty() && $playlist instanceof PlaylistAlias) {
             $auth = $playlist->authObject;
             if ($auth) {
                 $auths = collect([$auth]);
-            } else {
-                $auths = collect();
             }
-        } else {
-            $auths = $playlist->playlistAuths()->where('enabled', true)->get();
         }
 
         if ($auths->isNotEmpty()) {
@@ -632,7 +621,10 @@ class PlaylistGenerateController extends Controller
     {
         // Build the base query for channels. We'll use cursor() to stream
         // results rather than loading all channels into memory.
-        $playlistUuid = $playlist->uuid;
+        // For tag lookups, use the custom playlist UUID when dealing with aliases of custom playlists
+        $playlistUuid = ($playlist instanceof PlaylistAlias && $playlist->custom_playlist_id)
+            ? ($playlist->customPlaylist?->uuid ?? $playlist->uuid)
+            : $playlist->uuid;
         $query = $playlist->channels()
             ->leftJoin('groups', 'channels.group_id', '=', 'groups.id')
             ->where('channels.enabled', true)
@@ -653,8 +645,10 @@ class PlaylistGenerateController extends Controller
             // Alias the external EPG channel identifier to avoid clobbering the FK attribute
             ->selectRaw('epg_channels.channel_id as epg_channel_key');
 
-        // If custom playlist, left join tags through the taggables polymorphic table
-        if ($playlist instanceof CustomPlaylist) {
+        // If custom playlist (or alias of one), left join tags through the taggables polymorphic table
+        $isCustomContext = $playlist instanceof CustomPlaylist
+            || ($playlist instanceof PlaylistAlias && ! empty($playlist->custom_playlist_id));
+        if ($isCustomContext) {
             $query->leftJoin('taggables', function ($join) {
                 $join->on('channels.id', '=', 'taggables.taggable_id')
                     ->where('taggables.taggable_type', '=', Channel::class);

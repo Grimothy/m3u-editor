@@ -51,11 +51,8 @@ class GuestPlaylistAuth extends Middleware
         }
         $playlist = PlaylistFacade::resolvePlaylistByUuid($uuid);
         if (! $playlist) {
-            throw new AuthenticationException(
-                'Invalid playlist unique identifier',
-                $guards,
-                $this->redirectTo($request)
-            );
+            // Abort with 404 instead of redirecting to prevent infinite redirect loops
+            abort(404, 'Playlist not found');
         }
         if (! $this->checkExistingAuth($uuid)) {
             // Only return 403 if not authenticated and not on the dashboard/landing page
