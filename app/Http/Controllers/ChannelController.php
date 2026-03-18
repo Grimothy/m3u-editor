@@ -11,7 +11,9 @@ use App\Models\Group;
 use Illuminate\Http\JsonResponse;
 use Illuminate\Http\Request;
 use Illuminate\Support\Facades\DB;
+use Illuminate\Support\Facades\Http;
 use Illuminate\Validation\Rule;
+use Symfony\Component\Process\Process;
 
 /**
  * @tags Channels
@@ -984,7 +986,7 @@ class ChannelController extends Controller
         $startTime = microtime(true);
 
         try {
-            $response = \Illuminate\Support\Facades\Http::timeout(5)
+            $response = Http::timeout(5)
                 ->withHeaders([
                     'User-Agent' => 'Mozilla/5.0 (m3u-editor availability check)',
                 ])
@@ -1075,7 +1077,7 @@ class ChannelController extends Controller
             $startTime = microtime(true);
 
             try {
-                $response = \Illuminate\Support\Facades\Http::timeout(5)
+                $response = Http::timeout(5)
                     ->withHeaders([
                         'User-Agent' => 'Mozilla/5.0 (m3u-editor availability check)',
                     ])
@@ -1316,7 +1318,7 @@ class ChannelController extends Controller
         // Measure connect time
         $connectStart = microtime(true);
         try {
-            $connectResponse = \Illuminate\Support\Facades\Http::timeout(5)
+            $connectResponse = Http::timeout(5)
                 ->withHeaders(['User-Agent' => 'Mozilla/5.0 (m3u-editor stability test)'])
                 ->head($url);
             $connectTime = round((microtime(true) - $connectStart) * 1000);
@@ -1341,7 +1343,7 @@ class ChannelController extends Controller
 
         for ($i = 0; $i < $numChecks; $i++) {
             try {
-                $process = new \Symfony\Component\Process\Process([
+                $process = new Process([
                     'ffprobe', '-v', 'error',
                     '-rw_timeout', '5000000',
                     '-user_agent', 'Mozilla/5.0 (m3u-editor stability test)',

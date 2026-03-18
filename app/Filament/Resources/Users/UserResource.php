@@ -49,10 +49,10 @@ class UserResource extends Resource
     {
         return $schema
             ->components([
-                Forms\Components\TextInput::make('name')
+                TextInput::make('name')
                     ->label('Username')
                     ->required(),
-                Forms\Components\TextInput::make('email')
+                TextInput::make('email')
                     ->label('Email address')
                     ->email()
                     ->required(),
@@ -73,7 +73,7 @@ class UserResource extends Resource
                             ->gridDirection('row')
                             ->columns(2),
                     ]),
-                Forms\Components\Toggle::make('update_password')
+                Toggle::make('update_password')
                     ->label('Update Password')
                     ->default(false)
                     ->live()
@@ -81,7 +81,7 @@ class UserResource extends Resource
                     ->dehydrated(false)
                     ->columnSpanFull(),
                 // Forms\Components\DateTimePicker::make('email_verified_at'),
-                Forms\Components\TextInput::make('password')
+                TextInput::make('password')
                     ->password()
                     ->revealable()
                     ->columnSpanFull()

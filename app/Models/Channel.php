@@ -309,7 +309,7 @@ class Channel extends Model
                 try {
                     $date = new \DateTime($dateToParse);
                     $year = (int) $date->format('Y');
-                } catch (\Exception $e) {
+                } catch (Exception $e) {
                     Log::warning("Unable to parse release date \"{$dateToParse}\" for VOD {$this->id}");
                 }
             }
@@ -331,7 +331,7 @@ class Channel extends Model
             }
 
             return true;
-        } catch (\Exception $e) {
+        } catch (Exception $e) {
             Log::error('Failed to fetch metadata for VOD '.$this->id, ['exception' => $e]);
         }
 

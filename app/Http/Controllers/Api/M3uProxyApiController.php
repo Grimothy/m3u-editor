@@ -15,6 +15,7 @@ use App\Services\NetworkBroadcastService;
 use App\Services\ProfileService;
 use App\Settings\GeneralSettings;
 use Exception;
+use Illuminate\Http\JsonResponse;
 use Illuminate\Http\Request;
 use Illuminate\Support\Facades\Log;
 use Symfony\Component\HttpFoundation\RedirectResponse;
@@ -243,7 +244,7 @@ class M3uProxyApiController extends Controller
      *   }
      * }
      *
-     * @return \Illuminate\Http\JsonResponse
+     * @return JsonResponse
      */
     public function resolveFailoverUrl(Request $request)
     {

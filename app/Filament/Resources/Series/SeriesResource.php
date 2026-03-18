@@ -9,6 +9,7 @@ use App\Filament\Resources\Series\Pages\EditSeries;
 use App\Filament\Resources\Series\Pages\ListSeries;
 use App\Filament\Resources\Series\Pages\ViewSeries;
 use App\Filament\Resources\Series\RelationManagers\EpisodesRelationManager;
+use App\Forms\Components\TmdbSearchResults;
 use App\Jobs\FetchTmdbIds;
 use App\Jobs\ProcessM3uImportSeriesEpisodes;
 use App\Jobs\SeriesFindAndReplace;
@@ -19,6 +20,7 @@ use App\Models\Series;
 use App\Rules\CheckIfUrlOrLocalPath;
 use App\Services\LogoCacheService;
 use App\Services\PlaylistService;
+use App\Services\TmdbService;
 use App\Services\XtreamService;
 use App\Settings\GeneralSettings;
 use App\Traits\HasUserFiltering;
@@ -389,10 +391,10 @@ class SeriesResource extends Resource
                                             }
 
                                             try {
-                                                $tmdbService = app(\App\Services\TmdbService::class);
+                                                $tmdbService = app(TmdbService::class);
                                                 $results = $tmdbService->searchTvSeriesManual($query, $year);
                                                 $set('search_results', $results);
-                                            } catch (\Exception $e) {
+                                            } catch (Exception $e) {
                                                 Notification::make()
                                                     ->danger()
                                                     ->title('Search Error')
@@ -406,7 +408,7 @@ class SeriesResource extends Resource
                             ->description('Click on a result to apply the TMDB IDs')
                             ->schema([
                                 Forms\Components\Hidden::make('series_id'),
-                                \App\Forms\Components\TmdbSearchResults::make('search_results')
+                                TmdbSearchResults::make('search_results')
                                     ->type('tv')
                                     ->default([]),
                             ]),

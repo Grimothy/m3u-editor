@@ -7,12 +7,15 @@ use App\Filament\Resources\Networks\Pages\CreateNetwork;
 use App\Filament\Resources\Networks\Pages\EditNetwork;
 use App\Filament\Resources\Networks\Pages\ListNetworks;
 use App\Filament\Resources\Networks\Pages\ManualScheduleBuilder;
+use App\Filament\Resources\Playlists\PlaylistResource;
 use App\Models\Network;
+use App\Models\Playlist;
 use App\Services\AssetInventoryService;
 use App\Services\LogoCacheService;
 use App\Services\NetworkBroadcastService;
 use App\Services\NetworkScheduleService;
 use App\Traits\HasUserFiltering;
+use Carbon\Carbon;
 use Filament\Actions\Action;
 use Filament\Actions\ActionGroup;
 use Filament\Actions\BulkAction;
@@ -51,6 +54,7 @@ use Illuminate\Database\Eloquent\Model;
 use Illuminate\Support\Collection;
 use Illuminate\Support\Facades\Auth;
 use Illuminate\Support\Facades\Storage;
+use Illuminate\Support\Str;
 
 class NetworkResource extends Resource
 {
@@ -261,9 +265,9 @@ class NetworkResource extends Resource
                                                 ->required(),
                                         ])
                                         ->createOptionUsing(function (array $data): int {
-                                            $playlist = \App\Models\Playlist::create([
+                                            $playlist = Playlist::create([
                                                 'name' => $data['name'],
-                                                'uuid' => (string) \Illuminate\Support\Str::uuid(),
+                                                'uuid' => (string) Str::uuid(),
                                                 'user_id' => Auth::id(),
                                                 'is_network_playlist' => true,
                                             ]);
@@ -448,9 +452,9 @@ class NetworkResource extends Resource
                                         ->required(),
                                 ])
                                 ->createOptionUsing(function (array $data): int {
-                                    $playlist = \App\Models\Playlist::create([
+                                    $playlist = Playlist::create([
                                         'name' => $data['name'],
-                                        'uuid' => (string) \Illuminate\Support\Str::uuid(),
+                                        'uuid' => (string) Str::uuid(),
                                         'user_id' => Auth::id(),
                                         'is_network_playlist' => true,
                                     ]);
@@ -674,7 +678,7 @@ class NetworkResource extends Resource
                                 ->visible(fn (Get $get): bool => $get('broadcast_enabled') && $get('broadcast_schedule_enabled'))
                                 ->afterStateUpdated(function ($state, $record) {
                                     if ($state && $record) {
-                                        $scheduledTime = \Carbon\Carbon::parse($state);
+                                        $scheduledTime = Carbon::parse($state);
                                         if ($scheduledTime->isPast()) {
                                             Notification::make()
                                                 ->warning()
@@ -1014,7 +1018,7 @@ class NetworkResource extends Resource
                         ->label('View Playlist')
                         ->icon('heroicon-o-eye')
                         ->visible(fn (Network $record): bool => $record->network_playlist_id !== null)
-                        ->url(fn (Network $record): string => \App\Filament\Resources\Playlists\PlaylistResource::getUrl('view', ['record' => $record->network_playlist_id])),
+                        ->url(fn (Network $record): string => PlaylistResource::getUrl('view', ['record' => $record->network_playlist_id])),
 
                     DeleteAction::make(),
                 ])->button()->hiddenLabel()->size('sm'),

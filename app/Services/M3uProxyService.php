@@ -1582,7 +1582,7 @@ class M3uProxyService
 
                 // Only include broadcasts for networks owned by the current user
                 // Get networks for current user
-                $userNetworkUuids = \App\Models\Network::where('user_id', auth()->id())->pluck('uuid')->toArray();
+                $userNetworkUuids = Network::where('user_id', auth()->id())->pluck('uuid')->toArray();
 
                 $broadcasts = array_filter($data['broadcasts'] ?? [], function ($b) use ($userNetworkUuids) {
                     return isset($b['network_id']) && in_array($b['network_id'], $userNetworkUuids);
@@ -2004,7 +2004,7 @@ class M3uProxyService
                     // proxies to the m3u-proxy service.
                     return rtrim($host, '/').'/m3u-proxy';
                 }
-            } catch (\Exception $e) {
+            } catch (Exception $e) {
                 // ignore and fall back
             }
         }

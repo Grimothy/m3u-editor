@@ -25,7 +25,7 @@ class PlaylistGenerateController extends Controller
         }
 
         // Handle network playlists separately
-        if ($playlist instanceof \App\Models\Playlist && $playlist->is_network_playlist) {
+        if ($playlist instanceof Playlist && $playlist->is_network_playlist) {
             return $this->generateNetworkPlaylist($request, $playlist);
         }
 
@@ -684,7 +684,7 @@ class PlaylistGenerateController extends Controller
     /**
      * Generate M3U output for a network playlist (outputs networks instead of channels).
      */
-    protected function generateNetworkPlaylist(Request $request, \App\Models\Playlist $playlist)
+    protected function generateNetworkPlaylist(Request $request, Playlist $playlist)
     {
         $networks = $playlist->networks()
             ->where('enabled', true)

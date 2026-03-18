@@ -33,6 +33,7 @@ use Illuminate\Database\Eloquent\Relations\Relation;
 use Illuminate\Http\Request;
 use Illuminate\Support\Facades\Log;
 use Illuminate\Support\Str;
+use Spatie\Tags\Tag;
 
 /**
  * Service to handle playlist-related operations.
@@ -59,7 +60,7 @@ class PlaylistService
             try {
                 $settings = app(GeneralSettings::class);
                 $proxyUrlOverride = $settings->url_override ?? null;
-            } catch (\Exception $e) {
+            } catch (Exception $e) {
             }
         }
         if ($proxyUrlOverride) {
@@ -851,7 +852,7 @@ class PlaylistService
                 }
 
                 if ($originalName) {
-                    $tag = \Spatie\Tags\Tag::findOrCreate($originalName, $tagType);
+                    $tag = Tag::findOrCreate($originalName, $tagType);
                     $playlist->attachTag($tag);
 
                     $item->detachTags($playlistTags);
@@ -859,7 +860,7 @@ class PlaylistService
                 }
             }
         } elseif ($tagName) {
-            $tag = \Spatie\Tags\Tag::findOrCreate($tagName, $tagType);
+            $tag = Tag::findOrCreate($tagName, $tagType);
             $playlist->attachTag($tag);
 
             foreach ($cursor as $item) {

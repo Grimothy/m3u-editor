@@ -168,7 +168,7 @@ class EpgApiController extends Controller
         }
 
         // Handle network playlists - they have networks with programmes instead of channels with EPG
-        if ($playlist instanceof \App\Models\Playlist && $playlist->is_network_playlist) {
+        if ($playlist instanceof Playlist && $playlist->is_network_playlist) {
             return $this->getDataForNetworkPlaylist($playlist, $request);
         }
 
@@ -597,7 +597,7 @@ class EpgApiController extends Controller
      * Get EPG data for a network playlist.
      * Networks act as channels, and their programmes provide the EPG schedule.
      */
-    private function getDataForNetworkPlaylist(\App\Models\Playlist $playlist, Request $request)
+    private function getDataForNetworkPlaylist(Playlist $playlist, Request $request)
     {
         // Pagination parameters
         $page = (int) $request->get('page', 1);

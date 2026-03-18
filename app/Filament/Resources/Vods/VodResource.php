@@ -8,6 +8,7 @@ use App\Facades\SortFacade;
 use App\Filament\Resources\VodResource\Pages;
 use App\Filament\Resources\Vods\Pages\ListVod;
 use App\Filament\Resources\Vods\Pages\ViewVod;
+use App\Forms\Components\TmdbSearchResults;
 use App\Jobs\ChannelFindAndReplace;
 use App\Jobs\ChannelFindAndReplaceReset;
 use App\Jobs\FetchTmdbIds;
@@ -21,6 +22,7 @@ use App\Models\Playlist;
 use App\Rules\CheckIfUrlOrLocalPath;
 use App\Services\LogoCacheService;
 use App\Services\PlaylistService;
+use App\Services\TmdbService;
 use App\Settings\GeneralSettings;
 use App\Traits\HasUserFiltering;
 use Exception;
@@ -32,7 +34,6 @@ use Filament\Actions\DeleteAction;
 use Filament\Actions\DeleteBulkAction;
 use Filament\Actions\EditAction;
 use Filament\Actions\ViewAction;
-use Filament\Forms;
 use Filament\Forms\Components\Hidden;
 use Filament\Forms\Components\Repeater;
 use Filament\Forms\Components\Select;
@@ -537,11 +538,11 @@ class VodResource extends Resource
                             ->schema([
                                 Grid::make(2)
                                     ->schema([
-                                        Forms\Components\TextInput::make('current_tmdb_id')
+                                        TextInput::make('current_tmdb_id')
                                             ->label('TMDB ID')
                                             ->disabled()
                                             ->placeholder('Not set'),
-                                        Forms\Components\TextInput::make('current_imdb_id')
+                                        TextInput::make('current_imdb_id')
                                             ->label('IMDB ID')
                                             ->disabled()
                                             ->placeholder('Not set'),
@@ -554,12 +555,12 @@ class VodResource extends Resource
                             ->schema([
                                 Grid::make(3)
                                     ->schema([
-                                        Forms\Components\TextInput::make('search_query')
+                                        TextInput::make('search_query')
                                             ->label('Search Query')
                                             ->placeholder('Enter movie name...')
                                             ->required()
                                             ->columnSpan(2),
-                                        Forms\Components\TextInput::make('search_year')
+                                        TextInput::make('search_year')
                                             ->label('Year (optional)')
                                             ->numeric()
                                             ->minValue(1900)
@@ -584,10 +585,10 @@ class VodResource extends Resource
                                             }
 
                                             try {
-                                                $tmdbService = app(\App\Services\TmdbService::class);
+                                                $tmdbService = app(TmdbService::class);
                                                 $results = $tmdbService->searchMovieManual($query, $year);
                                                 $set('search_results', $results);
-                                            } catch (\Exception $e) {
+                                            } catch (Exception $e) {
                                                 Notification::make()
                                                     ->danger()
                                                     ->title('Search Error')
@@ -600,8 +601,8 @@ class VodResource extends Resource
                         Section::make('Search Results')
                             ->description('Click on a result to apply the TMDB IDs')
                             ->schema([
-                                Forms\Components\Hidden::make('vod_id'),
-                                \App\Forms\Components\TmdbSearchResults::make('search_results')
+                                Hidden::make('vod_id'),
+                                TmdbSearchResults::make('search_results')
                                     ->type('movie')
                                     ->default([]),
                             ]),

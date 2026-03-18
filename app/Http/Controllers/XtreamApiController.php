@@ -10,6 +10,7 @@ use App\Models\Category;
 use App\Models\Channel;
 use App\Models\CustomPlaylist;
 use App\Models\Epg;
+use App\Models\Group;
 use App\Models\MergedPlaylist;
 use App\Models\Network;
 use App\Models\Playlist;
@@ -21,6 +22,7 @@ use App\Models\ViewerWatchProgress;
 use App\Services\EpgCacheService;
 use App\Services\LogoCacheService;
 use App\Services\M3uProxyService;
+use App\Settings\GeneralSettings;
 use Carbon\Carbon;
 use Illuminate\Database\Eloquent\Collection;
 use Illuminate\Http\Request;
@@ -448,7 +450,7 @@ class XtreamApiController extends Controller
                 $expDate = $expires;
             }
 
-            $settings = app(\App\Settings\GeneralSettings::class);
+            $settings = app(GeneralSettings::class);
             $message = $settings->xtream_api_message ?? '';
 
             $userInfo = [
@@ -1112,7 +1114,7 @@ class XtreamApiController extends Controller
                 $channelsWithoutTags = $channelIds->diff($channelsWithTags);
 
                 if ($channelsWithoutTags->isNotEmpty()) {
-                    $fallbackGroups = \App\Models\Group::whereIn('id', function ($query) use ($channelsWithoutTags) {
+                    $fallbackGroups = Group::whereIn('id', function ($query) use ($channelsWithoutTags) {
                         $query->select('group_id')
                             ->from('channels')
                             ->whereIn('id', $channelsWithoutTags)
@@ -1218,7 +1220,7 @@ class XtreamApiController extends Controller
                 $channelsWithoutTags = $channelIds->diff($channelsWithTags);
 
                 if ($channelsWithoutTags->isNotEmpty()) {
-                    $fallbackGroups = \App\Models\Group::whereIn('id', function ($query) use ($channelsWithoutTags) {
+                    $fallbackGroups = Group::whereIn('id', function ($query) use ($channelsWithoutTags) {
                         $query->select('group_id')
                             ->from('channels')
                             ->whereIn('id', $channelsWithoutTags)
