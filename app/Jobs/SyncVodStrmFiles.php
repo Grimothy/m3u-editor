@@ -2,6 +2,7 @@
 
 namespace App\Jobs;
 
+use App\Enums\SyncRunPhase;
 use App\Models\Channel;
 use App\Models\MediaServerIntegration;
 use App\Models\Playlist;
@@ -10,6 +11,7 @@ use App\Models\StrmFileMapping;
 use App\Models\User;
 use App\Services\NfoService;
 use App\Services\PlaylistService;
+use App\Services\SyncPipelineService;
 use App\Services\VodFileNameService;
 use App\Settings\GeneralSettings;
 use Filament\Notifications\Notification;
@@ -60,6 +62,8 @@ class SyncVodStrmFiles implements ShouldQueue
         public ?int $currentBatch = null,
         public bool $isCleanupJob = false,
         public ?array $channel_ids = null,
+        public ?int $syncRunId = null,
+        public ?SyncRunPhase $completionPhase = null,
     ) {
         // Run file synces on the dedicated queue
         $this->onQueue('file_sync');
@@ -173,7 +177,7 @@ class SyncVodStrmFiles implements ShouldQueue
 
         // Add checker job at the end of the chain
         $jobs[] = new CheckVodStrmProgress(
-            currentOffset: $jobsInFirstChain * $batchSize,
+            currentOffset: min($jobsInFirstChain * $batchSize, $totalCount),
             totalChannels: $totalCount,
             notify: $this->notify,
             all_playlists: $this->all_playlists,
@@ -181,6 +185,8 @@ class SyncVodStrmFiles implements ShouldQueue
             user_id: $this->resolveUserId(),
             needsCleanup: true,
             channel_ids: $this->channel_ids,
+            syncRunId: $this->syncRunId,
+            completionPhase: $this->completionPhase,
         );
 
         Bus::chain($jobs)->dispatch();
@@ -588,6 +594,12 @@ class SyncVodStrmFiles implements ShouldQueue
             if ($playlist) {
                 dispatch(new FireStreamFilesSyncedEvent($playlist, 'vod_stream_files_synced'));
             }
+        }
+
+        // Advance the pipeline now that all cleanup work (orphan removal, media-server
+        // refresh, post-process events) has completed.
+        if ($this->syncRunId && $this->completionPhase) {
+            app(SyncPipelineService::class)->completePhase($this->syncRunId, $this->completionPhase);
         }
     }
 

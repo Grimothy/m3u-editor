@@ -44,6 +44,7 @@ use App\Services\DateFormatService;
 use App\Services\EpgCacheService;
 use App\Services\M3uProxyService;
 use App\Services\ProfileService;
+use App\Services\SyncPipelineService;
 use App\Services\XtreamService;
 use App\Settings\GeneralSettings;
 use App\Tables\Columns\ProgressColumn;
@@ -415,8 +416,9 @@ class PlaylistResource extends Resource implements CopilotResource
                                     'status' => Status::Processing,
                                     'progress' => 0,
                                 ]);
+                                $syncRun = app(SyncPipelineService::class)->startImport($record, trigger: 'filament_refresh');
                                 app('Illuminate\Contracts\Bus\Dispatcher')
-                                    ->dispatch(new ProcessM3uImport($record, force: true));
+                                    ->dispatch(new ProcessM3uImport($record, force: true, syncRunId: $syncRun->id));
                             }
                         })->after(function () {
                             Notification::make()
@@ -516,8 +518,9 @@ class PlaylistResource extends Resource implements CopilotResource
                             'status' => Status::Processing,
                             'progress' => 0,
                         ]);
+                        $syncRun = app(SyncPipelineService::class)->startImport($record, trigger: 'filament_refresh');
                         app('Illuminate\Contracts\Bus\Dispatcher')
-                            ->dispatch(new ProcessM3uImport($record, force: true));
+                            ->dispatch(new ProcessM3uImport($record, force: true, syncRunId: $syncRun->id));
                     })->after(function ($record) {
                         $isMediaServer = in_array($record->source_type, [PlaylistSourceType::Emby, PlaylistSourceType::Jellyfin]);
                         $message = $isMediaServer
@@ -3136,8 +3139,9 @@ class PlaylistResource extends Resource implements CopilotResource
                             'progress' => 0,
                             'vod_progress' => 0,
                         ]);
+                        $syncRun = app(SyncPipelineService::class)->startImport($record, trigger: 'filament_refresh');
                         app('Illuminate\Contracts\Bus\Dispatcher')
-                            ->dispatch(new ProcessM3uImport($record, force: true));
+                            ->dispatch(new ProcessM3uImport($record, force: true, syncRunId: $syncRun->id));
                     })->after(function ($record) {
                         $isMediaServer = in_array($record->source_type, [PlaylistSourceType::Emby, PlaylistSourceType::Jellyfin]);
                         $message = $isMediaServer
@@ -3396,6 +3400,15 @@ class PlaylistResource extends Resource implements CopilotResource
                     ->icon('heroicon-m-arrows-right-left')
                     ->url(function (Playlist $record): string {
                         return "/playlists/{$record->id}/playlist-sync-statuses";
+                    })
+                    ->openUrlInNewTab(false)
+                    ->hidden(fn (Playlist $record): bool => $record->is_network_playlist || $record->isMediaServerPlaylist()),
+                Action::make('view_sync_runs')
+                    ->label(__('View Sync Runs'))
+                    ->color('gray')
+                    ->icon('heroicon-m-queue-list')
+                    ->url(function (Playlist $record): string {
+                        return "/playlists/{$record->id}/sync-runs";
                     })
                     ->openUrlInNewTab(false)
                     ->hidden(fn (Playlist $record): bool => $record->is_network_playlist || $record->isMediaServerPlaylist()),

@@ -2,6 +2,7 @@
 
 namespace App\Jobs;
 
+use App\Enums\SyncRunPhase;
 use App\Models\Episode;
 use App\Models\MediaServerIntegration;
 use App\Models\Playlist;
@@ -12,6 +13,7 @@ use App\Models\User;
 use App\Services\NfoService;
 use App\Services\PlaylistService;
 use App\Services\SerieFileNameService;
+use App\Services\SyncPipelineService;
 use App\Settings\GeneralSettings;
 use Filament\Notifications\Notification;
 use Illuminate\Contracts\Queue\ShouldQueue;
@@ -53,11 +55,13 @@ class SyncSeriesStrmFiles implements ShouldQueue
         public bool $all_playlists = false,
         public ?int $playlist_id = null,
         public ?int $user_id = null,
-        public ?int $batchOffset = null,  // For batch processing
+        public ?int $batchOffset = null,
         public ?int $totalBatches = null,
         public ?int $currentBatch = null,
-        public bool $isCleanupJob = false, // Special flag for final cleanup
+        public bool $isCleanupJob = false,
         public ?array $series_ids = null,
+        public ?int $syncRunId = null,
+        public ?SyncRunPhase $completionPhase = null,
     ) {
         // Run file synces on the dedicated queue
         $this->onQueue('file_sync');
@@ -165,14 +169,16 @@ class SyncSeriesStrmFiles implements ShouldQueue
         // Add checker job at the end of the chain
         // Last chain will trigger cleanup
         $jobs[] = new CheckSeriesStrmProgress(
-            currentOffset: $jobsInFirstChain * $batchSize,
+            currentOffset: min($jobsInFirstChain * $batchSize, $totalCount),
             totalSeries: $totalCount,
             notify: $this->notify,
             all_playlists: $this->all_playlists,
             playlist_id: $this->playlist_id,
             user_id: $this->user_id,
-            needsCleanup: true, // Cleanup will run after all chains complete
+            needsCleanup: true,
             series_ids: $this->series_ids,
+            syncRunId: $this->syncRunId,
+            completionPhase: $this->completionPhase,
         );
 
         // Dispatch the chain
@@ -297,6 +303,12 @@ class SyncSeriesStrmFiles implements ShouldQueue
             if ($playlist) {
                 dispatch(new FireStreamFilesSyncedEvent($playlist, 'series_stream_files_synced'));
             }
+        }
+
+        // Advance the pipeline now that all cleanup work (orphan removal, media-server
+        // refresh, post-process events) has completed.
+        if ($this->syncRunId && $this->completionPhase) {
+            app(SyncPipelineService::class)->completePhase($this->syncRunId, $this->completionPhase);
         }
     }
 

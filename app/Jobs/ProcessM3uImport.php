@@ -12,7 +12,9 @@ use App\Models\MediaServerIntegration;
 use App\Models\Playlist;
 use App\Models\SourceCategory;
 use App\Models\SourceGroup;
+use App\Models\SyncRun;
 use App\Services\AlertService;
+use App\Services\SyncPipelineService;
 use App\Services\XtreamHealthService;
 use App\Settings\GeneralSettings;
 use App\Traits\ProviderRequestDelay;
@@ -119,6 +121,7 @@ class ProcessM3uImport implements ShouldQueue
         public Playlist $playlist,
         public ?bool $force = false,
         public ?bool $isNew = false,
+        public ?int $syncRunId = null,
     ) {
         // General processing settings
         $this->maxItems = config('dev.max_channels') + 1; // Maximum number of channels allowed for m3u import
@@ -1462,21 +1465,10 @@ class ProcessM3uImport implements ShouldQueue
             });
         }
 
-        // Last job in the batch
-        $jobs[] = new ProcessM3uImportComplete(
-            userId: $userId,
-            playlistId: $playlistId,
-            batchNo: $batchNo,
-            start: $start,
-            maxHit: $this->maxItemsHit,
-            isNew: $this->isNew,
-            runningSeriesImport: $seriesCategories && $seriesCategories->count() > 0,
-            runningLiveImport: $liveStreamsEnabled,
-            runningVodImport: $vodStreamsEnabled,
-        );
-
-        // Add series processing to the chain, if passed in
-        // This will run after the main channel import is complete
+        // Run series-discovery chunks BEFORE ProcessM3uImportComplete so that Series rows
+        // exist in the DB by the time the SyncPipeline is built. This guarantees the
+        // FindReplace phase can see (and rewrite) series titles before STRM filenames are
+        // generated. See SYNC_RUN_SUMMARY.md for full pipeline ordering rationale.
         if ($seriesCategories) {
             $categoryCount = $seriesCategories->count();
             $seriesCategories->each(function ($category, $index) use (&$jobs, $playlistId, $batchNo, $categoryCount) {
@@ -1499,19 +1491,31 @@ class ProcessM3uImport implements ShouldQueue
                     );
                 }
             });
-
-            // Add series processing to the chain
-            $jobs[] = new ProcessM3uImportSeriesComplete(
-                playlist: $playlist,
-                batchNo: $batchNo
-            );
         }
 
+        // Last job in the batch — builds and starts the SyncPipeline using the populated DB.
+        $jobs[] = new ProcessM3uImportComplete(
+            userId: $userId,
+            playlistId: $playlistId,
+            batchNo: $batchNo,
+            start: $start,
+            maxHit: $this->maxItemsHit,
+            isNew: $this->isNew,
+            runningLiveImport: $liveStreamsEnabled,
+            runningVodImport: $vodStreamsEnabled,
+            syncRunId: $this->syncRunId,
+        );
+
         // Start the chain!
+        // NOTE: Only capture scalar/lightweight values in the catch closure's `use()`
+        // clause. Referencing $this here would serialize the entire ProcessM3uImport
+        // job (including parsed channel collections) into the chain's catch handler
+        // and OOM the worker during closure serialization.
+        $syncRunId = $this->syncRunId;
         Bus::chain($jobs)
             ->onConnection('redis') // force to use redis connection
             ->onQueue('import')
-            ->catch(function (Throwable $e) use ($playlist) {
+            ->catch(function (Throwable $e) use ($playlist, $syncRunId) {
                 $error = "Error processing \"{$playlist->name}\": {$e->getMessage()}";
                 Log::error($error);
 
@@ -1555,6 +1559,7 @@ class ProcessM3uImport implements ShouldQueue
                 }
 
                 event(new SyncCompleted($playlist));
+                self::failSyncRunIfPresent($syncRunId, $error);
             })->dispatch();
     }
 
@@ -1739,14 +1744,17 @@ class ProcessM3uImport implements ShouldQueue
             start: $start,
             maxHit: $this->maxItemsHit,
             isNew: $this->isNew,
-            runningSeriesImport: false, // No series import for M3U imports
+            syncRunId: $this->syncRunId,
         );
 
         // Start the chain!
+        // NOTE: see comment on the other Bus::chain catch — capture scalars only,
+        // never $this, or closure serialization will OOM the worker.
+        $syncRunId = $this->syncRunId;
         Bus::chain($jobs)
             ->onConnection('redis') // force to use redis connection
             ->onQueue('import')
-            ->catch(function (Throwable $e) use ($playlist) {
+            ->catch(function (Throwable $e) use ($playlist, $syncRunId) {
                 $error = "Error processing \"{$playlist->name}\": {$e->getMessage()}";
                 Log::error($error);
 
@@ -1790,7 +1798,33 @@ class ProcessM3uImport implements ShouldQueue
                 }
 
                 event(new SyncCompleted($playlist));
+                self::failSyncRunIfPresent($syncRunId, $error);
             })->dispatch();
+    }
+
+    /**
+     * If this import was launched as part of a pre-created SyncRun
+     * (the modern upfront-Import flow), mark the run as failed so the
+     * UI reflects the failure point rather than leaving phases pending.
+     *
+     * IMPORTANT: This is static so chain `->catch()` closures can call it
+     * via `use ($syncRunId)` without binding `$this` (which would serialize
+     * the entire ProcessM3uImport job — including the parsed channel
+     * collections — into every chained job's catch handler and exhaust
+     * PHP memory during closure serialization).
+     */
+    private static function failSyncRunIfPresent(?int $syncRunId, string $reason): void
+    {
+        if ($syncRunId === null) {
+            return;
+        }
+
+        $run = SyncRun::find($syncRunId);
+        if (! $run) {
+            return;
+        }
+
+        app(SyncPipelineService::class)->fail($run, $reason);
     }
 
     /**
