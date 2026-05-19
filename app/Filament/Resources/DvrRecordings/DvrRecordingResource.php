@@ -203,6 +203,11 @@ class DvrRecordingResource extends Resource
                                 'url' => $url,
                                 'format' => $format,
                                 'type' => 'channel',
+                                'edl_url' => route('dvr.recording.edl', [
+                                    'username' => $username,
+                                    'password' => $playlist->uuid,
+                                    'uuid' => $record->uuid,
+                                ]),
                             ]);
                         }),
                     Action::make('retry')
