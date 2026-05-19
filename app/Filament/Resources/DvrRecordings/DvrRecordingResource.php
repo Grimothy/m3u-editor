@@ -180,35 +180,7 @@ class DvrRecordingResource extends Resource
                             DvrRecordingStatus::Completed,
                         ]) && $record->dvrSetting?->playlist)
                         ->action(function (DvrRecording $record, $livewire): void {
-                            $playlist = $record->dvrSetting->playlist;
-                            $username = $record->user->name;
-                            $format = $record->status === DvrRecordingStatus::Completed
-                                ? ($record->dvrSetting->dvr_output_format ?? 'mp4')
-                                : 'm3u8';
-
-                            $url = route('dvr.recording.stream', [
-                                'username' => $username,
-                                'password' => $playlist->uuid,
-                                'uuid' => $record->uuid,
-                                'format' => $format,
-                            ]);
-
-                            $livewire->dispatch('openFloatingStream', [
-                                'id' => $record->id,
-                                'stream_id' => $record->id,
-                                'content_type' => 'dvr_recording',
-                                'playlist_id' => $playlist->id,
-                                'title' => $record->display_title ?? $record->title,
-                                'display_title' => $record->display_title ?? $record->title,
-                                'url' => $url,
-                                'format' => $format,
-                                'type' => 'channel',
-                                'edl_url' => route('dvr.recording.edl', [
-                                    'username' => $username,
-                                    'password' => $playlist->uuid,
-                                    'uuid' => $record->uuid,
-                                ]),
-                            ]);
+                            $livewire->dispatch('openFloatingStream', $record->getFloatingPlayerAttributes());
                         }),
                     Action::make('retry')
                         ->label(__('Retry Post-Processing'))
