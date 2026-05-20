@@ -2551,20 +2551,20 @@ class PlaylistResource extends Resource implements CopilotResource
                             Toggle::make('disable_m3u_xtream_format')
                                 ->label(__('Disable Xtream URL format in M3U output'))
                                 ->columnSpan(1)
-                                ->disabled(fn (Get $get): bool => config('app.disable_m3u_xtream_format', false))
                                 ->inline(false)
                                 ->default(false)
                                 ->hintIcon(
                                     'heroicon-m-question-mark-circle',
                                     tooltip: 'When enabled, the provider\'s original stream URL will be used directly in M3U output instead of the internal Xtream-format URL.'
                                 )
-                                ->afterStateHydrated(function (Toggle $component, ?bool $state) {
+                                ->afterStateHydrated(function (Toggle $component) {
                                     if (config('app.disable_m3u_xtream_format', false)) {
                                         $component->state(true);
                                     }
                                 })
-                                ->dehydrated(fn (Get $get, ?bool $state) => ! config('app.disable_m3u_xtream_format', false))
-                                ->helperText(config('app.disable_m3u_xtream_format', false) ? 'Already set by environment variable!' : __('Output the provider URL directly in M3U instead of routing through the internal Xtream URL format.')),
+                                ->dehydrated(fn (): bool => ! config('app.disable_m3u_xtream_format', false))
+                                ->disabled(fn (): bool => config('app.disable_m3u_xtream_format', false))
+                                ->helperText(config('app.disable_m3u_xtream_format', false) ? __('Already set by environment variable!') : __('Output the provider URL directly in M3U instead of routing through the internal Xtream URL format.')),
                             Toggle::make('auto_channel_increment')
                                 ->label(__('Auto channel number increment'))
                                 ->columnSpan(1)
