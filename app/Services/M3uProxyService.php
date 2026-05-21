@@ -751,8 +751,10 @@ class M3uProxyService
             return true;
         }
 
-        // Per-auth setting takes precedence over global; null falls back to global.
-        $stopOldest = $auth->stop_oldest_on_limit ?? $this->stopOldestOnLimit;
+        // Per-auth setting takes precedence over global; false falls back to global.
+        $stopOldest = $auth->stop_oldest_on_limit
+            ? true
+            : $this->stopOldestOnLimit;
 
         if ($stopOldest) {
             $result = self::stopOldestStreamByMetadata('playlist_auth_id', (string) $playlistAuthId, $excludeChannelId);
