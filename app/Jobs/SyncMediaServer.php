@@ -1017,9 +1017,7 @@ class SyncMediaServer implements ShouldBeUnique, ShouldQueue
     protected function sanitizeForJson(mixed $value): mixed
     {
         if (is_string($value)) {
-            return \function_exists('iconv')
-                ? (iconv('UTF-8', 'UTF-8//IGNORE', $value) ?: $value)
-                : mb_convert_encoding($value, 'UTF-8', 'UTF-8');
+            return mb_scrub($value, 'UTF-8');
         }
 
         if (is_array($value)) {

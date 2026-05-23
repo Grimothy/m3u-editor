@@ -1231,13 +1231,7 @@ class WebDavMediaService implements MediaServer
      */
     protected function sanitizeUtf8(string $str): string
     {
-        // iconv with //IGNORE drops any byte that cannot be represented in the target encoding
-        if (\function_exists('iconv')) {
-            return iconv('UTF-8', 'UTF-8//IGNORE', $str) ?: $str;
-        }
-
-        // Fallback: replace any invalid UTF-8 sequences with a replacement character
-        return mb_convert_encoding($str, 'UTF-8', 'UTF-8');
+        return mb_scrub($str, 'UTF-8');
     }
 
     /**
