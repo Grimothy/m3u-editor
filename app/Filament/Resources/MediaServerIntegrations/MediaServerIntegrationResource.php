@@ -442,7 +442,6 @@ class MediaServerIntegrationResource extends Resource implements CopilotResource
                                     tooltip: 'Recommended for TorBox and other remote WebDAV services. Groups individual episode downloads into proper series.'
                                 )
                                 ->helperText(__('Smart parsing of torrent-style filenames.'))
-                                ->inline(false)
                                 ->default(false),
                         ]),
 
