@@ -546,11 +546,10 @@ class PlaylistAlias extends Model
 
     /**
      * Transform channel URL to use this alias's provider config
-     * Only transforms the standard URL, not custom URLs
      */
     public function transformChannelUrl(Channel $channel): string
     {
-        $originalUrl = $channel->url ?? '';
+        $originalUrl = $channel->url_custom ?: ($channel->url ?? '');
 
         // We need at least one alias xtream config to do any transformation.
         $primaryAliasConfig = $this->getPrimaryXtreamConfig();
