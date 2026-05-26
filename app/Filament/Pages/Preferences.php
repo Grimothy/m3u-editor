@@ -1365,8 +1365,8 @@ class Preferences extends SettingsPage
                                             ->schema([
                                                 ToggleButtons::make('tmdb_auto_lookup_all_new')
                                                     ->options([
-                                                        'enabled' => __('Only enabled channels'),
-                                                        'new' => __('All new channels'),
+                                                        'enabled' => __('Only enabled'),
+                                                        'new' => __('All new'),
                                                         'both' => __('Both'),
                                                     ])
                                                     ->icons([
@@ -1375,14 +1375,14 @@ class Preferences extends SettingsPage
                                                         'both' => 'heroicon-s-squares-plus',
                                                     ])
                                                     ->colors([
-                                                        'enabled' => 'primary',
+                                                        'enabled' => 'success',
                                                         'new' => 'primary',
                                                         'both' => 'primary',
                                                     ])
                                                     ->columnSpanFull()
                                                     ->grouped()
                                                     ->label(__('Auto-lookup scope'))
-                                                    ->helperText(__('Whether to automatically lookup TMDB IDs for all new channels, or only those that are enabled. Applies to both VOD and Series.'))
+                                                    ->helperText(__('Whether to automatically lookup TMDB IDs for all new VOD and Series, or only those that are enabled (default), or both.'))
                                                     ->default('enabled'),
                                             ])->hidden(fn (Get $get): bool => ! (bool) $get('tmdb_auto_lookup_on_import')),
                                         TextInput::make('tmdb_rate_limit')
