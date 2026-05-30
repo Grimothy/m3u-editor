@@ -6,7 +6,9 @@ use App\Enums\DvrSeriesMode;
 use App\Enums\PlaylistSourceType;
 use App\Enums\Status;
 use App\Facades\PlaylistFacade;
+use App\Filament\Actions\CronHelperAction;
 use App\Filament\Actions\ModalActionGroup;
+use App\Filament\Actions\RegexTesterAction;
 use App\Filament\Concerns\HasCopilotSupport;
 use App\Filament\Resources\MediaServerIntegrations\MediaServerIntegrationResource;
 use App\Filament\Resources\Playlists\Pages\CreatePlaylist;
@@ -1466,13 +1468,7 @@ class PlaylistResource extends Resource implements CopilotResource
                         ->placeholder(__('0 0 * * *'))
                         ->columnSpanFull()
                         ->hintAction(
-                            Action::make('view_cron_example')
-                                ->label(__('CRON Example'))
-                                ->icon('heroicon-o-arrow-top-right-on-square')
-                                ->iconPosition('after')
-                                ->size('sm')
-                                ->url('https://crontab.guru')
-                                ->openUrlInNewTab(true)
+                            CronHelperAction::make(name: 'playlist-sync-cron', cronField: 'sync_interval')
                         )
                         ->helperText(fn ($get) => $get('sync_interval') && CronExpression::isValidExpression($get('sync_interval'))
                             ? 'Next scheduled sync: '.(new CronExpression($get('sync_interval')))->getNextRunDate()->format(app(DateFormatService::class)->getFormat())
@@ -1605,7 +1601,11 @@ class PlaylistResource extends Resource implements CopilotResource
                                     'Sports.*HD$',
                                     '\[.*\]',
                                 ])
-                                ->splitKeys(['Tab', 'Return']),
+                                ->splitKeys(['Tab', 'Return'])
+                                ->hintAction(
+                                    RegexTesterAction::make(name: 'test-live-groups', flags: 'u', samplesContext: 'groups')
+                                        ->visible(fn (Get $get): bool => (bool) $get('import_prefs.use_regex'))
+                                ),
                         ])->hidden(fn (Get $get): bool => ! $get('import_prefs.preprocess') || ! $get('status')),
 
                     Fieldset::make(__('VOD processing'))
@@ -1694,7 +1694,11 @@ class PlaylistResource extends Resource implements CopilotResource
                                     'Sports.*HD$',
                                     '\[.*\]',
                                 ])
-                                ->splitKeys(['Tab', 'Return']),
+                                ->splitKeys(['Tab', 'Return'])
+                                ->hintAction(
+                                    RegexTesterAction::make(name: 'test-vod-groups', flags: 'u', samplesContext: 'vod_groups')
+                                        ->visible(fn (Get $get): bool => (bool) $get('import_prefs.use_regex'))
+                                ),
                         ])->hidden(fn (Get $get): bool => ! $get('import_prefs.preprocess') || ! $get('status') || ! $get('xtream')),
 
                     Fieldset::make(__('Series processing'))
@@ -1779,7 +1783,11 @@ class PlaylistResource extends Resource implements CopilotResource
                                     'Sports.*HD$',
                                     '\[.*\]',
                                 ])
-                                ->splitKeys(['Tab', 'Return']),
+                                ->splitKeys(['Tab', 'Return'])
+                                ->hintAction(
+                                    RegexTesterAction::make(name: 'test-categories', flags: 'u', samplesContext: 'categories')
+                                        ->visible(fn (Get $get): bool => (bool) $get('import_prefs.use_regex'))
+                                ),
                         ])->hidden(fn (Get $get): bool => ! $get('import_prefs.preprocess') || ! $get('status') || ! $get('xtream')),
 
                     TagsInput::make('import_prefs.ignored_file_types')
@@ -2276,6 +2284,13 @@ class PlaylistResource extends Resource implements CopilotResource
                                 ->label(fn (Get $get): string => ($get('use_regex') ?? true) ? 'Pattern to find' : 'String to find')
                                 ->required()
                                 ->placeholder(fn (Get $get): string => ($get('use_regex') ?? true) ? '^(US- |UK- |CA- )' : 'US -')
+                                ->suffixAction(
+                                    RegexTesterAction::make(
+                                        samplesContext: fn (Get $get): string => $get('target') ?? 'channels',
+                                        patternField: 'find_replace',
+                                        replacementField: 'replace_with',
+                                    )->visible(fn (Get $get): bool => (bool) ($get('use_regex') ?? true))
+                                )
                                 ->columnSpan(3),
                             TextInput::make('replace_with')
                                 ->label(__('Replace with'))
