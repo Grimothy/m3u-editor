@@ -1,9 +1,10 @@
-<div x-data="epgViewer({ 
+<div x-data="epgViewer({
         apiUrl: '{{ $route }}',
         groupsApiUrl: {{ $groupsApiUrl ? "'" . $groupsApiUrl . "'" : 'null' }},
         vod: {{ $vod ? 'true' : 'false' }},
         username: '{{ $username }}',
-        password: '{{ $password }}'
+        password: '{{ $password }}',
+        dvrMap: @json($dvrEnabledChannelIds)
     })" x-init="init(); loadEpgData(); loadGroups()" x-on:beforeunload.window="destroy()"
     x-on:livewire:navigating.window="destroy()" x-on:refresh-epg-data.window="(e) => refreshEpgData(e.detail)"
     wire:ignore.self>
@@ -368,10 +369,12 @@
                                                             style="font-size: 10px; line-height: 1;">
                                                             New
                                                         </div>
-                                                        @if(!$viewOnly && $dvrEnabled)
-                                                        <!-- DVR Record Button (visible on hover) -->
+                                                        @if(!$viewOnly)
+                                                        <!-- DVR Record Button (visible on hover) — gated per-channel
+                                                             because CustomPlaylist views mix channels with and
+                                                             without DVR-enabled source playlists. -->
                                                         <button
-                                                            x-show="item.channel.database_id"
+                                                            x-show="canRecord(item.channel)"
                                                             @click.stop="$wire.openScheduleProgramme(programme, item.channel.database_id)"
                                                             class="absolute bottom-0.5 right-0.5 p-1 text-red-600 dark:text-red-400 hover:text-red-800 dark:hover:text-red-200 bg-white/80 dark:bg-gray-800/80 rounded-full opacity-0 group-hover/prog:opacity-100 transition-opacity duration-150"
                                                             title="{{ __('Schedule Recording') }}">

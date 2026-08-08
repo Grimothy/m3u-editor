@@ -50,8 +50,15 @@ class EpgViewer extends Component implements HasActions, HasForms
 
     public $vod = true;
 
-    /** Whether the associated playlist has DVR enabled. */
-    public bool $dvrEnabled = false;
+    /**
+     * Channel IDs visible in this EPG view for which DVR recording is enabled
+     * (via an enabled DvrSetting on the channel's source playlist). Drives the
+     * per-programme record icon. Custom channels with no source playlist are
+     * never included.
+     *
+     * @var array<int, bool>
+     */
+    public array $dvrEnabledChannelIds = [];
 
     /** Programme data for the pending schedule action. */
     public ?array $programmeData = null;
@@ -69,10 +76,63 @@ class EpgViewer extends Component implements HasActions, HasForms
         $this->record = $record;
         $this->type = class_basename($this->record);
 
-        // Determine DVR enabled state for Playlist records
-        if ($this->type === 'Playlist') {
-            $this->dvrEnabled = (bool) $this->record->dvrSetting?->enabled;
+        $this->dvrEnabledChannelIds = $this->resolveDvrEnabledChannelIds();
+    }
+
+    /**
+     * Build the set of channel IDs visible in this EPG view whose underlying
+     * source playlist has DVR enabled. Works for plain Playlist records (a
+     * single playlist_id) and CustomPlaylist records (channels may belong to
+     * several different source playlists). Custom channels (no playlist_id) are
+     * never included because they have no DvrSetting to reference.
+     *
+     * @return array<int, bool>
+     */
+    protected function resolveDvrEnabledChannelIds(): array
+    {
+        if ($this->type === 'Epg' || ! $this->record) {
+            return [];
         }
+
+        // CustomPlaylist exposes channels via two relations:
+        //   - $record->channels()       -> BelongsToMany via channel_custom_playlist (real playlist channels)
+        //   - $record->customChannels() -> HasMany via custom_playlist_id (no playlist_id, never DVR-eligible)
+        // We only consider the first set; the second has no playlist_id and therefore
+        // cannot resolve to a DvrSetting.
+        $channelQuery = $this->type === 'Playlist' || $this->type === 'CustomPlaylist'
+            ? $this->record->channels()
+            : null;
+
+        if ($channelQuery === null) {
+            return [];
+        }
+
+        $playlistIds = $channelQuery
+            ->whereNotNull('channels.playlist_id')
+            ->pluck('channels.playlist_id')
+            ->all();
+
+        $playlistIds = array_values(array_unique(array_filter($playlistIds)));
+
+        if (empty($playlistIds)) {
+            return [];
+        }
+
+        $enabledPlaylistIds = DvrSetting::whereIn('playlist_id', $playlistIds)
+            ->where('enabled', true)
+            ->pluck('playlist_id')
+            ->all();
+
+        if (empty($enabledPlaylistIds)) {
+            return [];
+        }
+
+        $channelIds = $channelQuery
+            ->whereIn('channels.playlist_id', $enabledPlaylistIds)
+            ->pluck('channels.id')
+            ->all();
+
+        return array_fill_keys($channelIds, true);
     }
 
     /**
@@ -239,20 +299,6 @@ class EpgViewer extends Component implements HasActions, HasForms
             return;
         }
 
-        /** @var Playlist $playlist */
-        $playlist = $this->record;
-        $dvrSetting = DvrSetting::where('playlist_id', $playlist->id)->where('enabled', true)->first();
-
-        if (! $dvrSetting) {
-            Notification::make()
-                ->danger()
-                ->title(__('DVR not enabled'))
-                ->body(__('Enable DVR for this playlist in the playlist settings before scheduling recordings.'))
-                ->send();
-
-            return;
-        }
-
         /** @var Channel $channel */
         $channel = Channel::find($this->schedulingChannelId);
 
@@ -261,6 +307,33 @@ class EpgViewer extends Component implements HasActions, HasForms
                 ->danger()
                 ->title(__('Recording failed'))
                 ->body(__('Channel not found.'))
+                ->send();
+
+            return;
+        }
+
+        // Resolve DvrSetting via the channel's real source playlist, not via
+        // $this->record — for CustomPlaylist views, $this->record is the custom
+        // container and its id doesn't correspond to a DvrSetting row.
+        if (! $channel->playlist_id) {
+            Notification::make()
+                ->danger()
+                ->title(__('Recording failed'))
+                ->body(__('This channel is not backed by a real playlist, so DVR scheduling is unavailable.'))
+                ->send();
+
+            return;
+        }
+
+        $dvrSetting = DvrSetting::where('playlist_id', $channel->playlist_id)
+            ->where('enabled', true)
+            ->first();
+
+        if (! $dvrSetting) {
+            Notification::make()
+                ->danger()
+                ->title(__('DVR not enabled'))
+                ->body(__('Enable DVR for this playlist in the playlist settings before scheduling recordings.'))
                 ->send();
 
             return;

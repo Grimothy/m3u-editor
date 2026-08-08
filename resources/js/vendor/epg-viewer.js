@@ -6,6 +6,11 @@ function epgViewer(config) {
         vod: config.vod || false,
         username: config.username || null,
         password: config.password || null,
+        // Map of channel database ID → true when DVR is enabled for that
+        // channel's source playlist. Supplied by Livewire so the record icon
+        // can be gated per-channel (CustomPlaylist views mix channels with
+        // and without DVR-enabled source playlists).
+        dvrMap: config.dvrMap || {},
         loading: false,
         loadingMore: false,
         error: null,
@@ -116,6 +121,18 @@ function epgViewer(config) {
 
         get isScrollMode() {
             return this.paginationMode === 'scroll';
+        },
+
+        /**
+         * Whether the DVR record button should be shown for a given channel.
+         * Requires both a database ID and an entry in dvrMap (set by Livewire
+         * from the channel's source playlist's DvrSetting).
+         */
+        canRecord(channel) {
+            if (! channel || ! channel.database_id) {
+                return false;
+            }
+            return Boolean(this.dvrMap[channel.database_id]);
         },
 
         setupScrollListener() {
