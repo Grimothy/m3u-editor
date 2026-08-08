@@ -20,6 +20,27 @@ beforeEach(function () {
     $this->actingAs($this->user);
 });
 
+it('renders the dvrMap into x-data without a raw double quote breaking the HTML attribute', function () {
+    // Regression guard: @json() only escapes quotes *inside* string values, not
+    // JSON's own structural quotes, so `dvrMap: @json($map)` rendered literal
+    // `"` characters into a double-quoted x-data="..." attribute, truncating it
+    // and breaking every Alpine binding in the component (not just the record
+    // button) for BOTH Playlist and CustomPlaylist views. Js::from() wraps the
+    // payload in JSON.parse('...') with all quotes escaped, which is safe here.
+    $playlist = Playlist::factory()->for($this->user)->create();
+    DvrSetting::factory()->enabled()->for($this->user)->create([
+        'playlist_id' => $playlist->id,
+    ]);
+    Channel::factory()->for($this->user)->for($playlist, 'playlist')->create(['enabled' => true]);
+
+    $html = Livewire::test(EpgViewer::class, ['record' => $playlist])->html();
+
+    $xData = substr($html, strpos($html, 'x-data="'), strpos($html, '})"') - strpos($html, 'x-data="') + 3);
+
+    expect($xData)->not->toContain('dvrMap: {"')
+        ->and($xData)->toContain("dvrMap: JSON.parse('");
+});
+
 it('marks every channel of a DVR-enabled playlist as recordable (regression)', function () {
     $playlist = Playlist::factory()->for($this->user)->create();
     DvrSetting::factory()->enabled()->for($this->user)->create([

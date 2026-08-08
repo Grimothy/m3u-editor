@@ -4,7 +4,7 @@
         vod: {{ $vod ? 'true' : 'false' }},
         username: '{{ $username }}',
         password: '{{ $password }}',
-        dvrMap: @json($dvrEnabledChannelIds)
+        dvrMap: {{ \Illuminate\Support\Js::from($dvrEnabledChannelIds) }}
     })" x-init="init(); loadEpgData(); loadGroups()" x-on:beforeunload.window="destroy()"
     x-on:livewire:navigating.window="destroy()" x-on:refresh-epg-data.window="(e) => refreshEpgData(e.detail)"
     wire:ignore.self>
