@@ -294,7 +294,7 @@ class CategoryResource extends Resource implements CopilotResource
                         ->modalIcon('heroicon-o-calendar-days')
                         ->modalDescription(__('Sort all series in this category by release date? This will update the sort order.')),
                     Action::make('process')
-                        ->label(__('Fetch Series Metadata'))
+                        ->label(__('Fetch Provider Metadata'))
                         ->icon('heroicon-o-arrow-down-tray')
                         ->action(function ($record) {
                             foreach ($record->enabled_series as $series) {
@@ -468,7 +468,7 @@ class CategoryResource extends Resource implements CopilotResource
                         ->modalIcon('heroicon-o-calendar-days')
                         ->modalDescription(__('Sort all series in the selected categories by release date? This will update the sort order.')),
                     BulkAction::make('process')
-                        ->label(__('Fetch Series Metadata'))
+                        ->label(__('Fetch Provider Metadata'))
                         ->icon('heroicon-o-arrow-down-tray')
                         ->action(function (Collection $records) {
                             foreach ($records as $record) {

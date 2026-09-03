@@ -392,7 +392,7 @@ class VodGroupResource extends Resource implements CopilotResource
                         ->modalDescription(__('Sort all channels in this group by release date? This will update the sort order.')),
 
                     Action::make('process_vod')
-                        ->label(__('Fetch Metadata'))
+                        ->label(__('Fetch Provider Metadata'))
                         ->icon('heroicon-o-arrow-down-tray')
                         ->schema([
                             Toggle::make('overwrite_existing')
@@ -676,7 +676,7 @@ class VodGroupResource extends Resource implements CopilotResource
                         ->modalDescription(__('Sort all channels in the selected groups by release date? This will update the sort order.')),
 
                     BulkAction::make('process_bulk_vod')
-                        ->label(__('Fetch Metadata'))
+                        ->label(__('Fetch Provider Metadata'))
                         ->icon('heroicon-o-arrow-down-tray')
                         ->schema([
                             Toggle::make('overwrite_existing')

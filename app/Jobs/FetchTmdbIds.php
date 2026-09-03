@@ -23,7 +23,8 @@ use Illuminate\Support\Facades\Cache;
 use Illuminate\Support\Facades\Log;
 
 /**
- * Job to fetch TMDB/TVDB/IMDB IDs for VOD channels and Series.
+ * Job to fetch full TMDB metadata (plot, artwork, cast, genres, seasons/episodes)
+ * plus TMDB/TVDB/IMDB IDs for VOD channels and Series.
  * Can process a single item or a batch of items.
  */
 class FetchTmdbIds implements ShouldQueue
@@ -120,7 +121,7 @@ class FetchTmdbIds implements ShouldQueue
 
         if (! $tmdb->isConfigured()) {
             Log::warning('FetchTmdbIds: TMDB API key not configured');
-            $this->notifyUser('TMDB Lookup Failed', 'TMDB API key is not configured. Please add your API key in Settings.', 'danger');
+            $this->notifyUser('TMDB Metadata Fetch Failed', 'TMDB API key is not configured. Please add your API key in Settings.', 'danger');
 
             // Still advance the pipeline so downstream phases (FindReplace, ChannelMerge, etc.) run.
             if ($this->syncRunId && $this->completionPhase) {
@@ -231,7 +232,7 @@ class FetchTmdbIds implements ShouldQueue
                         }
 
                         $notification = Notification::make()
-                            ->title("TMDB ID Lookup Complete ({$total} processed)")
+                            ->title("TMDB Metadata Fetch Complete ({$total} processed)")
                             ->body($body);
 
                         if ($failedJobs > 0 || $stats['errors'] > 0) {
@@ -257,7 +258,7 @@ class FetchTmdbIds implements ShouldQueue
             ->dispatch();
 
         $this->notifyUser(
-            'TMDB ID Lookup Started',
+            'TMDB Metadata Fetch Started',
             "Large lookup split into {$chunkCount} jobs and queued for processing. You will receive a notification when the batch is complete.",
             'info'
         );
@@ -1281,7 +1282,7 @@ class FetchTmdbIds implements ShouldQueue
             $this->errorCount
         );
 
-        $title = "TMDB ID Lookup Complete ({$total} processed)";
+        $title = "TMDB Metadata Fetch Complete ({$total} processed)";
 
         $this->notifyUser($title, $body, $this->errorCount > 0 ? 'warning' : 'success');
     }
@@ -1393,8 +1394,8 @@ class FetchTmdbIds implements ShouldQueue
         ]);
 
         $this->notifyUser(
-            'TMDB ID Lookup Failed',
-            'An error occurred while fetching TMDB IDs: '.$exception->getMessage(),
+            'TMDB Metadata Fetch Failed',
+            'An error occurred while fetching TMDB metadata: '.$exception->getMessage(),
             'danger'
         );
     }

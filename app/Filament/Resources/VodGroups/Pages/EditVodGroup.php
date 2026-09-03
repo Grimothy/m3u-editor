@@ -160,7 +160,7 @@ class EditVodGroup extends EditRecord
                     ->modalDescription(__('Sort all channels in this group by release date? This will update the sort order.')),
 
                 Action::make('process_vod')
-                    ->label(__('Fetch Metadata'))
+                    ->label(__('Fetch Provider Metadata'))
                     ->icon('heroicon-o-arrow-down-tray')
                     ->schema([
                         Toggle::make('overwrite_existing')

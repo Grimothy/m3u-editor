@@ -563,7 +563,7 @@ class PlaylistResource extends Resource implements CopilotResource
                     })
                     ->modalSubmitActionLabel(__('Yes, sync now')),
                 Action::make('process_series')
-                    ->label(__('Fetch Series Metadata'))
+                    ->label(__('Fetch Provider Metadata'))
                     ->icon('heroicon-o-arrow-down-tray')
                     ->action(function ($record) {
                         $record->update([
@@ -588,7 +588,7 @@ class PlaylistResource extends Resource implements CopilotResource
                     ->modalDescription(__('Fetch Series metadata for this playlist now? Only enabled Series will be included.'))
                     ->modalSubmitActionLabel(__('Yes, process now')),
                 Action::make('process_vod')
-                    ->label(__('Fetch VOD Metadata'))
+                    ->label(__('Fetch Provider Metadata'))
                     ->icon('heroicon-o-arrow-down-tray')
                     ->action(function ($record) {
                         $record->update([
@@ -3862,7 +3862,7 @@ class PlaylistResource extends Resource implements CopilotResource
                     })
                     ->visible(fn (Playlist $record) => $record->isProcessing() && ! ($record->is_network_playlist || $record->isMediaServerPlaylist())),
                 Action::make('process_series')
-                    ->label(__('Fetch Series Metadata'))
+                    ->label(__('Fetch Provider Metadata'))
                     ->icon('heroicon-o-arrow-down-tray')
                     ->action(function ($record) {
                         $record->update([
@@ -3887,7 +3887,7 @@ class PlaylistResource extends Resource implements CopilotResource
                     ->modalDescription(__('Fetch Series metadata for this playlist now? Only enabled Series will be included.'))
                     ->modalSubmitActionLabel(__('Yes, process now')),
                 Action::make('process_vod')
-                    ->label(__('Fetch VOD Metadata'))
+                    ->label(__('Fetch Provider Metadata'))
                     ->icon('heroicon-o-arrow-down-tray')
                     ->action(function ($record) {
                         $record->update([
