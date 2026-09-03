@@ -78,6 +78,7 @@ class MapPlaylistChannelsToEpg implements ShouldQueue
             $claimed = EpgMap::where('id', $map->id)
                 ->where('processing', false)
                 ->update([
+                    'name' => EpgMap::buildName($epg->name, $playlist?->name),
                     'uuid' => $batchNo,
                     'progress' => 0,
                     'status' => Status::Processing,
