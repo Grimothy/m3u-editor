@@ -681,6 +681,11 @@ class FetchTmdbIds implements ShouldQueue
                     $info['backdrop_path'] = [$details['backdrop_url']];
                 }
 
+                // Populate transparent title logo (clearlogo)
+                if (! empty($details['logo_url']) && (empty($info['clearlogo']) || $this->overwriteExisting)) {
+                    $info['clearlogo'] = $details['logo_url'];
+                }
+
                 // Populate cast if available
                 if (! empty($details['cast'])) {
                     $info['cast'] = is_array($details['cast']) ? implode(', ', $details['cast']) : $details['cast'];
@@ -1018,6 +1023,12 @@ class FetchTmdbIds implements ShouldQueue
                 // Populate backdrop path
                 if (! empty($details['backdrop_url'])) {
                     $updateData['backdrop_path'] = json_encode([$details['backdrop_url']]);
+                }
+
+                // Populate transparent title logo (clearlogo)
+                if (! empty($details['logo_url']) && (empty($metadata['clearlogo']) || $this->overwriteExisting)) {
+                    $metadata['clearlogo'] = $details['logo_url'];
+                    $updateData['metadata'] = $metadata;
                 }
 
                 // Populate cast if available

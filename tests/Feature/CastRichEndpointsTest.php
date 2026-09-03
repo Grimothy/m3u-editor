@@ -197,3 +197,58 @@ it('omits cast_list in get_series_info when persisted list is empty', function (
     $response->assertOk();
     $response->assertJsonMissingPath('info.cast_list');
 });
+
+// ---- clearlogo (transparent title logo) ----
+
+it('emits clearlogo in get_vod_info from channel info', function () {
+    $group = Group::factory()->for($this->user)->create();
+    $channel = Channel::factory()->for($this->playlist)->for($group)->create([
+        'enabled' => true,
+        'is_vod' => true,
+        'name' => 'Inception',
+        'last_metadata_fetch' => now(),
+        'info' => ['clearlogo' => 'https://image.tmdb.org/t/p/w500/logo.png'],
+    ]);
+
+    $response = $this->getJson(xtreamCastUrl($this->username, $this->password, 'get_vod_info', ['vod_id' => $channel->id]));
+
+    $response->assertOk();
+    $response->assertJsonPath('info.clearlogo', 'https://image.tmdb.org/t/p/w500/logo.png');
+});
+
+it('omits clearlogo in get_vod_info when channel info has none', function () {
+    $group = Group::factory()->for($this->user)->create();
+    $channel = Channel::factory()->for($this->playlist)->for($group)->create([
+        'enabled' => true,
+        'is_vod' => true,
+        'last_metadata_fetch' => now(),
+        'info' => ['cast' => 'Someone'],
+    ]);
+
+    $response = $this->getJson(xtreamCastUrl($this->username, $this->password, 'get_vod_info', ['vod_id' => $channel->id]));
+
+    $response->assertOk();
+    $response->assertJsonMissingPath('info.clearlogo');
+});
+
+it('emits clearlogo in get_series_info from series metadata', function () {
+    $series = Series::factory()->for($this->playlist)->create([
+        'user_id' => $this->user->id,
+        'enabled' => true,
+        'name' => 'Breaking Bad',
+        'tmdb_id' => 1396,
+        'metadata' => ['clearlogo' => 'https://image.tmdb.org/t/p/w500/bb-logo.png'],
+        'last_modified' => now(),
+    ]);
+
+    Season::factory()->create([
+        'series_id' => $series->id,
+        'season_number' => 1,
+        'episode_count' => 1,
+    ]);
+
+    $response = $this->getJson(xtreamCastUrl($this->username, $this->password, 'get_series_info', ['series_id' => $series->id]));
+
+    $response->assertOk();
+    $response->assertJsonPath('info.clearlogo', 'https://image.tmdb.org/t/p/w500/bb-logo.png');
+});

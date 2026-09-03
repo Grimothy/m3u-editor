@@ -892,7 +892,8 @@ class TmdbService
                 [
                     'api_key' => $this->apiKey,
                     'language' => $this->language,
-                    'append_to_response' => 'external_ids,credits,videos',
+                    'append_to_response' => 'external_ids,credits,videos,images',
+                    'include_image_language' => substr($this->language, 0, 2).',en,null',
                 ]
             );
 
@@ -922,6 +923,9 @@ class TmdbService
             if (! empty($data['backdrop_path'])) {
                 $backdropUrl = 'https://image.tmdb.org/t/p/original'.$data['backdrop_path'];
             }
+
+            // Transparent title logo (clearlogo), language-ranked
+            $logoUrl = $this->pickBestLogo($data['images']['logos'] ?? []);
 
             // Extract genres as comma-separated string
             $genres = collect($data['genres'] ?? [])->pluck('name')->implode(', ');
@@ -976,6 +980,7 @@ class TmdbService
                 'overview' => $data['overview'] ?? null,
                 'poster_url' => $posterUrl,
                 'backdrop_url' => $backdropUrl,
+                'logo_url' => $logoUrl,
                 'first_air_date' => $data['first_air_date'] ?? null,
                 'genres' => $genres,
                 'vote_average' => $data['vote_average'] ?? null,
@@ -1015,7 +1020,8 @@ class TmdbService
                 [
                     'api_key' => $this->apiKey,
                     'language' => $this->language,
-                    'append_to_response' => 'external_ids,credits,videos',
+                    'append_to_response' => 'external_ids,credits,videos,images',
+                    'include_image_language' => substr($this->language, 0, 2).',en,null',
                 ]
             );
 
@@ -1041,6 +1047,9 @@ class TmdbService
             if (! empty($data['backdrop_path'])) {
                 $backdropUrl = 'https://image.tmdb.org/t/p/original'.$data['backdrop_path'];
             }
+
+            // Transparent title logo (clearlogo), language-ranked
+            $logoUrl = $this->pickBestLogo($data['images']['logos'] ?? []);
 
             // Extract genres as comma-separated string
             $genres = collect($data['genres'] ?? [])->pluck('name')->implode(', ');
@@ -1089,6 +1098,7 @@ class TmdbService
                 'overview' => $data['overview'] ?? null,
                 'poster_url' => $posterUrl,
                 'backdrop_url' => $backdropUrl,
+                'logo_url' => $logoUrl,
                 'release_date' => $data['release_date'] ?? null,
                 'genres' => $genres,
                 'vote_average' => $data['vote_average'] ?? null,
@@ -1111,18 +1121,59 @@ class TmdbService
     }
 
     /**
+     * Pick the best transparent title logo from a TMDB `images.logos` array.
+     *
+     * Preference order: the configured language, then English, then a
+     * language-neutral logo. Within a language the highest-voted file wins.
+     * Returns null when the payload carries no usable logo.
+     *
+     * @param  array<int, array<string, mixed>>  $logos
+     */
+    private function pickBestLogo(array $logos): ?string
+    {
+        if (empty($logos)) {
+            return null;
+        }
+
+        $preferred = substr($this->language, 0, 2);
+        $languageRank = fn (?string $code): int => match ($code) {
+            $preferred => 0,
+            'en' => 1,
+            default => 2,
+        };
+
+        $candidates = array_values(array_filter(
+            $logos,
+            fn ($logo) => ! empty($logo['file_path'])
+        ));
+
+        usort($candidates, function ($a, $b) use ($languageRank) {
+            $rankDelta = $languageRank($a['iso_639_1'] ?? null) <=> $languageRank($b['iso_639_1'] ?? null);
+            if ($rankDelta !== 0) {
+                return $rankDelta;
+            }
+
+            return (float) ($b['vote_average'] ?? 0) <=> (float) ($a['vote_average'] ?? 0);
+        });
+
+        return isset($candidates[0]['file_path'])
+            ? 'https://image.tmdb.org/t/p/w500'.$candidates[0]['file_path']
+            : null;
+    }
+
+    /**
      * Reshape a raw TMDB `credits.cast` array into the m3u-tv wire contract.
      * Top 15 billed members, one entry per person.
      *
      * @param  array<int, array<string, mixed>>  $rawCast
-     * @return array<int, array{id: int, name: string, character: string, photo: ?string}>
+     * @return array<int, array{id: ?int, name: string, character: string, photo: ?string}>
      */
     private function reshapeRichCast(array $rawCast): array
     {
         return collect($rawCast)
             ->take(15)
             ->map(fn ($p) => [
-                'id' => (int) ($p['id'] ?? 0),
+                'id' => isset($p['id']) ? (int) $p['id'] : null,
                 'name' => $p['name'] ?? '',
                 'character' => $p['character'] ?? '',
                 'photo' => ! empty($p['profile_path'])
