@@ -80,8 +80,12 @@ it('maps media server People to a null-id cast_list and pulls the Logo image on 
 
     $channel = Channel::where('playlist_id', $this->playlist->id)->firstOrFail();
 
+    // toEqual (not toBe): `info` is a jsonb column, and Postgres jsonb does not
+    // preserve object key insertion order (it sorts keys by length then bytes),
+    // so the round-tripped map key order is not a contract - only the member
+    // list order and the values are.
     expect($channel->info['clearlogo'])->toBe('http://server/img/m1/Logo')
-        ->and($channel->info['cast_list'])->toBe([
+        ->and($channel->info['cast_list'])->toEqual([
             ['id' => null, 'name' => 'Keanu Reeves', 'character' => 'Neo', 'photo' => 'http://server/img/p1/Primary'],
             ['id' => null, 'name' => 'Carrie-Anne Moss', 'character' => 'Trinity', 'photo' => null],
         ]);
@@ -123,8 +127,10 @@ it('maps series People to a null-id cast_list and pulls the Logo image', functio
 
     $series = Series::where('playlist_id', $this->playlist->id)->firstOrFail();
 
+    // toEqual (not toBe): see the note on the movie test above - `metadata` is a
+    // jsonb column and does not preserve map key order.
     expect($series->metadata['clearlogo'])->toBe('http://server/img/s1/Logo')
-        ->and($series->metadata['cast_list'])->toBe([
+        ->and($series->metadata['cast_list'])->toEqual([
             ['id' => null, 'name' => 'Diego Luna', 'character' => 'Cassian', 'photo' => 'http://server/img/p9/Primary'],
         ]);
 });
