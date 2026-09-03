@@ -213,21 +213,75 @@ class AIOStreamsService implements MediaServer
     /**
      * Fetch metadata for a piece of content.
      *
+     * AIOStreams only exposes the Stremio `meta` resource when the operator has
+     * configured a metadata addon (Cinemeta, TMDB, ...) inside their instance;
+     * a stream-only setup 404s every meta request with "no addon to handle meta
+     * resource". When the instance can't answer, fall back to the same public
+     * meta addons Stremio itself uses, keyed by the item's id scheme.
+     *
      * @return array{meta: array<string, mixed>}|null
      */
     public function fetchMeta(string $type, string $id): ?array
     {
         $this->waitForRateLimit();
 
-        $response = Http::timeout(15)->retry(2, 1000)->get("{$this->baseUrl}/meta/{$type}/{$id}.json");
+        // No retry: a 404 ("no addon to handle meta resource") from a stream-only
+        // AIOStreams instance is deterministic, so retrying it just adds latency.
+        // The Stremio-addon fallback below is what provides resilience here.
+        $response = Http::timeout(15)->get("{$this->baseUrl}/meta/{$type}/{$id}.json");
 
-        if (! $response->successful()) {
-            Log::warning("AIOStreams meta fetch failed for {$type}/{$id}: HTTP {$response->status()}");
+        if ($response->successful()) {
+            $data = $response->json();
 
+            // Some AIOStreams versions answer 200 with an error envelope
+            // ({"success": false, ...}) rather than a real meta object.
+            if (is_array($data) && ! empty($data['meta'])) {
+                return $data;
+            }
+        }
+
+        $fallback = $this->fetchMetaFromStremioAddon($type, $id);
+
+        if ($fallback !== null) {
+            return $fallback;
+        }
+
+        Log::warning("AIOStreams meta fetch failed for {$type}/{$id}: HTTP {$response->status()}");
+
+        return null;
+    }
+
+    /**
+     * Fetch a Stremio meta object from the canonical public meta addon for the
+     * item's id scheme, mirroring Stremio's own default meta resolution:
+     * "tt..." -> Cinemeta, "kitsu:..." -> Kitsu addon, "tmdb:..." -> TMDB addon.
+     *
+     * @return array{meta: array<string, mixed>}|null
+     */
+    protected function fetchMetaFromStremioAddon(string $type, string $id): ?array
+    {
+        $addons = config('services.stremio.meta_addons', []);
+
+        $base = match (true) {
+            str_starts_with($id, 'tt') => $addons['cinemeta'] ?? null,
+            str_starts_with($id, 'kitsu:') => $addons['kitsu'] ?? null,
+            str_starts_with($id, 'tmdb:') => $addons['tmdb'] ?? null,
+            default => null,
+        };
+
+        if (! is_string($base) || $base === '') {
             return null;
         }
 
-        return $response->json();
+        $response = Http::timeout(15)->get(rtrim($base, '/')."/meta/{$type}/{$id}.json");
+
+        if (! $response->successful()) {
+            return null;
+        }
+
+        $data = $response->json();
+
+        return is_array($data) && ! empty($data['meta']) ? $data : null;
     }
 
     // -------------------------------------------------------------------------
