@@ -3,6 +3,7 @@
 namespace App\Models;
 
 use App\Enums\PlaylistSourceType;
+use App\Exceptions\XtreamRateLimitedException;
 use App\Jobs\FetchTmdbIds;
 use App\Jobs\SyncSeriesStrmFiles;
 use App\Services\XtreamService;
@@ -507,6 +508,12 @@ class Series extends Model
 
             // Data is fresh, return true
             return true;
+        } catch (XtreamRateLimitedException $e) {
+            // Let the account-wide cooldown propagate to the caller instead of
+            // being swallowed here as a single-series failure — callers that
+            // loop over many series (e.g. ProcessM3uImportSeriesEpisodes::processBatch)
+            // need to know to stop, not just skip this one series.
+            throw $e;
         } catch (\Throwable $e) {
             // Catch Throwable, not Exception: a TypeError/Error here (e.g. bad
             // provider payload shape) would otherwise escape, kill the batch job,
