@@ -262,6 +262,17 @@ class Series extends Model
             return true;
         }
 
+        // A series with no upstream id can't be fetched from the provider -
+        // XtreamService::getSeriesInfo(string) would be handed null and throw a
+        // TypeError. New imports are guarded at ingest (ProcessM3uImportSeriesChunk),
+        // this covers rows that predate that guard. Treat as "nothing to fetch",
+        // not a failure, so it doesn't abort the series_metadata phase.
+        if (blank($this->source_series_id)) {
+            Log::warning("Series {$this->id} ({$this->name}) has no source_series_id; skipping provider metadata fetch.");
+
+            return true;
+        }
+
         // Skip the provider call if data is still fresh (unless a forced refresh is requested).
         $isFresh = $this->isMetadataFresh($refresh);
 
@@ -386,6 +397,10 @@ class Series extends Model
                             if (! $title) {
                                 $title = $ep['title'] ?? "Episode {$ep['episode_num']}";
                             }
+                            // episodes.title is varchar(255). Some providers hand back
+                            // absurdly long titles (e.g. a hyphen-joined year list); clamp
+                            // so one bad title can't fail the whole episode upsert.
+                            $title = Str::limit($title, 255, '');
                             $bulk[] = [
                                 'title' => $title,
                                 'source_episode_id' => (int) $ep['id'],
@@ -460,7 +475,11 @@ class Series extends Model
 
             // Data is fresh, return true
             return true;
-        } catch (\Exception $e) {
+        } catch (\Throwable $e) {
+            // Catch Throwable, not Exception: a TypeError/Error here (e.g. bad
+            // provider payload shape) would otherwise escape, kill the batch job,
+            // and strand the series_metadata pipeline phase forever. Returning
+            // false lets the caller decide - in a sync run it aborts the phase.
             Log::error('Failed to fetch metadata for series '.$this->id, ['exception' => $e]);
         }
 

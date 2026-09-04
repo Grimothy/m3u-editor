@@ -6,6 +6,7 @@ use App\Enums\Status;
 use App\Enums\SyncRunPhase;
 use App\Models\Playlist;
 use App\Models\Series;
+use App\Models\SyncRun;
 use App\Models\User;
 use App\Services\SyncPipelineService;
 use App\Settings\GeneralSettings;
@@ -15,6 +16,8 @@ use Illuminate\Contracts\Queue\ShouldQueue;
 use Illuminate\Foundation\Queue\Queueable;
 use Illuminate\Support\Facades\Bus;
 use Illuminate\Support\Facades\Log;
+use Illuminate\Support\Str;
+use Throwable;
 
 class ProcessM3uImportSeriesEpisodes implements ShouldQueue
 {
@@ -165,6 +168,7 @@ class ProcessM3uImportSeriesEpisodes implements ShouldQueue
                 batchOffset: $offset,
                 totalBatches: $totalBatches,
                 currentBatch: $batch + 1,
+                syncRunId: $this->syncRunId, // so a failed batch can fail the pipeline phase
             );
         }
 
@@ -290,6 +294,18 @@ class ProcessM3uImportSeriesEpisodes implements ShouldQueue
             );
         });
 
+        // A real fetch/DB failure must abort the whole sync, not land silently. Landing
+        // a partial series_metadata pass here doesn't delete anything by itself, but it
+        // does let the run report "complete" while some series keep stale episodes - the
+        // same kind of silent partial we removed from the import phase. Only do this in
+        // a pipeline sync run (syncRunId set); fetchMetadata() also returns false for
+        // benign reasons (e.g. no provider configured) outside that context.
+        if ($results === false && $this->syncRunId !== null) {
+            throw new \RuntimeException(
+                "Series metadata fetch failed for series {$series->id} ({$series->name}) on playlist {$series->playlist_id}. Aborting sync run {$this->syncRunId}."
+            );
+        }
+
         if ($this->notify && $results !== false) {
             // Check if the playlist has .strm file sync enabled
             $sync_settings = $series->sync_settings;
@@ -307,6 +323,44 @@ class ProcessM3uImportSeriesEpisodes implements ShouldQueue
                 ->body($body)
                 ->broadcast($playlist->user)
                 ->sendToDatabase($playlist->user);
+        }
+    }
+
+    /**
+     * A batch job dying (uncaught error, timeout, OOM, worker restart) used to
+     * abort its Bus::chain() silently, so CheckSeriesImportProgress never ran and
+     * the SyncRun sat in the series_metadata phase forever ("stuck processing").
+     * Fail the pipeline phase explicitly instead so the run ends cleanly and the
+     * user gets a real failure they can retry.
+     */
+    public function failed(?Throwable $exception): void
+    {
+        Log::error('ProcessM3uImportSeriesEpisodes failed', [
+            'playlist_id' => $this->playlist_id,
+            'sync_run_id' => $this->syncRunId,
+            'batch_offset' => $this->batchOffset,
+            'error' => $exception?->getMessage(),
+        ]);
+
+        if ($this->playlist_id) {
+            $playlist = Playlist::find($this->playlist_id);
+            if ($playlist) {
+                $playlist->update([
+                    'processing' => [
+                        ...$playlist->processing ?? [],
+                        'series_processing' => false,
+                    ],
+                    'status' => Status::Failed,
+                    'errors' => $exception ? Str::limit($exception->getMessage(), 255) : 'Series metadata sync failed',
+                ]);
+            }
+        }
+
+        if ($this->syncRunId) {
+            $run = SyncRun::find($this->syncRunId);
+            if ($run) {
+                app(SyncPipelineService::class)->fail($run, 'Series metadata batch failed: '.($exception?->getMessage() ?? 'unknown error'));
+            }
         }
     }
 }
