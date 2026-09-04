@@ -17,6 +17,7 @@ use Illuminate\Database\Eloquent\Relations\BelongsToMany;
 use Illuminate\Database\Eloquent\Relations\HasMany;
 use Illuminate\Database\Eloquent\Relations\MorphToMany;
 use Illuminate\Support\Facades\Bus;
+use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Facades\Log;
 use Illuminate\Support\Str;
 use Spatie\Tags\HasTags;
@@ -448,6 +449,37 @@ class Series extends Model
                             ]
                         );
                     }
+
+                    // Reconcile: the provider is the source of truth for episodes within a
+                    // season it actually sent us this fetch, so anything in that season we
+                    // didn't just touch has been removed or renumbered upstream and is dead
+                    // weight (unplayable - the stream URL 404s). Scoped to $eps's own season
+                    // keys only, never the whole series: a season absent from this response
+                    // (truncated/rate-limited answer, or a real removal - we can't tell which
+                    // from one fetch) is left untouched rather than assumed gone. Only
+                    // provider-sourced rows are ever considered, so locally created episodes
+                    // (DVR recordings, manual entries) are never touched.
+                    $seasonsInResponse = array_map('intval', array_keys($eps));
+                    DB::transaction(function () use ($seasonsInResponse, $batchNo) {
+                        $removedEpisodes = $this->episodes()
+                            ->whereIn('season', $seasonsInResponse)
+                            ->whereNotNull('source_episode_id')
+                            ->where('import_batch_no', '!=', $batchNo)
+                            ->delete();
+
+                        $removedSeasons = $this->seasons()
+                            ->whereIn('season_number', $seasonsInResponse)
+                            ->whereDoesntHave('episodes')
+                            ->delete();
+
+                        if ($removedEpisodes > 0 || $removedSeasons > 0) {
+                            Log::info("Series {$this->id} ({$this->name}): removed stale episodes no longer listed by the provider", [
+                                'episodes_removed' => $removedEpisodes,
+                                'seasons_removed' => $removedSeasons,
+                                'seasons_in_response' => $seasonsInResponse,
+                            ]);
+                        }
+                    });
                 }
 
                 // Update last fetched timestamp for the series (always, regardless of episode count).
