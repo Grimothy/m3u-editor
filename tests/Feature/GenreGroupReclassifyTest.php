@@ -861,7 +861,7 @@ it('does not reclassify a VOD channel created from a DVR recording', function ()
         'is_vod' => true,
         'is_custom' => true,
         'dvr_recording_id' => $recording->id,
-        // Genre present — without the fix this would have routed the channel
+        // Genre present - without the fix this would have routed the channel
         // out of "DVR Recordings" into the "Action" group.
         'info' => ['genre' => 'Action'],
     ]);
@@ -871,7 +871,7 @@ it('does not reclassify a VOD channel created from a DVR recording', function ()
     expect($result['moved'])->toBe(0)
         ->and($result['protected'])->toBe(0)
         ->and((int) refreshChannel($dvrCh)->group_id)->toBe((int) $dvrGroup->id)
-        // The pre-existing "Action" group must have stayed empty — reclassify
+        // The pre-existing "Action" group must have stayed empty - reclassify
         // must not have created a duplicate or moved anyone into it.
         ->and(Channel::where('group_id', $action->id)->count())->toBe(0);
 });
@@ -888,7 +888,7 @@ it('does not reclassify a Series created from a DVR recording (import_batch_no =
     ]);
     $recording = DvrRecording::factory()->for($this->user)->create();
     // DvrVodIntegrationService::findOrCreateSeries sets this marker on every
-    // DVR-created series — that's the reclassify exclusion key.
+    // DVR-created series - that's the reclassify exclusion key.
     $dvrSeries = enabledSeries($this->playlist, $dvrCategory, $this->user, [
         'import_batch_no' => 'dvr',
         'genre' => 'Drama',
@@ -950,7 +950,7 @@ it('excludes DVR content but still reclassifies regular content on the same play
         ->and($seriesResult['moved'])->toBe(1)
         ->and((int) refreshChannel($regularCh)->group_id)->toBe((int) $actionGroup->id)
         ->and((int) $regularSeries->refresh()->category_id)->toBe((int) $dramaCategory->id)
-        // DVR content untouched — still in their dedicated group / category.
+        // DVR content untouched - still in their dedicated group / category.
         ->and((int) refreshChannel($dvrCh)->group_id)->toBe((int) $dvrGroup->id)
         ->and((int) $dvrSeries->refresh()->category_id)->toBe((int) $dvrCategory->id);
 });

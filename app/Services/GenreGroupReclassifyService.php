@@ -46,10 +46,15 @@ use Illuminate\Database\Eloquent\Collection as EloquentCollection;
  *     `dvr_recording_id IS NOT NULL` and Series with `import_batch_no = 'dvr'`
  *     are created by DvrVodIntegrationService inside a dedicated "DVR Recordings"
  *     group / category. Re-routing them by TMDB genre would silently break the
- *     user's expectation that DVR content stays in its own bucket — and the
+ *     user's expectation that DVR content stays in its own bucket, and the
  *     TMDB genre for a one-off recording is rarely meaningful anyway (often a
  *     news/sports programme with no movie/tv-genre match). Excluded at query
  *     level so they don't appear in `moved` / `protected` counters.
+ *     Note: `import_batch_no = 'dvr'` is only set on DvrVodIntegrationService's
+ *     Series::create() path. A provider-imported series that later gets a DVR
+ *     episode attached keeps its original batch number and stays eligible for
+ *     reclassification - correct, since that series lives in its provider
+ *     category, not "DVR Recordings".
  *
  * Performance: iteration is via `chunkById(100, ...)` (mirrors FetchTmdbIds.php's
  * own pattern - `cursor()` would risk "database is locked" on SQLite), and groups /
@@ -279,7 +284,10 @@ class GenreGroupReclassifyService
             // DVR-created Series (import_batch_no = 'dvr') live in the "DVR Recordings"
             // category and are owned by DvrVodIntegrationService. Excluded from
             // reclassification so they stay where the user expects them. See class
-            // docblock.
+            // docblock. `series.import_batch_no` is NOT NULL at the schema level, so a
+            // bare `!= 'dvr'` needs no `whereNull(...)->orWhere(...)` guard (contrast
+            // the 2026_09_04 cleanup_series_with_no_source_series_id migration, which
+            // guards it defensively).
             ->where('import_batch_no', '!=', 'dvr')
             ->select(['id', 'playlist_id', 'category_id', 'genre'])
             ->orderBy('id')
