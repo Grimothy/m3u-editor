@@ -56,6 +56,45 @@ class Bouquet extends Model
     }
 
     /**
+     * Which of the three mutually-exclusive target FKs is set.
+     *
+     * @return 'playlist'|'custom_playlist'|'merged_playlist'
+     */
+    public function targetType(): string
+    {
+        return match (true) {
+            $this->custom_playlist_id !== null => 'custom_playlist',
+            $this->merged_playlist_id !== null => 'merged_playlist',
+            default => 'playlist',
+        };
+    }
+
+    /**
+     * The playlist this bouquet targets, whatever its type. Eager-load
+     * playlist/customPlaylist/mergedPlaylist to keep this query-free.
+     */
+    public function targetPlaylist(): Playlist|CustomPlaylist|MergedPlaylist|null
+    {
+        return match ($this->targetType()) {
+            'custom_playlist' => $this->customPlaylist,
+            'merged_playlist' => $this->mergedPlaylist,
+            default => $this->playlist,
+        };
+    }
+
+    /**
+     * Human-readable label for the target type, e.g. "Custom Playlist".
+     */
+    public function targetTypeLabel(): string
+    {
+        return match ($this->targetType()) {
+            'custom_playlist' => __('Custom Playlist'),
+            'merged_playlist' => __('Merged Playlist'),
+            default => __('Playlist'),
+        };
+    }
+
+    /**
      * @return array<string>
      */
     public function getSelectedLiveGroupNames(): array

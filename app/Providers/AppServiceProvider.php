@@ -45,6 +45,7 @@ use App\Services\NetworkChannelSyncService;
 use App\Services\PlaylistService;
 use App\Services\ProxyService;
 use App\Services\SortService;
+use App\Services\TagRenamePropagationService;
 use App\Settings\GeneralSettings;
 use App\Support\CopilotProvider;
 use CraftForge\FilamentLanguageSwitcher\Events\LocaleChanged;
@@ -755,81 +756,8 @@ class AppServiceProvider extends ServiceProvider
             });
 
             // Custom playlist group/category tags: propagate renames into bouquets
-            // and alias group filters, which store tag names and would otherwise
-            // silently stop matching - same treatment the provider-rename pass in
-            // ProcessM3uImport gives standard playlists (issue #1391).
-            Tag::updated(function (Tag $tag) {
-                if (! $tag->wasChanged('name') || ! $tag->type) {
-                    return;
-                }
-
-                $oldName = json_decode($tag->getRawOriginal('name') ?? '', true)['en'] ?? null;
-                $newName = $tag->getTranslation('name', 'en');
-                if (! $oldName || ! $newName || $oldName === $newName) {
-                    return;
-                }
-
-                $isCategory = str_ends_with($tag->type, '-category');
-                $uuid = $isCategory ? substr($tag->type, 0, -strlen('-category')) : $tag->type;
-                $customPlaylist = CustomPlaylist::where('uuid', $uuid)->first();
-                if (! $customPlaylist) {
-                    return;
-                }
-
-                // Group tags are shared across live and VOD; category tags map to series.
-                $keys = $isCategory ? ['selected_categories'] : ['selected_groups', 'selected_vod_groups'];
-
-                $replaceName = function (array $names) use ($oldName, $newName): array {
-                    return array_values(array_unique(
-                        array_map(fn (string $name): string => $name === $oldName ? $newName : $name, $names)
-                    ));
-                };
-
-                $rewrite = function (array $lists) use ($keys, $oldName, $replaceName): array {
-                    foreach ($keys as $key) {
-                        $current = $lists[$key] ?? [];
-                        if (in_array($oldName, $current, true)) {
-                            $lists[$key] = $replaceName($current);
-                        }
-                    }
-
-                    return $lists;
-                };
-
-                Bouquet::where('custom_playlist_id', $customPlaylist->id)
-                    ->cursor()
-                    ->each(function (Bouquet $bouquet) use ($rewrite): void {
-                        $updated = $rewrite($bouquet->group_selections ?? []);
-                        if ($updated !== ($bouquet->group_selections ?? [])) {
-                            $bouquet->update(['group_selections' => $updated]);
-                        }
-                    });
-
-                // Custom-playlist aliases also carry a manual live-group sort order
-                // (fed by the same custom-variant picker as selected_groups), which
-                // goes stale the same way - but only group tags have a live-group
-                // sort order to rewrite; category tags don't touch it.
-                PlaylistAlias::where('custom_playlist_id', $customPlaylist->id)
-                    ->cursor()
-                    ->each(function (PlaylistAlias $alias) use ($rewrite, $replaceName, $isCategory, $oldName): void {
-                        $filter = $rewrite($alias->group_filter ?? []);
-
-                        if (! $isCategory) {
-                            $order = $filter['live_group_order'] ?? [];
-                            if (in_array($oldName, $order, true)) {
-                                $filter['live_group_order'] = $replaceName($order);
-                            }
-                        }
-
-                        if ($filter !== ($alias->group_filter ?? [])) {
-                            $alias->updateQuietly(['group_filter' => $filter]);
-                            // updateQuietly() skips the ::updating hook that clears the EPG
-                            // cache on target-FK changes, but a rewritten manual filter is
-                            // just as stale as one the user edited by hand - clear it here.
-                            EpgCacheService::clearPlaylistEpgCacheFile($alias);
-                        }
-                    });
-            });
+            // and alias group filters (issue #1391). See TagRenamePropagationService.
+            Tag::updated(fn (Tag $tag) => TagRenamePropagationService::handle($tag));
 
             // Auto-generate UUID for channels
             Channel::creating(function (Channel $channel) {

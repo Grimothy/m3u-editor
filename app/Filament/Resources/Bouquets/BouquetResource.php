@@ -20,6 +20,7 @@ use Filament\Actions\DeleteAction;
 use Filament\Actions\DeleteBulkAction;
 use Filament\Actions\EditAction;
 use Filament\Forms;
+use Filament\Forms\Components\Field;
 use Filament\Notifications\Notification;
 use Filament\Resources\Resource;
 use Filament\Schemas;
@@ -109,11 +110,7 @@ class BouquetResource extends Resource
                         ->dehydrated(false)
                         ->live()
                         ->disabledOn('edit')
-                        ->formatStateUsing(fn (?Bouquet $record): string => match (true) {
-                            $record?->custom_playlist_id !== null => 'custom_playlist',
-                            $record?->merged_playlist_id !== null => 'merged_playlist',
-                            default => 'playlist',
-                        })
+                        ->formatStateUsing(fn (?Bouquet $record): string => $record?->targetType() ?? 'playlist')
                         ->afterStateUpdated(function (Set $set): void {
                             $set('target_id', null);
                             $set('playlist_id', null);
@@ -163,15 +160,13 @@ class BouquetResource extends Resource
             Schemas\Components\Fieldset::make(__('Live channel groups'))
                 ->columnSpanFull()
                 ->schema([
-                    SourceGroupModalSelect::make('group_selections.selected_groups', 'live')
-                        ->label(__('Live groups'))
-                        ->helperText(__('Aliases using this bouquet will include live channels from these groups.')),
-                    CustomPlaylistGroupModalSelect::make('group_selections.selected_groups', 'live')
-                        ->label(__('Live groups'))
-                        ->helperText(__('Aliases using this bouquet will include live channels from these groups.')),
-                    MergedSourceGroupModalSelect::make('group_selections.selected_groups', 'live')
-                        ->label(__('Live groups'))
-                        ->helperText(__('Aliases using this bouquet will include live channels from these groups. Each selection is scoped to the source playlist it was picked from.')),
+                    ...self::groupPickers(
+                        'group_selections.selected_groups',
+                        'live',
+                        __('Live groups'),
+                        __('Aliases using this bouquet will include live channels from these groups.'),
+                        __('Aliases using this bouquet will include live channels from these groups. Each selection is scoped to the source playlist it was picked from.'),
+                    ),
                     Forms\Components\Toggle::make('auto_include_new_live')
                         ->label(__('Automatically include new live groups'))
                         ->default(false)
@@ -182,15 +177,13 @@ class BouquetResource extends Resource
             Schemas\Components\Fieldset::make(__('VOD groups'))
                 ->columnSpanFull()
                 ->schema([
-                    SourceGroupModalSelect::make('group_selections.selected_vod_groups', 'vod')
-                        ->label(__('VOD groups'))
-                        ->helperText(__('Aliases using this bouquet will include VOD channels from these groups.')),
-                    CustomPlaylistGroupModalSelect::make('group_selections.selected_vod_groups', 'vod')
-                        ->label(__('VOD groups'))
-                        ->helperText(__('Aliases using this bouquet will include VOD channels from these groups.')),
-                    MergedSourceGroupModalSelect::make('group_selections.selected_vod_groups', 'vod')
-                        ->label(__('VOD groups'))
-                        ->helperText(__('Aliases using this bouquet will include VOD channels from these groups. Each selection is scoped to the source playlist it was picked from.')),
+                    ...self::groupPickers(
+                        'group_selections.selected_vod_groups',
+                        'vod',
+                        __('VOD groups'),
+                        __('Aliases using this bouquet will include VOD channels from these groups.'),
+                        __('Aliases using this bouquet will include VOD channels from these groups. Each selection is scoped to the source playlist it was picked from.'),
+                    ),
                     Forms\Components\Toggle::make('auto_include_new_vod')
                         ->label(__('Automatically include new VOD groups'))
                         ->default(false)
@@ -200,17 +193,35 @@ class BouquetResource extends Resource
 
             Schemas\Components\Fieldset::make(__('Series categories'))
                 ->columnSpanFull()
-                ->schema([
-                    SourceGroupModalSelect::make('group_selections.selected_categories', 'categories')
-                        ->label(__('Series categories'))
-                        ->helperText(__('Aliases using this bouquet will include series from these categories.')),
-                    CustomPlaylistGroupModalSelect::make('group_selections.selected_categories', 'categories')
-                        ->label(__('Series categories'))
-                        ->helperText(__('Aliases using this bouquet will include series from these categories.')),
-                    MergedSourceGroupModalSelect::make('group_selections.selected_categories', 'categories')
-                        ->label(__('Series categories'))
-                        ->helperText(__('Aliases using this bouquet will include series from these categories. Each selection is scoped to the source playlist it was picked from.')),
-                ]),
+                ->schema(self::groupPickers(
+                    'group_selections.selected_categories',
+                    'categories',
+                    __('Series categories'),
+                    __('Aliases using this bouquet will include series from these categories.'),
+                    __('Aliases using this bouquet will include series from these categories. Each selection is scoped to the source playlist it was picked from.'),
+                )),
+        ];
+    }
+
+    /**
+     * The standard / custom-playlist / merged picker trio for one selection key.
+     * All three bind to the same state path so exactly one renders for the
+     * bouquet's target type; the merged picker gets the extra source-scope note.
+     *
+     * @return array<int, Field>
+     */
+    protected static function groupPickers(string $statePath, string $type, string $label, string $helperText, string $mergedHelperText): array
+    {
+        return [
+            SourceGroupModalSelect::make($statePath, $type)
+                ->label($label)
+                ->helperText($helperText),
+            CustomPlaylistGroupModalSelect::make($statePath, $type)
+                ->label($label)
+                ->helperText($helperText),
+            MergedSourceGroupModalSelect::make($statePath, $type)
+                ->label($label)
+                ->helperText($mergedHelperText),
         ];
     }
 
@@ -236,15 +247,11 @@ class BouquetResource extends Resource
                     ->sortable(),
                 Tables\Columns\TextColumn::make('target')
                     ->label(__('Playlist'))
-                    ->getStateUsing(fn (Bouquet $record): string => match (true) {
-                        $record->custom_playlist_id !== null => ($record->customPlaylist?->name ?? 'N/A').' ('.__('Custom Playlist').')',
-                        $record->merged_playlist_id !== null => ($record->mergedPlaylist?->name ?? 'N/A').' ('.__('Merged Playlist').')',
-                        default => ($record->playlist?->name ?? 'N/A').' ('.__('Playlist').')',
-                    })
-                    ->url(fn (Bouquet $record): ?string => match (true) {
-                        $record->custom_playlist_id !== null => $record->customPlaylist ? CustomPlaylistResource::getUrl('edit', ['record' => $record->custom_playlist_id]) : null,
-                        $record->merged_playlist_id !== null => $record->mergedPlaylist ? MergedPlaylistResource::getUrl('edit', ['record' => $record->merged_playlist_id]) : null,
-                        default => $record->playlist ? PlaylistResource::getUrl('edit', ['record' => $record->playlist_id]) : null,
+                    ->getStateUsing(fn (Bouquet $record): string => ($record->targetPlaylist()?->name ?? 'N/A').' ('.$record->targetTypeLabel().')')
+                    ->url(fn (Bouquet $record): ?string => $record->targetPlaylist() === null ? null : match ($record->targetType()) {
+                        'custom_playlist' => CustomPlaylistResource::getUrl('edit', ['record' => $record->custom_playlist_id]),
+                        'merged_playlist' => MergedPlaylistResource::getUrl('edit', ['record' => $record->merged_playlist_id]),
+                        default => PlaylistResource::getUrl('edit', ['record' => $record->playlist_id]),
                     }),
                 Tables\Columns\TextColumn::make('selection_counts')
                     ->label(__('Live / VOD / Series'))
