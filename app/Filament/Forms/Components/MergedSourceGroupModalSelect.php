@@ -8,10 +8,10 @@ use App\Filament\Tables\SourceGroupsTable;
 use App\Models\PlaylistAlias;
 use App\Models\SourceCategory;
 use App\Models\SourceGroup;
+use App\Traits\HasGroupSelectionModalLabels;
 use Filament\Actions\Action;
 use Filament\Forms\Components\ModalTableSelect;
 use Filament\Schemas\Components\Utilities\Get;
-use Filament\Schemas\Components\Utilities\Set;
 use Illuminate\Database\Eloquent\Builder;
 use Illuminate\Support\Collection;
 
@@ -30,22 +30,13 @@ use Illuminate\Support\Collection;
  */
 class MergedSourceGroupModalSelect
 {
+    use HasGroupSelectionModalLabels;
+
     public static function make(string $statePath, string $type): ModalTableSelect
     {
         $isCategories = $type === 'categories';
         $selectionKey = substr($statePath, strrpos($statePath, '.') + 1);
         $contentType = $isCategories ? 'series' : $type;
-
-        $selectLabel = match ($type) {
-            'live' => __('Select live groups'),
-            'vod' => __('Select VOD groups'),
-            default => __('Select series categories'),
-        };
-        $modalHeading = match ($type) {
-            'live' => __('Search live groups'),
-            'vod' => __('Search VOD groups'),
-            default => __('Search series categories'),
-        };
 
         $playlistIdsFor = function (Get $get, $record) use ($contentType): array {
             $mergedId = (int) ($get('merged_playlist_id') ?: $record?->merged_playlist_id);
@@ -74,21 +65,12 @@ class MergedSourceGroupModalSelect
             })
             ->selectAction(
                 fn (Action $action) => $action
-                    ->label($selectLabel)
-                    ->modalHeading($modalHeading)
+                    ->label(self::selectLabelFor($type))
+                    ->modalHeading(self::modalHeadingFor($type))
                     ->modalSubmitActionLabel(__('Confirm selection'))
                     ->button(),
             )
-            ->hintAction(
-                Action::make('clear_merged_'.str_replace('.', '_', $statePath))
-                    ->label(__('Clear all'))
-                    ->icon('heroicon-o-x-mark')
-                    ->color('danger')
-                    ->action(fn (Set $set) => $set($statePath, []))
-                    ->requiresConfirmation()
-                    ->modalHeading(__('Clear selection'))
-                    ->modalSubmitActionLabel(__('Clear'))
-            )
+            ->hintAction(self::clearSelectionAction('clear_merged_', $statePath))
             ->getOptionLabelFromRecordUsing(fn ($record) => $record->display_name ?? $record->name)
             ->getOptionLabelsUsing(function (array $values, $record, Get $get) use ($isCategories, $type, $playlistIdsFor): array {
                 $playlistIds = $playlistIdsFor($get, $record);
@@ -129,8 +111,8 @@ class MergedSourceGroupModalSelect
                 // kept, unless the user deliberately cleared a still-valid selection.
                 $stored = PlaylistAlias::selectionPairs($record?->group_selections[$selectionKey] ?? []);
                 if (! empty($stored)) {
-                    $resolvedTokens = self::tokens($pairs);
-                    $stale = array_filter($stored, fn (array $pair) => ! in_array(self::token($pair), $resolvedTokens, true)
+                    $resolvedTokens = array_map(PlaylistAlias::selectionToken(...), $pairs);
+                    $stale = array_filter($stored, fn (array $pair) => ! in_array(PlaylistAlias::selectionToken($pair), $resolvedTokens, true)
                         && ! self::pairResolves($scopedQuery([$pair['playlist_id']]), $pair));
 
                     if (! empty($stale) && (! empty($ids) || count($stale) === count($stored))) {
@@ -179,22 +161,5 @@ class MergedSourceGroupModalSelect
         return PlaylistAlias::selectionPairs($rows
             ->map(fn ($row): array => ['playlist_id' => (int) $row->playlist_id, 'name' => $row->name])
             ->all());
-    }
-
-    /**
-     * @param  array{playlist_id: int, name: string}  $pair
-     */
-    private static function token(array $pair): string
-    {
-        return $pair['playlist_id'].':'.$pair['name'];
-    }
-
-    /**
-     * @param  array<int, array{playlist_id: int, name: string}>  $pairs
-     * @return array<string>
-     */
-    private static function tokens(array $pairs): array
-    {
-        return array_map([self::class, 'token'], $pairs);
     }
 }

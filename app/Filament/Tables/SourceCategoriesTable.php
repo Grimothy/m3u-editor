@@ -3,9 +3,9 @@
 namespace App\Filament\Tables;
 
 use App\Filament\Tables\Traits\FiltersBySelection;
+use App\Filament\Tables\Traits\HasBouquetPickerColumns;
 use App\Models\SourceCategory;
 use Filament\Actions\BulkActionGroup;
-use Filament\Tables\Columns\IconColumn;
 use Filament\Tables\Columns\TextColumn;
 use Filament\Tables\Filters\TernaryFilter;
 use Filament\Tables\Table;
@@ -14,6 +14,7 @@ use Illuminate\Database\Eloquent\Builder;
 class SourceCategoriesTable
 {
     use FiltersBySelection;
+    use HasBouquetPickerColumns;
 
     public static function configure(Table $table): Table
     {
@@ -39,14 +40,8 @@ class SourceCategoriesTable
                     ->label(__('Category Name'))
                     ->searchable()
                     ->sortable(),
-                TextColumn::make('playlist.name')
-                    ->label(__('Source Playlist'))
-                    ->visible(fn (): bool => count((array) ($table->getArguments()['playlist_ids'] ?? [])) > 1),
-                IconColumn::make('in_bouquet')
-                    ->label(__('In bouquet'))
-                    ->visible(fn (): bool => ! empty($table->getArguments()['bouquet_group_names'] ?? []))
-                    ->state(fn ($record): bool => in_array($record->name, $table->getArguments()['bouquet_group_names'] ?? [], true))
-                    ->boolean(),
+                self::sourcePlaylistColumn($table),
+                self::bouquetMembershipColumn($table),
             ])
             ->filters([
                 TernaryFilter::make('enabled')

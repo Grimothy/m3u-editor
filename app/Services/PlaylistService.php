@@ -44,6 +44,7 @@ use Illuminate\Database\Eloquent\Builder;
 use Illuminate\Database\Eloquent\Collection;
 use Illuminate\Database\Eloquent\ModelNotFoundException;
 use Illuminate\Http\Request;
+use Illuminate\Support\Collection as SupportCollection;
 use Illuminate\Support\Facades\Bus;
 use Illuminate\Support\Facades\Cache;
 use Illuminate\Support\Facades\DB;
@@ -1751,7 +1752,7 @@ class PlaylistService
      * bouquet's selections. Public static so tests can exercise the handler
      * directly. $type: 'live' | 'vod' | 'category'.
      */
-    public static function addGroupRecordsToBouquet(\Illuminate\Support\Collection $records, int $bouquetId, string $type): void
+    public static function addGroupRecordsToBouquet(SupportCollection $records, int $bouquetId, string $type): void
     {
         $bouquet = Bouquet::where('user_id', auth()->id())->find($bouquetId);
         if (! $bouquet || ! $bouquet->playlist_id) {

@@ -1399,6 +1399,18 @@ class PlaylistAliasResource extends Resource implements CopilotResource
     }
 
     /**
+     * The live-group helpers below accept a single playlist id or a merged
+     * playlist's list of sources; normalise either into a list of integer ids.
+     *
+     * @param  int|array<int|string>|null  $playlistIds
+     * @return array<int>
+     */
+    private static function numericPlaylistIds(int|array|null $playlistIds): array
+    {
+        return array_values(array_filter((array) $playlistIds, fn ($value): bool => is_numeric($value)));
+    }
+
+    /**
      * Convert the live group selection state into an ordered list of internal group
      * names. The state holds SourceGroup IDs while editing, or group names (or
      * {playlist_id, name} pairs for merged aliases) once persisted.
@@ -1412,7 +1424,7 @@ class PlaylistAliasResource extends Resource implements CopilotResource
             return [];
         }
 
-        $playlistIds = array_values(array_filter((array) $playlistIds, fn ($value): bool => is_numeric($value)));
+        $playlistIds = self::numericPlaylistIds($playlistIds);
         $ids = array_values(array_filter($selection, fn ($value): bool => is_numeric($value)));
         if (! empty($ids) && ! empty($playlistIds)) {
             $map = SourceGroup::whereIn('playlist_id', $playlistIds)
@@ -1464,7 +1476,7 @@ class PlaylistAliasResource extends Resource implements CopilotResource
         // name_internal can't supply the label; soft-deleted rows are excluded by
         // the Group model's SoftDeletes global scope.
         $labels = [];
-        $playlistIds = array_values(array_filter((array) $playlistIds, fn ($value): bool => is_numeric($value)));
+        $playlistIds = self::numericPlaylistIds($playlistIds);
         if (! empty($playlistIds)) {
             $labels = Group::whereIn('playlist_id', $playlistIds)
                 ->where('type', 'live')

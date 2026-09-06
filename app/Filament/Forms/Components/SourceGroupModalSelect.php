@@ -6,10 +6,10 @@ use App\Filament\Tables\SourceCategoriesTable;
 use App\Filament\Tables\SourceGroupsTable;
 use App\Models\SourceCategory;
 use App\Models\SourceGroup;
+use App\Traits\HasGroupSelectionModalLabels;
 use Filament\Actions\Action;
 use Filament\Forms\Components\ModalTableSelect;
 use Filament\Schemas\Components\Utilities\Get;
-use Filament\Schemas\Components\Utilities\Set;
 
 /**
  * Standard-playlist group/category picker for bouquet selections.
@@ -26,21 +26,12 @@ use Filament\Schemas\Components\Utilities\Set;
  */
 class SourceGroupModalSelect
 {
+    use HasGroupSelectionModalLabels;
+
     public static function make(string $statePath, string $type): ModalTableSelect
     {
         $isCategories = $type === 'categories';
         $selectionKey = substr($statePath, strrpos($statePath, '.') + 1);
-
-        $selectLabel = match ($type) {
-            'live' => __('Select live groups'),
-            'vod' => __('Select VOD groups'),
-            default => __('Select series categories'),
-        };
-        $modalHeading = match ($type) {
-            'live' => __('Search live groups'),
-            'vod' => __('Search VOD groups'),
-            default => __('Search series categories'),
-        };
 
         $sourceQuery = function (int $playlistId) use ($isCategories, $type) {
             return $isCategories
@@ -66,21 +57,12 @@ class SourceGroupModalSelect
             })
             ->selectAction(
                 fn (Action $action) => $action
-                    ->label($selectLabel)
-                    ->modalHeading($modalHeading)
+                    ->label(self::selectLabelFor($type))
+                    ->modalHeading(self::modalHeadingFor($type))
                     ->modalSubmitActionLabel(__('Confirm selection'))
                     ->button(),
             )
-            ->hintAction(
-                Action::make('clear_'.str_replace('.', '_', $statePath))
-                    ->label(__('Clear all'))
-                    ->icon('heroicon-o-x-mark')
-                    ->color('danger')
-                    ->action(fn (Set $set) => $set($statePath, []))
-                    ->requiresConfirmation()
-                    ->modalHeading(__('Clear selection'))
-                    ->modalSubmitActionLabel(__('Clear'))
-            )
+            ->hintAction(self::clearSelectionAction('clear_', $statePath))
             ->getOptionLabelFromRecordUsing(fn ($record) => $record->display_name ?? $record->name)
             ->getOptionLabelsUsing(function (array $values, $record, Get $get) use ($isCategories, $type): array {
                 $playlistId = $record?->playlist_id ?? (int) $get('playlist_id');

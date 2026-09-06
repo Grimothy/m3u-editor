@@ -903,17 +903,10 @@ class AppServiceProvider extends ServiceProvider
 
             // Bouquets (issue #1391)
             //
-            // Auto-assign the owner before the ownership check below runs: `saving`
-            // fires before `creating` on a new model, so a bouquet created without an
-            // explicit user_id (relying on the auth()->id() fallback) would otherwise
-            // still be null here.
-            Bouquet::creating(function (Bouquet $bouquet) {
-                if (! $bouquet->user_id) {
-                    $bouquet->user_id = auth()->id();
-                }
-
-                return $bouquet;
-            });
+            // Everything hangs off `saving`, which fires before `creating` on a new
+            // model: the owner has to be assigned before the ownership check below
+            // runs, so a bouquet created without an explicit user_id (relying on the
+            // auth()->id() fallback) still passes it.
             Bouquet::saving(function (Bouquet $bouquet) {
                 if (! $bouquet->user_id) {
                     $bouquet->user_id = auth()->id();
@@ -922,7 +915,7 @@ class AppServiceProvider extends ServiceProvider
                 $hasPlaylist = $bouquet->playlist_id !== null;
                 $hasCustom = $bouquet->custom_playlist_id !== null;
                 $hasMerged = $bouquet->merged_playlist_id !== null;
-                if (($hasPlaylist ? 1 : 0) + ($hasCustom ? 1 : 0) + ($hasMerged ? 1 : 0) !== 1) {
+                if (count(array_filter([$hasPlaylist, $hasCustom, $hasMerged])) !== 1) {
                     throw new InvalidArgumentException('A bouquet must target exactly one of playlist_id, custom_playlist_id or merged_playlist_id.');
                 }
                 if ($hasCustom) {

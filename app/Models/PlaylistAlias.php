@@ -8,6 +8,7 @@ use App\Pivots\BouquetPlaylistAlias;
 use App\Pivots\MergedPlaylistPivot;
 use App\Traits\ShortUrlTrait;
 use Illuminate\Database\Eloquent\Casts\Attribute;
+use Illuminate\Database\Eloquent\Collection;
 use Illuminate\Database\Eloquent\Factories\HasFactory;
 use Illuminate\Database\Eloquent\Model;
 use Illuminate\Database\Eloquent\Relations\BelongsTo;
@@ -87,6 +88,18 @@ class PlaylistAlias extends Model
     }
 
     /**
+     * The attached bouquets, reusing an eager-loaded relation when there is one and
+     * querying without caching the relation on the model otherwise (the results are
+     * memoised by the callers below either way).
+     *
+     * @return Collection<int, Bouquet>
+     */
+    private function attachedBouquets(): Collection
+    {
+        return $this->relationLoaded('bouquets') ? $this->bouquets : $this->bouquets()->get();
+    }
+
+    /**
      * The merged selections of every attached bouquet, memoised per instance.
      *
      * NEVER surface this through a group_filter attribute accessor/cast: the
@@ -119,9 +132,7 @@ class PlaylistAlias extends Model
             return $this->bouquetSelections = $merged;
         }
 
-        $bouquets = $this->relationLoaded('bouquets') ? $this->bouquets : $this->bouquets()->get();
-
-        foreach ($bouquets as $bouquet) {
+        foreach ($this->attachedBouquets() as $bouquet) {
             foreach ($merged as $key => $existing) {
                 $names = self::selectionNames($bouquet->group_selections[$key] ?? []);
                 if (! empty($names)) {
@@ -152,9 +163,7 @@ class PlaylistAlias extends Model
             return $this->bouquetSelectionPairs = $merged;
         }
 
-        $bouquets = $this->relationLoaded('bouquets') ? $this->bouquets : $this->bouquets()->get();
-
-        foreach ($bouquets as $bouquet) {
+        foreach ($this->attachedBouquets() as $bouquet) {
             foreach ($merged as $key => $existing) {
                 $merged[$key] = array_merge($existing, self::selectionPairs($bouquet->group_selections[$key] ?? []));
             }
@@ -297,10 +306,22 @@ class PlaylistAlias extends Model
             if (! is_numeric($playlistId) || ! is_string($name) || $name === '') {
                 continue;
             }
-            $pairs[((int) $playlistId).':'.$name] = ['playlist_id' => (int) $playlistId, 'name' => $name];
+            $pair = ['playlist_id' => (int) $playlistId, 'name' => $name];
+            $pairs[self::selectionToken($pair)] = $pair;
         }
 
         return array_values($pairs);
+    }
+
+    /**
+     * Stable identity of a {playlist_id, name} pair, so selections can be compared
+     * and diffed without nested loops.
+     *
+     * @param  array{playlist_id: int|string, name: string}  $pair
+     */
+    public static function selectionToken(array $pair): string
+    {
+        return ((int) $pair['playlist_id']).':'.$pair['name'];
     }
 
     /**

@@ -131,15 +131,9 @@ class Bouquet extends Model
                 return;
             }
 
-            $updated = array_values(array_unique(
+            $bouquet->replaceSelections($key, $current, array_values(array_unique(
                 array_map(fn (string $name): string => $renames[$name] ?? $name, $current)
-            ));
-
-            if ($updated !== $current) {
-                $bouquet->update([
-                    'group_selections' => array_merge($bouquet->group_selections ?? [], [$key => $updated]),
-                ]);
-            }
+            )));
         });
 
         self::query()
@@ -152,19 +146,15 @@ class Bouquet extends Model
                     return;
                 }
 
-                $updated = self::dedupePairs(array_map(function (array $pair) use ($playlistId, $renames): array {
-                    if ($pair['playlist_id'] === $playlistId && isset($renames[$pair['name']])) {
-                        return ['playlist_id' => $playlistId, 'name' => $renames[$pair['name']]];
-                    }
+                $bouquet->replaceSelections($key, $current, PlaylistAlias::selectionPairs(
+                    array_map(function (array $pair) use ($playlistId, $renames): array {
+                        if ($pair['playlist_id'] === $playlistId && isset($renames[$pair['name']])) {
+                            return ['playlist_id' => $playlistId, 'name' => $renames[$pair['name']]];
+                        }
 
-                    return $pair;
-                }, $current));
-
-                if ($updated !== $current) {
-                    $bouquet->update([
-                        'group_selections' => array_merge($bouquet->group_selections ?? [], [$key => $updated]),
-                    ]);
-                }
+                        return $pair;
+                    }, $current)
+                ));
             });
     }
 
@@ -187,13 +177,8 @@ class Bouquet extends Model
 
         self::where('playlist_id', $playlistId)->where($flag, true)->cursor()->each(function (self $bouquet) use ($key, $newNames): void {
             $current = $bouquet->group_selections[$key] ?? [];
-            $updated = array_values(array_unique(array_merge($current, $newNames)));
 
-            if ($updated !== $current) {
-                $bouquet->update([
-                    'group_selections' => array_merge($bouquet->group_selections ?? [], [$key => $updated]),
-                ]);
-            }
+            $bouquet->replaceSelections($key, $current, array_values(array_unique(array_merge($current, $newNames))));
         });
 
         $newPairs = array_map(fn (string $name): array => ['playlist_id' => $playlistId, 'name' => $name], $newNames);
@@ -205,35 +190,28 @@ class Bouquet extends Model
             ->cursor()
             ->each(function (self $bouquet) use ($key, $newPairs): void {
                 $current = PlaylistAlias::selectionPairs($bouquet->group_selections[$key] ?? []);
-                $updated = self::dedupePairs(array_merge($current, $newPairs));
 
-                if ($updated !== $current) {
-                    $bouquet->update([
-                        'group_selections' => array_merge($bouquet->group_selections ?? [], [$key => $updated]),
-                    ]);
-                }
+                $bouquet->replaceSelections($key, $current, PlaylistAlias::selectionPairs(array_merge($current, $newPairs)));
             });
     }
 
     /**
-     * Distinct {playlist_id, name} pairs, order preserved.
+     * Persist a rewritten selection list for one key, leaving the other keys and
+     * the record untouched when nothing actually changed. Saves through Eloquent
+     * so the EPG-cache invalidation hook fires for attached aliases.
      *
-     * @param  array<int, array{playlist_id: int, name: string}>  $pairs
-     * @return array<int, array{playlist_id: int, name: string}>
+     * @param  array<int, string|array{playlist_id: int, name: string}>  $current
+     * @param  array<int, string|array{playlist_id: int, name: string}>  $updated
      */
-    private static function dedupePairs(array $pairs): array
+    private function replaceSelections(string $key, array $current, array $updated): void
     {
-        $seen = [];
-        $out = [];
-        foreach ($pairs as $pair) {
-            $token = $pair['playlist_id'].':'.$pair['name'];
-            if (! isset($seen[$token])) {
-                $seen[$token] = true;
-                $out[] = ['playlist_id' => (int) $pair['playlist_id'], 'name' => $pair['name']];
-            }
+        if ($updated === $current) {
+            return;
         }
 
-        return $out;
+        $this->update([
+            'group_selections' => array_merge($this->group_selections ?? [], [$key => $updated]),
+        ]);
     }
 
     /**
@@ -317,12 +295,12 @@ class Bouquet extends Model
                 $query->orWhere(fn ($query) => $query->where('playlist_id', $playlistId)->whereIn('name', $names));
             }
         })->get(['playlist_id', 'name'])
-            ->map(fn ($row) => ((int) $row->playlist_id).':'.$row->name)
+            ->map(fn ($row) => PlaylistAlias::selectionToken(['playlist_id' => $row->playlist_id, 'name' => $row->name]))
             ->all();
 
         $missing = array_values(array_filter(
             $pairs,
-            fn (array $pair) => ! in_array($pair['playlist_id'].':'.$pair['name'], $resolvable, true),
+            fn (array $pair) => ! in_array(PlaylistAlias::selectionToken($pair), $resolvable, true),
         ));
 
         if (! empty($missing)) {
@@ -337,9 +315,9 @@ class Bouquet extends Model
      */
     public function staleSelectionNames(): array
     {
-        $entries = array_merge(...array_values($this->staleSelectionsByKey()) ?: [[]]);
-
-        return PlaylistAlias::selectionNames($entries);
+        return PlaylistAlias::selectionNames(
+            array_merge([], ...array_values($this->staleSelectionsByKey()))
+        );
     }
 
     /**
@@ -359,13 +337,10 @@ class Bouquet extends Model
             $current = $selections[$key] ?? [];
 
             if ($this->merged_playlist_id) {
-                $staleTokens = array_map(
-                    fn (array $pair) => $pair['playlist_id'].':'.$pair['name'],
-                    $staleEntries,
-                );
+                $staleTokens = array_map(PlaylistAlias::selectionToken(...), $staleEntries);
                 $selections[$key] = array_values(array_filter(
                     PlaylistAlias::selectionPairs($current),
-                    fn (array $pair) => ! in_array($pair['playlist_id'].':'.$pair['name'], $staleTokens, true),
+                    fn (array $pair) => ! in_array(PlaylistAlias::selectionToken($pair), $staleTokens, true),
                 ));
             } else {
                 $selections[$key] = array_values(array_diff($current, $staleEntries));
