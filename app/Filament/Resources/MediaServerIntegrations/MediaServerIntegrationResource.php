@@ -25,6 +25,7 @@ use App\Models\Series;
 use App\Services\AIOStreamsService;
 use App\Services\MediaServerService;
 use App\Services\PlexManagementService;
+use App\Services\TmdbService;
 use App\Tables\Columns\ProgressColumn;
 use App\Traits\HasUserFiltering;
 use Carbon\Carbon;
@@ -682,6 +683,18 @@ class MediaServerIntegrationResource extends Resource implements CopilotResource
                             ->visible(fn (callable $get) => ! empty($get('aiostreams_catalogs')) && ! $get('aiostreams_enable_all_catalogs')),
                     ])
                     ->visible(fn (callable $get) => $get('type') === 'aiostreams'),
+
+                // AIOStreams metadata enrichment (only meaningful with a TMDB key)
+                Section::make(__('Metadata'))
+                    ->description(__('Enrich AIOStreams movie and series details with data from TMDB.'))
+                    ->icon('heroicon-o-sparkles')
+                    ->schema([
+                        Toggle::make('aiostreams_tmdb_enrich')
+                            ->label(__('Enrich metadata with TMDB'))
+                            ->helperText(__('When on, the AIOStreams metadata proxy adds a full cast list (with photos), a transparent title logo, and season posters and overviews from TMDB, so playback apps show the same rich detail pages as your other content.'))
+                            ->default(true),
+                    ])
+                    ->visible(fn (callable $get) => $get('type') === 'aiostreams' && app(TmdbService::class)->isConfigured()),
             ],
             'Schedule' => [
                 Section::make(__('Sync Schedule'))

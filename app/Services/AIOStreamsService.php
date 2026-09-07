@@ -9,6 +9,7 @@ use App\Settings\GeneralSettings;
 use App\Traits\DoesNotSupportLibraryCreation;
 use Illuminate\Http\Request;
 use Illuminate\Support\Collection;
+use Illuminate\Support\Facades\Cache;
 use Illuminate\Support\Facades\Http;
 use Illuminate\Support\Facades\Log;
 use Illuminate\Support\Facades\RateLimiter;
@@ -226,6 +227,22 @@ class AIOStreamsService implements MediaServer
      */
     public function fetchMeta(string $type, string $id): ?array
     {
+        $data = $this->fetchMetaRaw($type, $id);
+
+        if ($data === null) {
+            return null;
+        }
+
+        return $this->enrichMetaWithTmdb($data, $type, $id);
+    }
+
+    /**
+     * Fetch the raw Stremio meta object, before any TMDB enrichment.
+     *
+     * @return array{meta: array<string, mixed>}|null
+     */
+    protected function fetchMetaRaw(string $type, string $id): ?array
+    {
         if (! $this->manifestSupportsMetaFor($id)) {
             return $this->fetchMetaFromStremioAddon($type, $id);
         }
@@ -373,6 +390,195 @@ class AIOStreamsService implements MediaServer
         $data = $response->json();
 
         return is_array($data) && ! empty($data['meta']) ? $data : null;
+    }
+
+    /**
+     * Enrich a Stremio meta object with TMDB data - rich `cast_list`
+     * ({id, name, character, photo}), a transparent title `clearlogo`, a
+     * `background` when the meta lacks one, and (for series) a `seasons` array
+     * of poster/overview metadata keyed by season number. This brings the
+     * m3u-tv AIOStreams detail screens to parity with the Xtream VOD/Series
+     * endpoints, which already serve these keys from persisted TMDB data.
+     *
+     * A no-op (returns $data untouched) when the integration has enrichment
+     * disabled or no TMDB API key is configured, so a stream-only install and
+     * the existing meta passthrough tests stay byte-identical. Per-title TMDB
+     * lookups are cached for a week - a tmdb/imdb mapping and a title's cast
+     * barely change, and this keeps the work off the 5-minute meta cache miss.
+     *
+     * @param  array{meta?: array<string, mixed>}  $data
+     * @return array{meta?: array<string, mixed>}
+     */
+    public function enrichMetaWithTmdb(array $data, string $type, string $id): array
+    {
+        if (! ($this->integration->aiostreams_tmdb_enrich ?? true)) {
+            return $data;
+        }
+
+        $meta = $data['meta'] ?? null;
+        if (! is_array($meta)) {
+            return $data;
+        }
+
+        $tmdb = app(TmdbService::class);
+        if (! $tmdb->isConfigured()) {
+            return $data;
+        }
+
+        $ids = self::extractMovieDbIds($id, $meta);
+        $tmdbId = $ids['tmdb'];
+
+        if (! $tmdbId && ! empty($ids['imdb'])) {
+            $mediaTypeHint = $type === 'series' ? 'tv' : 'movie';
+            $found = Cache::remember(
+                "aiostreams.tmdb.imdbmap.{$mediaTypeHint}.{$ids['imdb']}",
+                now()->addWeek(),
+                fn () => $tmdb->findByExternalId($ids['imdb'], 'imdb_id', $mediaTypeHint)
+            );
+            $tmdbId = is_array($found) ? ($found['tmdb_id'] ?? null) : null;
+        }
+
+        if (! $tmdbId) {
+            return $data;
+        }
+
+        $tmdbId = (int) $tmdbId;
+        $isSeries = $type === 'series';
+
+        $details = Cache::remember(
+            "aiostreams.tmdb.details.{$type}.{$tmdbId}",
+            now()->addWeek(),
+            fn () => $isSeries ? $tmdb->getTvSeriesDetails($tmdbId) : $tmdb->getMovieDetails($tmdbId)
+        );
+
+        if (! is_array($details)) {
+            return $data;
+        }
+
+        if (! empty($details['cast_list']) && empty($meta['cast_list'])) {
+            $meta['cast_list'] = $details['cast_list'];
+        }
+
+        if (! empty($details['logo_url']) && empty($meta['clearlogo'])) {
+            $meta['clearlogo'] = $details['logo_url'];
+        }
+
+        if (! empty($details['backdrop_url']) && empty($meta['background'])) {
+            $meta['background'] = $details['backdrop_url'];
+        }
+
+        if ($isSeries) {
+            $seasons = Cache::remember(
+                "aiostreams.tmdb.seasons.{$tmdbId}",
+                now()->addWeek(),
+                fn () => $tmdb->getAllSeasons($tmdbId)
+            );
+
+            $shaped = $this->shapeTmdbSeasons(is_array($seasons) ? $seasons : []);
+            if (! empty($shaped)) {
+                $meta['seasons'] = $shaped;
+            }
+        }
+
+        $data['meta'] = $meta;
+
+        return $data;
+    }
+
+    /**
+     * Reshape TMDB `getAllSeasons()` rows into the key shape the m3u-tv client's
+     * `Season.fromXtream` reader expects (matching the Xtream get_series_info
+     * season rows), so the AIOStreams series screen can reuse the same model.
+     *
+     * @param  array<int, mixed>  $seasons
+     * @return array<int, array<string, mixed>>
+     */
+    protected function shapeTmdbSeasons(array $seasons): array
+    {
+        $out = [];
+
+        foreach ($seasons as $season) {
+            if (! is_array($season) || ! isset($season['season_number'])) {
+                continue;
+            }
+
+            $poster = ! empty($season['poster_path'])
+                ? 'https://image.tmdb.org/t/p/w500'.$season['poster_path']
+                : null;
+
+            $out[] = array_filter([
+                'season_number' => (int) $season['season_number'],
+                'name' => $season['name'] ?? null,
+                'episode_count' => isset($season['episode_count']) ? (int) $season['episode_count'] : null,
+                'overview' => $season['overview'] ?? null,
+                'air_date' => $season['air_date'] ?? null,
+                'cover_big' => $poster,
+            ], fn ($value) => $value !== null && $value !== '');
+        }
+
+        return $out;
+    }
+
+    /**
+     * Extract IMDb / TMDB ids for a Stremio item from its id and the meta
+     * object's own cross-reference fields. Cinemeta-backed catalogs use a bare
+     * IMDb id ("tt1234567") as the item id, TMDB-backed catalogs use
+     * "tmdb:12345"; neither is guaranteed, so this also reads `imdb_id`,
+     * `moviedb_id`/`tmdb_id`, and a categorized `links` entry
+     * ("imdb"/"tmdb"/"moviedb"). Shared by AioStreamsBrowse (persisting ids onto
+     * Channel/Series) and enrichMetaWithTmdb().
+     *
+     * @param  array<string, mixed>  $meta
+     * @return array{imdb: ?string, tmdb: ?int}
+     */
+    public static function extractMovieDbIds(string $itemId, array $meta): array
+    {
+        $imdbId = null;
+        $tmdbId = null;
+
+        if (preg_match('/^(tt\d+)/', $itemId, $matches)) {
+            $imdbId = $matches[1];
+        } elseif (preg_match('/^tmdb:(\d+)/', $itemId, $matches)) {
+            $tmdbId = (int) $matches[1];
+        }
+
+        $imdbId ??= is_string($meta['imdb_id'] ?? null) ? $meta['imdb_id'] : null;
+        $tmdbId ??= is_numeric($meta['moviedb_id'] ?? $meta['tmdb_id'] ?? null)
+            ? (int) ($meta['moviedb_id'] ?? $meta['tmdb_id'])
+            : null;
+
+        if ((! $imdbId || ! $tmdbId) && ! empty($meta['links']) && is_array($meta['links'])) {
+            foreach ($meta['links'] as $link) {
+                if (! is_array($link)) {
+                    continue;
+                }
+
+                $category = strtolower((string) ($link['category'] ?? ''));
+
+                if (! $imdbId && $category === 'imdb') {
+                    $name = $link['name'] ?? null;
+                    if (is_string($name) && preg_match('/^tt\d+$/', $name)) {
+                        $imdbId = $name;
+                    } elseif (is_string($link['url'] ?? null) && preg_match('/(tt\d+)/', $link['url'], $matches)) {
+                        $imdbId = $matches[1];
+                    }
+                }
+
+                if (! $tmdbId && in_array($category, ['tmdb', 'moviedb'], true)) {
+                    $name = $link['name'] ?? null;
+                    if (is_numeric($name)) {
+                        $tmdbId = (int) $name;
+                    } elseif (is_string($link['url'] ?? null) && preg_match('/(\d+)/', $link['url'], $matches)) {
+                        $tmdbId = (int) $matches[1];
+                    }
+                }
+            }
+        }
+
+        return [
+            'imdb' => $imdbId,
+            'tmdb' => $tmdbId,
+        ];
     }
 
     // -------------------------------------------------------------------------
