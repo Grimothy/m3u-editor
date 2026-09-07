@@ -1,6 +1,6 @@
 <?php
 
-use App\Filament\Pages\Preferences;
+use App\Filament\Clusters\Settings\Pages\ManageProxySettings;
 use App\Models\User;
 use Filament\Forms\Components\TextInput;
 use Illuminate\Support\Facades\App;
@@ -14,7 +14,7 @@ it('resolves preference hint icon tooltips through the translation layer', funct
     $assertTooltip = function (string $locale, string $expected): void {
         App::setLocale($locale);
 
-        Livewire::test(Preferences::class)
+        Livewire::test(ManageProxySettings::class)
             ->assertFormFieldExists('max_concurrent_floating_players', function (TextInput $field) use ($expected): bool {
                 Assert::assertSame(
                     $expected,

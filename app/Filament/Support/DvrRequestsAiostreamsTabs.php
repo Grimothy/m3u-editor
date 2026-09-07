@@ -3,6 +3,7 @@
 namespace App\Filament\Support;
 
 use App\Enums\DvrSeriesMode;
+use App\Filament\Clusters\Settings\Pages\ManageIntegrationSettings;
 use App\Models\MediaServerIntegration;
 use App\Settings\GeneralSettings;
 use Filament\Forms\Components\Select;
@@ -120,11 +121,11 @@ class DvrRequestsAiostreamsTabs
                                             );
                                         }
 
-                                        $url = route('filament.admin.pages.preferences').'#tmdb';
+                                        $url = ManageIntegrationSettings::getUrl(['tab' => 'tmdb']);
 
                                         return new HtmlString(
                                             '<span class="text-sm text-warning-600 dark:text-warning-400">No TMDB API key found. '
-                                            .'<a href="'.e($url).'" class="underline font-medium">Configure it in Settings → TMDB</a> '
+                                            .'<a href="'.e($url).'" class="underline font-medium">Configure it in Settings &rarr; TMDB</a> '
                                             .'to enable TMDB metadata lookups. TVMaze will be used as a fallback.</span>'
                                         );
                                     })

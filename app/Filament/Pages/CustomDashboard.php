@@ -2,6 +2,7 @@
 
 namespace App\Filament\Pages;
 
+use App\Filament\Clusters\Settings\Pages\ManageGeneralSettings;
 use App\Filament\Resources\Epgs\EpgResource;
 use App\Filament\Resources\Playlists\PlaylistResource;
 use Filament\Actions\Action;
@@ -80,7 +81,7 @@ class CustomDashboard extends Dashboard
             $additionalActions[] = Action::make('settings')
                 ->label(__('Settings'))
                 ->icon('heroicon-m-cog-6-tooth')
-                ->url(Preferences::getUrl())
+                ->url(ManageGeneralSettings::getUrl())
                 ->color('gray');
         }
 

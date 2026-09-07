@@ -151,7 +151,7 @@
     <div class="fi-fo-field-wrp-helper-text mt-1 w-full text-center text-sm break-words text-gray-500">
         To disable, clear the MediaFlow Proxy values from the app
         <a
-            href="{{ url('preferences?tab=integrations%3A%3Adata%3A%3Atab') }}"
+            href="{{ \App\Filament\Clusters\Settings\Pages\ManageIntegrationSettings::getUrl(['tab' => 'mediaflow']) }}"
             class="text-indigo-500 hover:text-indigo-600 hover:underline dark:hover:text-indigo-400"
         >Settings</a>
         page.

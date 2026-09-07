@@ -65,17 +65,17 @@ it('returns 404 when enhanced output is disabled, even if device pairing is enab
     $this->postJson('/api/device/code')->assertNotFound();
 });
 
-it('the /pdt vanity URL redirects to the pairing tab and forwards the code', function () {
+it('the /pdt vanity URL redirects to the pairing page and forwards the code', function () {
     $this->get('/pdt?code=XKQP-9F3T')
         ->assertRedirect()
-        ->assertRedirectContains('tab=pairing')
+        ->assertRedirectContains('devices/pairing')
         ->assertRedirectContains('code=XKQP-9F3T');
 });
 
 it('the /pdt vanity URL redirects without a code param when none is given', function () {
     $this->get('/pdt')
         ->assertRedirect()
-        ->assertRedirectContains('tab=pairing');
+        ->assertRedirectContains('devices/pairing');
 
     expect($this->get('/pdt')->headers->get('Location'))->not->toContain('code=');
 });
