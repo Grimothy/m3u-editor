@@ -222,3 +222,41 @@ it('generates a short aiostreams live media url regardless of resolved url lengt
 
     $this->assertLessThan(300, strlen($url));
 });
+
+// ── m3u-tv appends `&proxy=true` to these signed URLs; ValidateSignature must
+// ignore that param instead of 403-ing the request (PR #1491).
+
+it('still validates the aiostreams channel signature when proxy=true is appended', function () {
+    $integration = MediaServerIntegration::factory()->create(['type' => 'aiostreams']);
+    $channel = makeAioStreamsChannel($integration, resolvedUrl: null);
+
+    $url = MediaServerProxyController::generateAioStreamsChannelProxyUrl($integration->id, $channel->id).'&proxy=true';
+
+    $response = $this->get($url);
+
+    // Signature passes (not 403); controller then 404s on the missing resolved URL.
+    $response->assertStatus(404);
+});
+
+it('still validates the aiostreams episode signature when proxy=true is appended', function () {
+    $integration = MediaServerIntegration::factory()->create(['type' => 'aiostreams']);
+    $episode = makeAioStreamsEpisode($integration, resolvedUrl: null);
+
+    $url = MediaServerProxyController::generateAioStreamsEpisodeProxyUrl($integration->id, $episode->id).'&proxy=true';
+
+    $response = $this->get($url);
+
+    $response->assertStatus(404);
+});
+
+it('still validates the aiostreams live signature when proxy=true is appended', function () {
+    $integration = MediaServerIntegration::factory()->create(['type' => 'aiostreams']);
+
+    $url = MediaServerProxyController::generateAioStreamsLiveProxyUrl($integration->id, 'https://cdn.test/movie.mkv').'&proxy=true';
+
+    $response = $this->get($url);
+
+    // Signature must pass (not a 403 from the ValidateSignature middleware);
+    // the streamed body / upstream curl is never exercised by assertStatus.
+    $this->assertNotEquals(403, $response->getStatusCode());
+});

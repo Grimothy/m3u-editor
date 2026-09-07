@@ -1030,7 +1030,21 @@ class MediaServerProxyController extends Controller
             'has_range' => $request->hasHeader('Range'),
         ]);
 
-        return new StreamedResponse(function () use ($resolvedUrl, $requestHeaders) {
+        // Set sensible default headers BEFORE the curl stream starts.
+        // ExoPlayer/Media3 probes with a HEAD request before playing; if no
+        // headers are set yet (they're lazily applied on first body chunk in
+        // the WRITEFUNCTION), the response defaults to text/html and the
+        // player rejects the source.  These defaults are overridden by the
+        // real upstream headers once the first body byte arrives.
+        //
+        // ExoPlayer/Media3 refuses to probe a huge response served as generic
+        // application/octet-stream, so we set a concrete video MIME type based
+        // on the resolved URL's file extension (e.g. .mkv -> video/x-matroska).
+        // This mirrors what the upstream debrid host serves for the same file,
+        // which is what lets other players (Nuvio/Stremio) play it directly.
+        $contentType = self::mimeForUrl($resolvedUrl);
+
+        $response = new StreamedResponse(function () use ($resolvedUrl, $requestHeaders, $contentType) {
             $ch = curl_init($resolvedUrl);
             curl_setopt($ch, CURLOPT_HTTPHEADER, array_map(
                 fn ($k, $v) => "{$k}: {$v}",
@@ -1069,7 +1083,7 @@ class MediaServerProxyController extends Controller
 
             $responseStarted = false;
 
-            curl_setopt($ch, CURLOPT_WRITEFUNCTION, function ($ch, $data) use (&$responseStarted, &$finalHeaders) {
+            curl_setopt($ch, CURLOPT_WRITEFUNCTION, function ($ch, $data) use (&$responseStarted, &$finalHeaders, $contentType) {
                 // See other proxy methods in this class: a seek abandons this
                 // connection without closing it, and ignore_user_abort(true) means
                 // PHP won't notice unless we check here.
@@ -1083,7 +1097,12 @@ class MediaServerProxyController extends Controller
                     $status = $finalHeaders['status'] ?? 200;
                     http_response_code(in_array($status, [200, 206], true) ? $status : 200);
 
-                    header('Content-Type: '.($finalHeaders['content-type'] ?? 'application/octet-stream'));
+                    // Prefer the concrete MIME type derived from the URL extension
+                    // over a generic upstream type (application/octet-stream,
+                    // binary/octet-stream, an empty header, ...), which
+                    // ExoPlayer/Media3 refuses to probe for large files.
+                    $upstreamContentType = $finalHeaders['content-type'] ?? '';
+                    header('Content-Type: '.self::resolveStreamContentType($upstreamContentType, $contentType));
                     header('Accept-Ranges: bytes');
                     header('X-Proxied-From: AIOStreams');
 
@@ -1121,5 +1140,73 @@ class MediaServerProxyController extends Controller
                 echo json_encode(['error' => 'Failed to reach the resolved upstream URL']);
             }
         });
+
+        // Set headers on the StreamedResponse object (Symfony sends these,
+        // not raw header() calls which are overridden).
+        $response->headers->set('Content-Type', $contentType);
+        $response->headers->set('Accept-Ranges', 'bytes');
+        $response->headers->set('X-Proxied-From', 'AIOStreams');
+
+        // When the client sends a Range request on a GET, mark the envelope 206
+        // up front; the WRITEFUNCTION callback still corrects it to the real
+        // upstream status (200 if the host ignored the Range) before the first
+        // body byte, and adds Content-Range / Content-Length there.
+        //
+        // A HEAD request never runs that callback (Symfony nulls the body for
+        // HEAD, so sendContent() returns early), which means Content-Range and
+        // Content-Length would be absent - a 206 without them is malformed and
+        // strict players reject it. Leave HEAD as a 200 probe response.
+        if ($request->hasHeader('Range') && ! $request->isMethod('HEAD')) {
+            $response->setStatusCode(206);
+        }
+
+        return $response;
+    }
+
+    /**
+     * Pick the Content-Type to serve for a proxied stream.
+     *
+     * A concrete video/* type from the upstream host is the most accurate and
+     * always wins. Otherwise the upstream type is generic
+     * (application/octet-stream, binary/octet-stream, an empty header, or an
+     * error page's text/html) and ExoPlayer/Media3 refuses to probe it, so fall
+     * back to the type derived from the URL's file extension when one resolved.
+     */
+    private static function resolveStreamContentType(string $upstreamContentType, string $urlContentType): string
+    {
+        $normalized = strtolower(trim(Str::before($upstreamContentType, ';')));
+
+        if (str_starts_with($normalized, 'video/')) {
+            return $upstreamContentType;
+        }
+
+        if ($urlContentType !== 'application/octet-stream') {
+            return $urlContentType;
+        }
+
+        return $upstreamContentType !== '' ? $upstreamContentType : 'application/octet-stream';
+    }
+
+    /**
+     * Resolve a concrete video MIME type from a media URL's file extension.
+     * Returns application/octet-stream when the extension is unknown.
+     */
+    private static function mimeForUrl(string $url): string
+    {
+        $extension = strtolower(pathinfo(parse_url($url, PHP_URL_PATH) ?? '', PATHINFO_EXTENSION));
+
+        return match ($extension) {
+            'mkv' => 'video/x-matroska',
+            'webm' => 'video/webm',
+            'mp4', 'm4v' => 'video/mp4',
+            'mov' => 'video/quicktime',
+            'avi' => 'video/x-msvideo',
+            'mpg', 'mpeg' => 'video/mpeg',
+            'ts', 'm2ts', 'mts' => 'video/mp2t',
+            'flv' => 'video/x-flv',
+            'wmv' => 'video/x-ms-wmv',
+            '3gp' => 'video/3gpp',
+            default => 'application/octet-stream',
+        };
     }
 }

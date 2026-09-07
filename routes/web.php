@@ -440,17 +440,17 @@ Route::get('/webdav-media/{integration}/stream/{item}', [
 Route::get('/aiostreams-media/{integration}/channel/{channel}/stream', [
     MediaServerProxyController::class,
     'streamAioStreamsChannel',
-])->middleware(ValidateSignature::relative())->name('aiostreams-media.channel.stream');
+])->middleware(ValidateSignature::relative('proxy'))->name('aiostreams-media.channel.stream');
 
 Route::get('/aiostreams-media/{integration}/episode/{episode}/stream', [
     MediaServerProxyController::class,
     'streamAioStreamsEpisode',
-])->middleware(ValidateSignature::relative())->name('aiostreams-media.episode.stream');
+])->middleware(ValidateSignature::relative('proxy'))->name('aiostreams-media.episode.stream');
 
 Route::get('/aiostreams-media/{integration}/live/{item}/stream', [
     MediaServerProxyController::class,
     'streamAioStreamsLive',
-])->middleware(ValidateSignature::relative())->name('aiostreams-media.live.stream');
+])->middleware(ValidateSignature::relative('proxy'))->name('aiostreams-media.live.stream');
 
 /*
  * DVR routes — file streaming and proxy callbacks

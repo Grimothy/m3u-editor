@@ -73,8 +73,34 @@ class AIOStreamsProxyController extends Controller
             return response()->json(['error' => 'Unauthorized'], 401);
         }
 
+        // Debrid addons only resolve IMDb IDs to streams, not TMDB IDs.
+        // When the catalog returns a TMDB ID (e.g. "tmdb:603"), resolve it to
+        // an IMDb ID via the meta lookup before requesting streams.
+        $resolvedId = $id;
+        if (str_starts_with($id, 'tmdb:')) {
+            // Stremio series episode ids carry ":season:episode" after the tmdb
+            // id (e.g. "tmdb:1399:1:1"); the meta lookup needs the bare
+            // "tmdb:1399", and the coordinates must be re-attached to the
+            // resolved IMDb id so the stream request targets the right episode.
+            [$tmdbId, $episodeSuffix] = $this->splitStremioId($id);
+
+            // A tmdb -> imdb mapping never changes, so cache it to keep this
+            // extra upstream call off the hot path (the stream route runs under
+            // nginx's default 60s fastcgi_read_timeout). Reuses the same meta
+            // resolution (with public Stremio-addon fallback) as meta().
+            $imdbId = Cache::remember(
+                "aiostreams.imdb.{$integrationId}.{$type}.{$tmdbId}",
+                now()->addWeek(),
+                fn () => AIOStreamsService::make($integration)->fetchMeta($type, $tmdbId)['meta']['imdb_id'] ?? null
+            );
+
+            if (! empty($imdbId)) {
+                $resolvedId = $imdbId.$episodeSuffix;
+            }
+        }
+
         // Streams are not cached — always fetch fresh to get current availability
-        $response = Http::timeout(30)->get("{$integration->manifest_base_url}/stream/{$type}/{$id}.json");
+        $response = Http::timeout(30)->get("{$integration->manifest_base_url}/stream/{$type}/{$resolvedId}.json");
 
         if (! $response->successful()) {
             return response()->json(['error' => 'Failed to fetch streams from AIOStreams'], 502);
@@ -136,6 +162,24 @@ class AIOStreamsProxyController extends Controller
         }
 
         return response()->json($data);
+    }
+
+    /**
+     * Split a Stremio content id into its base id and any trailing
+     * ":season:episode" coordinates.
+     *
+     *   "tmdb:1399:1:1" => ["tmdb:1399", ":1:1"]
+     *   "tmdb:603"      => ["tmdb:603", ""]
+     *
+     * @return array{0: string, 1: string}
+     */
+    private function splitStremioId(string $id): array
+    {
+        $parts = explode(':', $id);
+        $baseId = implode(':', array_slice($parts, 0, 2));
+        $suffix = count($parts) > 2 ? ':'.implode(':', array_slice($parts, 2)) : '';
+
+        return [$baseId, $suffix];
     }
 
     /**
