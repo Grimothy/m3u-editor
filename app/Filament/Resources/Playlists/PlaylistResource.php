@@ -2091,7 +2091,7 @@ class PlaylistResource extends Resource implements CopilotResource
                                         ? __('Requires \'Enable Stream Proxy\' on this playlist.')
                                         : __('Cache matching content so multiple playlists/Dynamic Groups don\'t each hit the provider.');
                                 }),
-                            Group::make()
+                            ComponentsGroup::make()
                                 ->columns(12)
                                 ->hidden(fn (Get $get): bool => ! $get('cache_enabled'))
                                 ->schema([
