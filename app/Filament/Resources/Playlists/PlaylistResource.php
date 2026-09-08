@@ -2092,6 +2092,7 @@ class PlaylistResource extends Resource implements CopilotResource
                                         : __('Cache matching content so multiple playlists/Dynamic Groups don\'t each hit the provider.');
                                 }),
                             ComponentsGroup::make()
+                                ->columnSpanFull()
                                 ->columns(12)
                                 ->hidden(fn (Get $get): bool => ! $get('cache_enabled'))
                                 ->schema([
