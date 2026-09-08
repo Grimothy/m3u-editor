@@ -3563,11 +3563,19 @@ class M3uProxyService
             $durationSeconds += (int) $setting->resolveEndLateSeconds(null);
         }
 
+        // When transcoding is enabled the proxy runs FFmpeg for the DVR broadcast
+        // (deinterlace + MPEG-2 -> H.264/AAC) so segments land browser-playable and
+        // the editor's concat step still only stream-copies. Otherwise the proxy
+        // records the source as-is (-c copy).
+        $transcode = (bool) $setting->transcode_recordings;
+
         $payload = [
             'stream_url' => $streamUrl,
             'duration_seconds' => $durationSeconds,
             'dvr_mode' => true,
             'hls_list_size' => 0,
+            'transcode' => $transcode,
+            'deinterlace' => $transcode,
             'output_dir' => config('proxy.broadcast_temp_dir'),
             'callback_url' => $this->getDvrCallbackUrl(),
             'metadata' => [
