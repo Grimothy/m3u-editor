@@ -2,8 +2,11 @@
 
 namespace App\Filament\Resources\Categories\Widgets;
 
+use App\Enums\CachedContentFileStatus;
 use App\Filament\Resources\DynamicGroups\DynamicGroupResource;
+use App\Models\CachedContentFile;
 use App\Models\DynamicGroup;
+use App\Services\DynamicGroupCacheDispatchService;
 use App\Services\TmdbService;
 use Filament\Actions\Action;
 use Filament\Actions\DeleteAction;
@@ -161,6 +164,61 @@ class DynamicGroupsWidget extends BaseWidget
                 TextColumn::make('series_count')
                     ->label(__('Items'))
                     ->numeric(),
+                TextColumn::make('cache_status')
+                    ->label(__('Cached'))
+                    // Series-type mirror of the VOD widget's "Cached / Total" column.
+                    // Key difference vs. the VOD widget: the denominator is the
+                    // group's EPISODE count (`$series->episodes->count()`), NOT
+                    // the series count — one cached series contributes its full
+                    // episode count, matching how the Phase 2 dispatcher iterates
+                    // (each episode produces its own download job with its own
+                    // fingerprint).
+                    //
+                    // Lazy-loading `$record->series` and `$series->episodes` is an
+                    // N+1 cost per row; acceptable at the scale this widget runs
+                    // at (handful of groups per playlist tab) and flagged for
+                    // future optimization in the plan's "Known scaling caveat"
+                    // note. See the VOD widget's column docblock for the full
+                    // rationale on why we don't use a pivot count.
+                    ->state(function (DynamicGroup $record): string {
+                        $dispatch = app(DynamicGroupCacheDispatchService::class);
+                        $rule = $dispatch->resolveRuleForGroup($record);
+                        if ($rule === null || ! ($rule['cache_enabled'] ?? false)) {
+                            return '—';
+                        }
+
+                        $series = $record->series;
+                        $total = $series->flatMap(fn ($s) => $s->episodes)->count();
+                        if ($total === 0) {
+                            return '0/0';
+                        }
+
+                        $quality = $dispatch->resolveQuality($rule);
+                        $fingerprints = [];
+                        foreach ($series as $s) {
+                            $seriesTmdbId = $s->tmdb_id !== null ? (string) $s->tmdb_id : null;
+                            foreach ($s->episodes as $episode) {
+                                $fingerprints[] = CachedContentFile::fingerprintFor([
+                                    'content_type' => 'episode',
+                                    'tmdb_id' => $seriesTmdbId,
+                                    'season_number' => $episode->season,
+                                    'episode_number' => $episode->episode_number,
+                                    'quality' => $quality,
+                                ]);
+                            }
+                        }
+
+                        if (empty($fingerprints)) {
+                            return '0/0';
+                        }
+
+                        $cached = CachedContentFile::query()
+                            ->whereIn('content_fingerprint', $fingerprints)
+                            ->where('status', CachedContentFileStatus::Completed)
+                            ->count();
+
+                        return "{$cached}/{$total}";
+                    }),
                 TextColumn::make('last_synced_at')
                     ->since()
                     ->placeholder(__('Never'))

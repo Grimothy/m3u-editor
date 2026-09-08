@@ -366,3 +366,64 @@ it('shouldSkip returns false for Pending and Downloading rows', function () {
 
     expect($this->service->shouldSkip($fingerprint))->toBeFalse();
 });
+
+it('resolveRuleForGroup is publicly callable (Phase 4 visibility widening)', function () {
+    // The Phase 4 "Cached / Total" column on both DynamicGroupsWidget files
+    // and the "Select Content" picker both call this from outside the service.
+    // A pure visibility change (`private` -> `public`) should not affect
+    // behavior — assert it still resolves the same way.
+    $group = DynamicGroup::create([
+        'playlist_id' => $this->playlist->id,
+        'user_id' => $this->user->id,
+        'type' => 'vod',
+        'source' => 'trending',
+        'name' => 'Top Movies',
+    ]);
+
+    $this->playlist->update([
+        'dynamic_groups_config' => [
+            ['name' => 'Top Movies', 'cache_enabled' => true, 'cache_prefer_quality_keyword' => '4K'],
+        ],
+    ]);
+
+    expect($this->service->resolveRuleForGroup($group->fresh()))->not->toBeNull()
+        ->and($this->service->resolveRuleForGroup($group->fresh())['cache_enabled'])->toBeTrue()
+        ->and($this->service->resolveRuleForGroup($group->fresh())['cache_prefer_quality_keyword'])->toBe('4K');
+});
+
+it('resolveGroupForRule returns the matching DynamicGroup for a playlist + rule name', function () {
+    // Reverse of resolveRuleForGroup(): given a playlist_id and a rule with
+    // a `name`, find the materialized DynamicGroup row. Used by the Phase 4
+    // picker UI which lives inside a Repeater item (no direct handle to the
+    // DynamicGroup, just the rule's name).
+    $group = DynamicGroup::create([
+        'playlist_id' => $this->playlist->id,
+        'user_id' => $this->user->id,
+        'type' => 'vod',
+        'source' => 'trending',
+        'name' => 'Top Movies',
+    ]);
+
+    expect(
+        $this->service->resolveGroupForRule($this->playlist->id, ['name' => 'Top Movies']),
+    )->not->toBeNull()
+        ->and($this->service->resolveGroupForRule($this->playlist->id, ['name' => 'Top Movies'])->id)
+        ->toBe($group->id);
+});
+
+it('resolveGroupForRule returns null when no DynamicGroup exists for that name', function () {
+    // The rule may be brand-new (no SyncDynamicGroups run yet) — the picker
+    // must handle null gracefully, so the lookup itself must return null
+    // rather than throwing.
+    expect(
+        $this->service->resolveGroupForRule($this->playlist->id, ['name' => 'Never Synced']),
+    )->toBeNull();
+});
+
+it('resolveGroupForRule returns null when the rule has no name', function () {
+    // Defensive: malformed rule (missing `name`) must not crash.
+    expect(
+        $this->service->resolveGroupForRule($this->playlist->id, []),
+    )->toBeNull()
+        ->and($this->service->resolveGroupForRule($this->playlist->id, ['name' => '']))->toBeNull();
+});

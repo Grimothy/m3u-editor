@@ -1,7 +1,9 @@
 <?php
 
 use App\Filament\Resources\Playlists\Pages\EditPlaylist;
+use App\Models\Channel;
 use App\Models\Playlist;
+use App\Models\Series;
 use App\Models\User;
 use App\Services\TmdbService;
 use Illuminate\Foundation\Testing\RefreshDatabase;
@@ -140,4 +142,89 @@ it('does not persist cache_* keys when the rule omits them (backwards compat)', 
 
     expect($persisted)->not->toHaveKey('cache_enabled')
         ->and($persisted)->not->toHaveKey('cache_content_selection');
+});
+
+// --- Phase 4: Select Content picker round-trip --------------------------
+
+it('persists cache_selected_content_ids (picker-selected channel IDs) on round-trip', function () {
+    // The ModalTableSelect on the Playlist form's `dynamic_groups_config`
+    // Repeater stores an array of Channel/Series IDs in this key. Verify
+    // the array survives a save → fresh() → read without re-ordering or
+    // type-coercion surprises.
+    $channel1 = Channel::factory()->create([
+        'playlist_id' => $this->playlist->id,
+        'tmdb_id' => '550',
+        'is_vod' => true,
+    ]);
+    $channel2 = Channel::factory()->create([
+        'playlist_id' => $this->playlist->id,
+        'tmdb_id' => '551',
+        'is_vod' => true,
+    ]);
+
+    $rule = [
+        'enabled' => true,
+        'type' => 'vod',
+        'source' => 'now_playing',
+        'name' => 'Picked Titles',
+        'tmdb_params' => ['pages' => 1],
+        'cache_enabled' => true,
+        'cache_content_selection' => 'select',
+        'cache_selected_content_ids' => [$channel1->id, $channel2->id],
+    ];
+
+    $this->playlist->update(['dynamic_groups_config' => [$rule]]);
+    $persisted = $this->playlist->fresh()->dynamic_groups_config[0];
+
+    expect($persisted['cache_enabled'])->toBeTrue()
+        ->and($persisted['cache_content_selection'])->toBe('select')
+        ->and($persisted['cache_selected_content_ids'])->toEqual([$channel1->id, $channel2->id]);
+});
+
+it('persists cache_selected_content_ids as an empty array when the picker has no selection', function () {
+    // Phase 4 semantics: an empty selection array is the "user hasn't picked
+    // anything yet" signal — the dispatcher treats it as skip (not silently
+    // cache-all). Verify the empty-array case still round-trips cleanly so
+    // the picker's `Clear all` action doesn't lose state on save.
+    $rule = [
+        'enabled' => true,
+        'type' => 'vod',
+        'source' => 'now_playing',
+        'name' => 'Empty Picker',
+        'tmdb_params' => ['pages' => 1],
+        'cache_enabled' => true,
+        'cache_content_selection' => 'select',
+        'cache_selected_content_ids' => [],
+    ];
+
+    $this->playlist->update(['dynamic_groups_config' => [$rule]]);
+    $persisted = $this->playlist->fresh()->dynamic_groups_config[0];
+
+    expect($persisted['cache_selected_content_ids'])->toEqual([]);
+});
+
+it('persists cache_selected_content_ids for series-type rules (Series IDs, not Channels)', function () {
+    // The picker switches its backing table to the Series variant when the
+    // rule's `type === 'series'` — verify a series-typed rule stores Series
+    // IDs (not Channel IDs) correctly.
+    $series = Series::factory()->create([
+        'playlist_id' => $this->playlist->id,
+    ]);
+
+    $rule = [
+        'enabled' => true,
+        'type' => 'series',
+        'source' => 'trending',
+        'name' => 'Picked Series',
+        'tmdb_params' => ['pages' => 1],
+        'cache_enabled' => true,
+        'cache_content_selection' => 'select',
+        'cache_selected_content_ids' => [$series->id],
+    ];
+
+    $this->playlist->update(['dynamic_groups_config' => [$rule]]);
+    $persisted = $this->playlist->fresh()->dynamic_groups_config[0];
+
+    expect($persisted['type'])->toBe('series')
+        ->and($persisted['cache_selected_content_ids'])->toEqual([$series->id]);
 });

@@ -17,7 +17,8 @@ use Illuminate\Support\Facades\Log;
  *  - Playlists without any cache_enabled rule
  *  - Content already completed in CachedContentFile (dedup)
  *  - Content with a Failed row in cooldown
- *  - cache_content_selection='select' (no picker UI yet, deferred to Phase 4)
+ *  - cache_content_selection='select' with no IDs picked yet (treated as
+ *    "user hasn't picked anything" — better to skip than silently cache all)
  *
  * Run on a tight Laravel schedule (every 2 min via routes/console.php); the
  * command itself checks the user-configurable cron string via CronExpression::isDue().
@@ -26,8 +27,9 @@ use Illuminate\Support\Facades\Log;
  * DynamicGroupCacheDispatchService so the playback-time lazy trigger
  * (Phase 3 — `XtreamStreamController`) shares the same implementation.
  * This command retains only the scheduled-dispatch-specific orchestration:
- * the cron gate, the cursor-over-playlists loop, and the recency-window
- * filter (`cache_content_selection === 'recent'`).
+ * the cron gate, the cursor-over-playlists loop, the recency-window
+ * filter (`cache_content_selection === 'recent'`), and the
+ * `cache_selected_content_ids` membership filter (Phase 4).
  */
 class CacheDynamicGroupContent extends Command
 {
@@ -83,7 +85,21 @@ class CacheDynamicGroupContent extends Command
 
                     $selection = $rule['cache_content_selection'] ?? 'all';
                     if ($selection === 'select') {
-                        Log::debug("CacheDynamicGroupContent: rule '{$rule['name']}' uses cache_content_selection='select' which is no-op until Phase 4 — skipping");
+                        // Phase 4: when 'select' is chosen, we DO iterate — but only the
+                        // membership subset the user picked in the picker
+                        // (`cache_selected_content_ids`). An empty array means "the user
+                        // hasn't picked anything yet" → skip the rule entirely rather
+                        // than silently downloading everything (which would defeat the
+                        // whole point of switching to 'select').
+                        $selectedIds = $rule['cache_selected_content_ids'] ?? [];
+                        if (! is_array($selectedIds) || empty($selectedIds)) {
+                            $skipped++;
+
+                            continue;
+                        }
+
+                        $this->dispatchForRule($playlist, $rule, $selectedIds);
+                        $count++;
 
                         continue;
                     }
@@ -106,8 +122,17 @@ class CacheDynamicGroupContent extends Command
      * scheduled-dispatch-specific — the playback-time lazy trigger does
      * not apply it (the user is explicitly watching the content, so
      * "within X days" doesn't apply).
+     *
+     * The `selectedIds` filter (`cache_content_selection === 'select'`)
+     * restricts iteration to the membership subset the user picked in
+     * the Phase 4 picker UI. `null` means "all members" (the legacy
+     * `all` / `recent` paths); a non-null array means "only these IDs,
+     * normalized to int". Empty arrays are filtered out at the call site
+     * before this method is invoked.
+     *
+     * @param  array<int, int>|null  $selectedIds
      */
-    private function dispatchForRule(Playlist $playlist, array $rule): void
+    private function dispatchForRule(Playlist $playlist, array $rule, ?array $selectedIds = null): void
     {
         $groups = DynamicGroup::query()
             ->where('playlist_id', $playlist->id)
@@ -121,9 +146,18 @@ class CacheDynamicGroupContent extends Command
         $selection = $rule['cache_content_selection'] ?? 'all';
         $days = (int) ($rule['cache_content_days'] ?? 30);
 
+        // Normalize selection to an int-keyed set for cheap `in_array` lookups
+        // — string IDs sneak in if a user hand-edited the JSON column.
+        $selectedSet = $selectedIds === null
+            ? null
+            : array_fill_keys(array_map('intval', $selectedIds), true);
+
         foreach ($groups as $group) {
             if ($group->type === 'vod') {
                 foreach ($group->channels as $channel) {
+                    if ($selectedSet !== null && ! isset($selectedSet[(int) $channel->id])) {
+                        continue;
+                    }
                     if ($selection === 'recent'
                         && ! $this->isWithinRecentWindow(
                             $channel->info['release_date'] ?? null,
@@ -136,6 +170,9 @@ class CacheDynamicGroupContent extends Command
                 }
             } elseif ($group->type === 'series') {
                 foreach ($group->series as $series) {
+                    if ($selectedSet !== null && ! isset($selectedSet[(int) $series->id])) {
+                        continue;
+                    }
                     foreach ($series->episodes as $episode) {
                         if ($selection === 'recent') {
                             // Episode: try aio_air_date (real datetime) then fall back to info JSON.

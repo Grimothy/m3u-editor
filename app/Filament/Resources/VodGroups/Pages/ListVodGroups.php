@@ -3,6 +3,7 @@
 namespace App\Filament\Resources\VodGroups\Pages;
 
 use App\Filament\Resources\VodGroups\VodGroupResource;
+use App\Filament\Resources\VodGroups\Widgets\DynamicGroupCacheActivityWidget;
 use App\Filament\Resources\VodGroups\Widgets\DynamicGroupsWidget;
 use App\Jobs\GroupFindAndReplace;
 use App\Jobs\GroupFindAndReplaceReset;
@@ -116,6 +117,7 @@ class ListVodGroups extends ListRecords
     {
         return [
             DynamicGroupsWidget::class,
+            DynamicGroupCacheActivityWidget::class,
         ];
     }
 

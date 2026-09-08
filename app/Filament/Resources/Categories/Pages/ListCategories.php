@@ -4,6 +4,7 @@ namespace App\Filament\Resources\Categories\Pages;
 
 use App\Filament\Resources\Categories\CategoryResource;
 use App\Filament\Resources\Categories\Widgets\DynamicGroupsWidget;
+use App\Filament\Resources\VodGroups\Widgets\DynamicGroupCacheActivityWidget;
 use App\Jobs\CategoryFindAndReplace;
 use App\Jobs\CategoryFindAndReplaceReset;
 use App\Models\Playlist;
@@ -95,6 +96,7 @@ class ListCategories extends ListRecords
     {
         return [
             DynamicGroupsWidget::class,
+            DynamicGroupCacheActivityWidget::class,
         ];
     }
 

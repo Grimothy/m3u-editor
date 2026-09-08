@@ -2,8 +2,11 @@
 
 namespace App\Filament\Resources\VodGroups\Widgets;
 
+use App\Enums\CachedContentFileStatus;
 use App\Filament\Resources\DynamicGroups\DynamicGroupResource;
+use App\Models\CachedContentFile;
 use App\Models\DynamicGroup;
+use App\Services\DynamicGroupCacheDispatchService;
 use App\Services\TmdbService;
 use Filament\Actions\Action;
 use Filament\Actions\DeleteAction;
@@ -174,6 +177,53 @@ class DynamicGroupsWidget extends BaseWidget
                 TextColumn::make('channels_count')
                     ->label(__('Items'))
                     ->numeric(),
+                TextColumn::make('cache_status')
+                    ->label(__('Cached'))
+                    // "Cached / Total" ratio for VOD-type Dynamic Groups that have
+                    // caching enabled. Phase 4 — the column shows '—' for groups
+                    // that aren't cached so the widget stays legible when only some
+                    // groups in the table are opted into caching.
+                    //
+                    // Counts are derived by recomputing fingerprints in PHP and
+                    // running ONE `whereIn` query per row — NOT a pivot count.
+                    // The pivot undercounts because cross-group cache reuse never
+                    // attaches a pivot row to groups that didn't trigger the
+                    // download (DynamicGroupCacheDispatchService::shouldSkip()
+                    // short-circuits before the pivot attach runs). See
+                    // `CacheCachedContentFilesCount` derivation in the plan.
+                    //
+                    // Lazy-loading `$record->channels` is a known N+1 cost per row;
+                    // acceptable at the scale this widget runs at (a handful of
+                    // groups per playlist tab) but flagged for future optimization.
+                    ->state(function (DynamicGroup $record): string {
+                        $dispatch = app(DynamicGroupCacheDispatchService::class);
+                        $rule = $dispatch->resolveRuleForGroup($record);
+                        if ($rule === null || ! ($rule['cache_enabled'] ?? false)) {
+                            return '—';
+                        }
+
+                        $channels = $record->channels;
+                        $total = $channels->count();
+                        if ($total === 0) {
+                            return '0/0';
+                        }
+
+                        $quality = $dispatch->resolveQuality($rule);
+                        $fingerprints = $channels
+                            ->map(fn ($channel) => CachedContentFile::fingerprintFor([
+                                'content_type' => 'movie',
+                                'tmdb_id' => $channel->tmdb_id !== null ? (string) $channel->tmdb_id : null,
+                                'quality' => $quality,
+                            ]))
+                            ->all();
+
+                        $cached = CachedContentFile::query()
+                            ->whereIn('content_fingerprint', $fingerprints)
+                            ->where('status', CachedContentFileStatus::Completed)
+                            ->count();
+
+                        return "{$cached}/{$total}";
+                    }),
                 TextColumn::make('last_synced_at')
                     ->since()
                     ->placeholder(__('Never'))

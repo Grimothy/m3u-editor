@@ -212,8 +212,14 @@ class DynamicGroupCacheDispatchService
      * `name` against the owning playlist's `dynamic_groups_config` array.
      * Returns null if the playlist has no matching rule (e.g. group
      * materialized from a rule that has since been deleted).
+     *
+     * Public so the Phase 4 progress UI ("Cached / Total" column on the
+     * DynamicGroupsWidget) and the "Select Content" picker can look up a
+     * group's rule without duplicating the name-matching logic. Widened
+     * from `private` in Phase 4 — pure visibility change, no behavior
+     * change.
      */
-    private function resolveRuleForGroup(DynamicGroup $group): ?array
+    public function resolveRuleForGroup(DynamicGroup $group): ?array
     {
         $playlist = $group->playlist;
         if (! $playlist) {
@@ -232,6 +238,36 @@ class DynamicGroupCacheDispatchService
         }
 
         return null;
+    }
+
+    /**
+     * Reverse of `resolveRuleForGroup()`: find the materialized DynamicGroup
+     * row that corresponds to a rule's `name` on a given playlist.
+     *
+     * Used by the Phase 4 "Select Content" picker UI to scope its backing
+     * table to the group's own membership (`$group->channels()` for vod,
+     * `$group->series()` for series). The picker lives inside a Repeater
+     * item on the Playlist form — it knows the Playlist ID and the rule's
+     * `name` from sibling repeater fields but does NOT have a direct handle
+     * to the DynamicGroup row, so this lookup is the bridge.
+     *
+     * Returns null if the rule's group hasn't been materialized yet
+     * (e.g. the playlist hasn't been synced) or if the rule's `name` is
+     * missing — callers must handle null (the picker is gated on a
+     * non-empty `cache_enabled` and a valid `name`, so null means
+     * "no membership to browse").
+     */
+    public function resolveGroupForRule(int $playlistId, array $rule): ?DynamicGroup
+    {
+        $name = $rule['name'] ?? null;
+        if (! is_string($name) || $name === '') {
+            return null;
+        }
+
+        return DynamicGroup::query()
+            ->where('playlist_id', $playlistId)
+            ->where('name', $name)
+            ->first();
     }
 
     private function dispatchJob(

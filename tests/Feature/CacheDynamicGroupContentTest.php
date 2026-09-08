@@ -107,7 +107,10 @@ it('dispatches one job per eligible VOD item when cron is due', function () {
     Bus::assertDispatched(DownloadCachedContentFile::class, 1);
 });
 
-it('skips content with cache_content_selection = select (no picker UI yet)', function () {
+it('skips content with cache_content_selection = select when no IDs are picked (empty picker)', function () {
+    // Phase 4: 'select' is no longer a global no-op — empty selection means
+    // "user hasn't picked anything yet", so we skip rather than silently
+    // caching everything (which would defeat the point of switching to 'select').
     app(GeneralSettings::class)->enable_dynamic_group_cache = true;
     app(GeneralSettings::class)->dynamic_group_cache_lazy_load = false;
     app(GeneralSettings::class)->dynamic_group_cache_schedule = '* * * * *';
@@ -123,6 +126,7 @@ it('skips content with cache_content_selection = select (no picker UI yet)', fun
                 'name' => 'Picked Titles',
                 'cache_enabled' => true,
                 'cache_content_selection' => 'select',
+                'cache_selected_content_ids' => [],
             ],
         ],
     ]);
@@ -130,6 +134,60 @@ it('skips content with cache_content_selection = select (no picker UI yet)', fun
     $this->artisan('app:cache-dynamic-group-content')->assertSuccessful();
 
     Bus::assertNotDispatched(DownloadCachedContentFile::class);
+});
+
+it('filters to selected IDs when cache_content_selection = select (Phase 4 picker)', function () {
+    // Phase 4: 'select' now actually filters to the picked membership subset
+    // rather than no-op'ing the whole rule.
+    app(GeneralSettings::class)->enable_dynamic_group_cache = true;
+    app(GeneralSettings::class)->dynamic_group_cache_lazy_load = false;
+    app(GeneralSettings::class)->dynamic_group_cache_schedule = '* * * * *';
+    app(GeneralSettings::class)->save();
+    app(GeneralSettings::class)->refresh();
+
+    $group = DynamicGroup::create([
+        'playlist_id' => $this->playlist->id,
+        'user_id' => $this->user->id,
+        'type' => 'vod',
+        'source' => 'trending',
+        'name' => 'Picked Titles',
+    ]);
+
+    $pickedChannel = Channel::factory()->create([
+        'playlist_id' => $this->playlist->id,
+        'tmdb_id' => '550',
+        'url' => 'http://example.com/picked.mp4',
+        'is_vod' => true,
+    ]);
+    $skippedChannel = Channel::factory()->create([
+        'playlist_id' => $this->playlist->id,
+        'tmdb_id' => '551',
+        'url' => 'http://example.com/skipped.mp4',
+        'is_vod' => true,
+    ]);
+    $group->channels()->attach([$pickedChannel->id, $skippedChannel->id]);
+
+    $this->playlist->update([
+        'dynamic_groups_config' => [
+            [
+                'enabled' => true,
+                'type' => 'vod',
+                'source' => 'trending',
+                'name' => 'Picked Titles',
+                'cache_enabled' => true,
+                'cache_content_selection' => 'select',
+                'cache_selected_content_ids' => [$pickedChannel->id],
+            ],
+        ],
+    ]);
+
+    $this->artisan('app:cache-dynamic-group-content')->assertSuccessful();
+
+    Bus::assertDispatched(DownloadCachedContentFile::class, 1);
+    Bus::assertDispatched(DownloadCachedContentFile::class, function (DownloadCachedContentFile $job) use ($pickedChannel, $skippedChannel) {
+        return $job->tmdbId === (string) $pickedChannel->tmdb_id
+            && $job->tmdbId !== (string) $skippedChannel->tmdb_id;
+    });
 });
 
 it('skips VOD items whose release_date is older than cache_content_days when selection is recent', function () {

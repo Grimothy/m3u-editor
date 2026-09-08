@@ -15,6 +15,8 @@ use App\Filament\Resources\Playlists\Pages\EditPlaylist;
 use App\Filament\Resources\Playlists\Pages\ListPlaylists;
 use App\Filament\Resources\Playlists\Pages\ViewPlaylist;
 use App\Filament\Support\DvrRequestsAiostreamsTabs;
+use App\Filament\Tables\DynamicGroupCacheableChannelsTable;
+use App\Filament\Tables\DynamicGroupCacheableSeriesTable;
 use App\Filament\Tables\SourceCategoriesTable;
 use App\Filament\Tables\SourceGroupsTable;
 use App\Jobs\CopyAttributesToPlaylist;
@@ -31,6 +33,7 @@ use App\Livewire\PlaylistM3uUrl;
 use App\Livewire\XtreamApiInfo;
 use App\Livewire\XtreamDnsStatus;
 use App\Models\Category;
+use App\Models\Channel;
 use App\Models\CustomPlaylist;
 use App\Models\DynamicGroup;
 use App\Models\Group;
@@ -38,6 +41,7 @@ use App\Models\MediaServerIntegration;
 use App\Models\Playlist;
 use App\Models\PlaylistAuth;
 use App\Models\PlaylistProfile;
+use App\Models\Series;
 use App\Models\SourceCategory;
 use App\Models\SourceGroup;
 use App\Models\StreamProfile;
@@ -46,6 +50,7 @@ use App\Rules\Cron;
 use App\Rules\UrlIsAllowed;
 use App\Rules\ValidRegexPattern;
 use App\Services\DateFormatService;
+use App\Services\DynamicGroupCacheDispatchService;
 use App\Services\EpgCacheService;
 use App\Services\M3uProxyService;
 use App\Services\ProfileService;
@@ -2095,7 +2100,7 @@ class PlaylistResource extends Resource implements CopilotResource
                                         ->options([
                                             'all' => __('All Content'),
                                             'recent' => __('Recent (within X days)'),
-                                            'select' => __('Select Content (Phase 2)'),
+                                            'select' => __('Select Content'),
                                         ])
                                         ->default('all')
                                         ->live()
@@ -2128,6 +2133,76 @@ class PlaylistResource extends Resource implements CopilotResource
                                         ->helperText(__('Days to keep cached files after the Dynamic Group is removed from the playlist config.'))
                                         ->columnSpan(3)
                                         ->hidden(fn (Get $get): bool => (string) $get('cache_retention_mode') !== 'lifetime_plus_days'),
+                                    ModalTableSelect::make('cache_selected_content_ids')
+                                        ->label(__('Selected Content'))
+                                        ->helperText(__('Pick which already-matched members of this Dynamic Group to cache. Sync the playlist first — the picker is scoped to the group\'s materialized membership.'))
+                                        ->columnSpan(12)
+                                        ->multiple()
+                                        ->visible(fn (Get $get): bool => (string) $get('cache_content_selection') === 'select')
+                                        ->tableConfiguration(
+                                            fn (Get $get): string => $get('type') === 'series'
+                                                ? DynamicGroupCacheableSeriesTable::class
+                                                : DynamicGroupCacheableChannelsTable::class,
+                                        )
+                                        ->tableArguments(function ($record, Get $get): array {
+                                            // Inside the Repeater, the parent-form Playlist ID
+                                            // is reachable via the standard Filament v3+ sibling path.
+                                            // Falls back to `$record?->id` for direct-form contexts.
+                                            $playlistId = $get('../../id') ?: ($record?->id ?? null);
+                                            $group = null;
+                                            if ($playlistId) {
+                                                $group = app(DynamicGroupCacheDispatchService::class)
+                                                    ->resolveGroupForRule((int) $playlistId, ['name' => $get('name')]);
+                                            }
+
+                                            return [
+                                                'playlist_id' => $playlistId,
+                                                'dynamic_group_id' => $group?->id,
+                                            ];
+                                        })
+                                        ->selectAction(
+                                            fn (Action $action) => $action
+                                                ->label(__('Select content'))
+                                                ->modalHeading(__('Select Dynamic Group members to cache'))
+                                                ->modalSubmitActionLabel(__('Confirm selection'))
+                                                ->button(),
+                                        )
+                                        ->hintAction(
+                                            Action::make('clear_selected_content')
+                                                ->label(__('Clear all'))
+                                                ->icon('heroicon-o-x-mark')
+                                                ->color('danger')
+                                                ->action(function (Set $set): void {
+                                                    $set('cache_selected_content_ids', []);
+                                                })
+                                                ->requiresConfirmation()
+                                                ->modalHeading(__('Clear selection'))
+                                                ->modalDescription(__('Are you sure you want to clear all selected content for this rule?'))
+                                                ->modalSubmitActionLabel(__('Clear'))
+                                        )
+                                        ->getOptionLabelFromRecordUsing(
+                                            fn ($record) => $record->title ?? $record->name
+                                        )
+                                        ->getOptionLabelsUsing(function (array $values): array {
+                                            // Values are mixed VOD/Series IDs depending on the rule's
+                                            // `type` — fall back to Series if Channel didn't claim them.
+                                            $values = array_values(array_filter($values, fn ($value) => is_numeric($value)));
+                                            if (empty($values)) {
+                                                return [];
+                                            }
+
+                                            $channelLabels = Channel::whereIn('id', $values)
+                                                ->pluck('title', 'id')
+                                                ->all();
+                                            $remaining = array_diff($values, array_keys($channelLabels));
+                                            $seriesLabels = ! empty($remaining)
+                                                ? Series::whereIn('id', $remaining)
+                                                    ->pluck('name', 'id')
+                                                    ->all()
+                                                : [];
+
+                                            return $channelLabels + $seriesLabels;
+                                        }),
                                     TextInput::make('cache_location_override')
                                         ->label(__('Cache Location Override'))
                                         ->placeholder(__('Leave blank to use the global cache location'))

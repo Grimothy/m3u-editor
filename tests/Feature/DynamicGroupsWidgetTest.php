@@ -5,8 +5,12 @@ use App\Filament\Resources\Categories\Widgets\DynamicGroupsWidget as SeriesDynam
 use App\Filament\Resources\DynamicGroups\DynamicGroupResource;
 use App\Filament\Resources\VodGroups\Pages\ListVodGroups;
 use App\Filament\Resources\VodGroups\Widgets\DynamicGroupsWidget as VodDynamicGroupsWidget;
+use App\Models\CachedContentFile;
+use App\Models\Channel;
 use App\Models\DynamicGroup;
+use App\Models\Episode;
 use App\Models\Playlist;
+use App\Models\Series;
 use App\Models\User;
 use App\Services\TmdbService;
 use Illuminate\Foundation\Testing\RefreshDatabase;
@@ -476,4 +480,143 @@ it('getDynamicGroupsHelpText() and getSectionHeading() use Group vs Category wor
 
     expect($vodHeading)->toBe('Dynamic Groups (TMDB)')
         ->and($seriesHeading)->toBe('Dynamic Categories (TMDB)');
+});
+
+// --- Phase 4: "Cached / Total" column on both widgets ----------------------
+
+it('the VOD widget\'s Cached column shows "—" for groups without a cache-enabled rule', function () {
+    $group = DynamicGroup::create([
+        'playlist_id' => $this->playlist->id, 'user_id' => $this->user->id,
+        'type' => 'vod', 'source' => 'trending', 'name' => 'No Cache Rule',
+    ]);
+
+    // Rule exists but cache_enabled = false → not a cache group, column shows '—'
+    $this->playlist->update([
+        'dynamic_groups_config' => [
+            ['name' => 'No Cache Rule', 'cache_enabled' => false],
+        ],
+    ]);
+
+    Livewire::test(VodDynamicGroupsWidget::class)
+        ->assertOk()
+        ->loadTable()
+        ->assertTableColumnStateSet('cache_status', '—', $group);
+});
+
+it('the VOD widget\'s Cached column shows "{cached}/{total}" when caching is enabled and content is cached', function () {
+    $channel = Channel::factory()->for($this->playlist)->create([
+        'tmdb_id' => '550',
+        'is_vod' => true,
+    ]);
+    $group = DynamicGroup::create([
+        'playlist_id' => $this->playlist->id, 'user_id' => $this->user->id,
+        'type' => 'vod', 'source' => 'trending', 'name' => 'Cached Group',
+    ]);
+    $group->channels()->attach($channel);
+
+    // Create the Completed file matching the fingerprint the widget will build
+    CachedContentFile::factory()->completed()->create([
+        'content_type' => 'movie',
+        'tmdb_id' => '550',
+        'quality' => null,
+    ]);
+
+    $this->playlist->update([
+        'dynamic_groups_config' => [
+            ['name' => 'Cached Group', 'cache_enabled' => true],
+        ],
+    ]);
+
+    Livewire::test(VodDynamicGroupsWidget::class)
+        ->assertOk()
+        ->loadTable()
+        ->assertTableColumnStateSet('cache_status', '1/1', $group);
+});
+
+it('the VOD widget\'s Cached column counts cross-group cached content (proves the undercount fix)', function () {
+    // Two separate DynamicGroups on the same playlist, both with
+    // cache_enabled, but ONLY ONE group has the pivot row attached (the
+    // other group is consuming the same cached file via the
+    // cross-group dedup path). A pivot count would undercount; the
+    // fingerprint-based count must return "1/1" for both groups.
+    $channel = Channel::factory()->for($this->playlist)->create([
+        'tmdb_id' => '550',
+        'is_vod' => true,
+    ]);
+    $groupA = DynamicGroup::create([
+        'playlist_id' => $this->playlist->id, 'user_id' => $this->user->id,
+        'type' => 'vod', 'source' => 'trending', 'name' => 'Group A',
+    ]);
+    $groupB = DynamicGroup::create([
+        'playlist_id' => $this->playlist->id, 'user_id' => $this->user->id,
+        'type' => 'vod', 'source' => 'popular', 'name' => 'Group B',
+    ]);
+    // Both groups have the channel in their membership — the cross-group
+    // dedup means only ONE pivot row gets attached (see below), but the
+    // fingerprint-based count must still return "1/1" for BOTH groups
+    // (a naive pivot count would undercount group B to "0/1").
+    $groupA->channels()->attach($channel);
+    $groupB->channels()->attach($channel);
+
+    $cached = CachedContentFile::factory()->completed()->create([
+        'content_type' => 'movie',
+        'tmdb_id' => '550',
+        'quality' => null,
+    ]);
+    // Only group A gets the pivot row — group B reuses via cross-group dedup
+    $cached->dynamicGroups()->attach($groupA);
+
+    $this->playlist->update([
+        'dynamic_groups_config' => [
+            ['name' => 'Group A', 'cache_enabled' => true],
+            ['name' => 'Group B', 'cache_enabled' => true],
+        ],
+    ]);
+
+    Livewire::test(VodDynamicGroupsWidget::class)
+        ->assertOk()
+        ->loadTable()
+        ->assertTableColumnStateSet('cache_status', '1/1', $groupA)
+        ->assertTableColumnStateSet('cache_status', '1/1', $groupB);
+});
+
+it('the Series widget\'s Cached column counts EPISODES, not series', function () {
+    // Critical: a series-type group caches by episode (each episode gets its
+    // own download job). The Cached/Total denominator must be the episode
+    // count, not the series count — otherwise the ratio is meaningless.
+    $series = Series::factory()->for($this->playlist)->create([
+        'tmdb_id' => '1399',
+    ]);
+    $ep1 = Episode::factory()->for($this->playlist)->for($series)->create([
+        'season' => 1, 'episode_num' => 1,
+    ]);
+    Episode::factory()->for($this->playlist)->for($series)->create([
+        'season' => 1, 'episode_num' => 2,
+    ]);
+
+    $group = DynamicGroup::create([
+        'playlist_id' => $this->playlist->id, 'user_id' => $this->user->id,
+        'type' => 'series', 'source' => 'trending', 'name' => 'Top Series',
+    ]);
+    $group->series()->attach($series);
+
+    // Only episode 1 is cached — expect 1/2 (not 1/1 series count)
+    CachedContentFile::factory()->completed()->create([
+        'content_type' => 'episode',
+        'tmdb_id' => '1399',
+        'season_number' => 1,
+        'episode_number' => 1,
+        'quality' => null,
+    ]);
+
+    $this->playlist->update([
+        'dynamic_groups_config' => [
+            ['name' => 'Top Series', 'cache_enabled' => true],
+        ],
+    ]);
+
+    Livewire::test(SeriesDynamicGroupsWidget::class)
+        ->assertOk()
+        ->loadTable()
+        ->assertTableColumnStateSet('cache_status', '1/2', $group);
 });
