@@ -1926,67 +1926,67 @@ class Preferences extends SettingsPage
                                             ->columnSpanFull()
                                             ->helperText(__('When enabled, individual stream URLs in generated playlists and Xtream API responses will be rewritten to route through MediaFlow Proxy. Applies only when the m3u-proxy is not already in use for a given playlist or stream.')),
                                     ]),
-                            ]),
 
-                        Section::make(__('Dynamic Group Cache'))
-                            ->description(__('Download VOD and series files locally so multiple playlists/Dynamic Groups don\'t each hit the provider for the same content.'))
-                            ->columnSpanFull()
-                            ->columns(3)
-                            ->schema([
-                                Toggle::make('enable_dynamic_group_cache')
-                                    ->label(__('Enable Dynamic Group Cache'))
-                                    ->live()
-                                    ->helperText(__('When enabled, VOD and series files matched by Dynamic Group rules can be cached locally on disk.'))
-                                    ->inline(false)
-                                    ->columnSpan(3),
-                                Group::make()
+                                Section::make(__('Dynamic Group Cache'))
+                                    ->description(__('Download VOD and series files locally so multiple playlists/Dynamic Groups don\'t each hit the provider for the same content.'))
                                     ->columnSpanFull()
                                     ->columns(3)
-                                    ->hidden(fn (Get $get): bool => ! $get('enable_dynamic_group_cache'))
                                     ->schema([
-                                        TextInput::make('dynamic_group_cache_location')
-                                            ->label(__('Cache Location'))
-                                            ->placeholder('/var/www/html/storage/app/cached-content')
-                                            ->helperText(__('Absolute path on disk where cached content files are stored. Leave blank to use the default storage disk root.'))
-                                            ->columnSpan(3),
-                                        Toggle::make('dynamic_group_cache_lazy_load')
-                                            ->label(__('Cache on first play instead of on a schedule'))
+                                        Toggle::make('enable_dynamic_group_cache')
+                                            ->label(__('Enable Dynamic Group Cache'))
                                             ->live()
-                                            ->helperText(__('When enabled, content is cached lazily when first requested, instead of proactively on the schedule below.'))
+                                            ->helperText(__('When enabled, VOD and series files matched by Dynamic Group rules can be cached locally on disk.'))
                                             ->inline(false)
                                             ->columnSpan(3),
-                                        TextInput::make('dynamic_group_cache_schedule')
-                                            ->label(__('Cache Refresh Schedule'))
-                                            ->suffix(config('app.timezone'))
-                                            ->rules([new Cron])
-                                            ->live()
-                                            ->hintAction(CronHelperAction::make(name: 'cache-cron', cronField: 'dynamic_group_cache_schedule'))
-                                            ->helperText(fn (Get $get): string => CronExpression::isValidExpression((string) $get('dynamic_group_cache_schedule'))
-                                                ? 'Next scheduled refresh: '.(new CronExpression((string) $get('dynamic_group_cache_schedule')))->getNextRunDate()->format(app(DateFormatService::class)->getFormat())
-                                                : 'Specify the CRON schedule for automatic cache refresh, e.g. "0 3 * * *".')
-                                            ->hidden(fn (Get $get): bool => (bool) $get('dynamic_group_cache_lazy_load'))
-                                            ->columnSpan(3),
-                                        TextInput::make('dynamic_group_cache_max_concurrent_downloads')
-                                            ->label(__('Max Concurrent Downloads'))
-                                            ->type('number')
-                                            ->minValue(1)
-                                            ->default(2)
-                                            ->helperText(__('Maximum number of files to download at once.'))
-                                            ->columnSpan(1),
-                                        TextInput::make('dynamic_group_cache_retry_cooldown_minutes')
-                                            ->label(__('Retry Cooldown (Minutes)'))
-                                            ->type('number')
-                                            ->minValue(1)
-                                            ->default(360)
-                                            ->helperText(__('Minutes before retrying a transiently failed cache download (default 360 = 6h).'))
-                                            ->columnSpan(1),
-                                        TextInput::make('dynamic_group_cache_failure_cooldown_hours')
-                                            ->label(__('Failure Cooldown (Hours)'))
-                                            ->type('number')
-                                            ->minValue(1)
-                                            ->default(24)
-                                            ->helperText(__('Hours before re-attempting a permanently failed cache download (default 24).'))
-                                            ->columnSpan(1),
+                                        Group::make()
+                                            ->columnSpanFull()
+                                            ->columns(3)
+                                            ->hidden(fn (Get $get): bool => ! $get('enable_dynamic_group_cache'))
+                                            ->schema([
+                                                TextInput::make('dynamic_group_cache_location')
+                                                    ->label(__('Cache Location'))
+                                                    ->placeholder('/var/www/html/storage/app/cached-content')
+                                                    ->helperText(__('Absolute path on disk where cached content files are stored. Leave blank to use the default storage disk root.'))
+                                                    ->columnSpan(3),
+                                                Toggle::make('dynamic_group_cache_lazy_load')
+                                                    ->label(__('Cache on first play instead of on a schedule'))
+                                                    ->live()
+                                                    ->helperText(__('When enabled, content is cached lazily when first requested, instead of proactively on the schedule below.'))
+                                                    ->inline(false)
+                                                    ->columnSpan(3),
+                                                TextInput::make('dynamic_group_cache_schedule')
+                                                    ->label(__('Cache Refresh Schedule'))
+                                                    ->suffix(config('app.timezone'))
+                                                    ->rules([new Cron])
+                                                    ->live()
+                                                    ->hintAction(CronHelperAction::make(name: 'cache-cron', cronField: 'dynamic_group_cache_schedule'))
+                                                    ->helperText(fn (Get $get): string => CronExpression::isValidExpression((string) $get('dynamic_group_cache_schedule'))
+                                                        ? 'Next scheduled refresh: '.(new CronExpression((string) $get('dynamic_group_cache_schedule')))->getNextRunDate()->format(app(DateFormatService::class)->getFormat())
+                                                        : 'Specify the CRON schedule for automatic cache refresh, e.g. "0 3 * * *".')
+                                                    ->hidden(fn (Get $get): bool => (bool) $get('dynamic_group_cache_lazy_load'))
+                                                    ->columnSpan(3),
+                                                TextInput::make('dynamic_group_cache_max_concurrent_downloads')
+                                                    ->label(__('Max Concurrent Downloads'))
+                                                    ->type('number')
+                                                    ->minValue(1)
+                                                    ->default(2)
+                                                    ->helperText(__('Maximum number of files to download at once.'))
+                                                    ->columnSpan(1),
+                                                TextInput::make('dynamic_group_cache_retry_cooldown_minutes')
+                                                    ->label(__('Retry Cooldown (Minutes)'))
+                                                    ->type('number')
+                                                    ->minValue(1)
+                                                    ->default(360)
+                                                    ->helperText(__('Minutes before retrying a transiently failed cache download (default 360 = 6h).'))
+                                                    ->columnSpan(1),
+                                                TextInput::make('dynamic_group_cache_failure_cooldown_hours')
+                                                    ->label(__('Failure Cooldown (Hours)'))
+                                                    ->type('number')
+                                                    ->minValue(1)
+                                                    ->default(24)
+                                                    ->helperText(__('Hours before re-attempting a permanently failed cache download (default 24).'))
+                                                    ->columnSpan(1),
+                                            ]),
                                     ]),
                             ]),
 
