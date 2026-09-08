@@ -5,6 +5,7 @@ namespace App\Filament\Clusters\Settings\Pages;
 use App\Filament\Clusters\Settings\Pages\Concerns\BaseSettingsPage;
 use App\Models\StreamProfile;
 use App\Services\M3uProxyService;
+use BackedEnum;
 use Exception;
 use Filament\Actions\Action;
 use Filament\Forms\Components\Select;
@@ -21,6 +22,8 @@ use Illuminate\Support\Str;
 
 class ManageProxySettings extends BaseSettingsPage
 {
+    protected static string|BackedEnum|null $navigationIcon = 'heroicon-o-arrows-right-left';
+
     protected static ?string $slug = 'proxy';
 
     protected static ?int $navigationSort = 2;

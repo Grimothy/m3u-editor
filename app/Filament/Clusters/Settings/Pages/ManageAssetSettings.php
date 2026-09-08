@@ -4,6 +4,7 @@ namespace App\Filament\Clusters\Settings\Pages;
 
 use App\Filament\Clusters\Settings\Pages\Concerns\BaseSettingsPage;
 use App\Filament\Resources\Assets\AssetResource;
+use BackedEnum;
 use Filament\Actions\Action;
 use Filament\Forms\Components\FileUpload;
 use Filament\Forms\Components\Toggle;
@@ -13,6 +14,8 @@ use Illuminate\Support\HtmlString;
 
 class ManageAssetSettings extends BaseSettingsPage
 {
+    protected static string|BackedEnum|null $navigationIcon = 'heroicon-o-photo';
+
     protected static ?string $slug = 'assets';
 
     protected static ?int $navigationSort = 5;

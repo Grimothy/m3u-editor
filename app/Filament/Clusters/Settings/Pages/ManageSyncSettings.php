@@ -4,6 +4,7 @@ namespace App\Filament\Clusters\Settings\Pages;
 
 use App\Filament\Clusters\Settings\Pages\Concerns\BaseSettingsPage;
 use App\Models\StreamFileSetting;
+use BackedEnum;
 use Filament\Actions\Action;
 use Filament\Forms\Components\Select;
 use Filament\Forms\Components\TextInput;
@@ -13,6 +14,8 @@ use Filament\Schemas\Schema;
 
 class ManageSyncSettings extends BaseSettingsPage
 {
+    protected static string|BackedEnum|null $navigationIcon = 'heroicon-o-arrow-path';
+
     protected static ?string $slug = 'sync';
 
     protected static ?int $navigationSort = 4;

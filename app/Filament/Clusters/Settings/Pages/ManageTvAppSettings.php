@@ -13,6 +13,7 @@ use App\Models\PushDeviceToken;
 use App\Notifications\Notification as AppNotification;
 use App\Services\PushRelayService;
 use App\Settings\GeneralSettings;
+use BackedEnum;
 use Exception;
 use Filament\Actions\Action;
 use Filament\Forms\Components\Repeater;
@@ -30,6 +31,8 @@ use Filament\Schemas\Schema;
 
 class ManageTvAppSettings extends BaseSettingsPage
 {
+    protected static string|BackedEnum|null $navigationIcon = 'heroicon-o-device-phone-mobile';
+
     protected static ?string $slug = 'tv-app';
 
     protected static ?int $navigationSort = 3;

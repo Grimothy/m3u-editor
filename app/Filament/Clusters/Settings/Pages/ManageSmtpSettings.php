@@ -3,6 +3,7 @@
 namespace App\Filament\Clusters\Settings\Pages;
 
 use App\Filament\Clusters\Settings\Pages\Concerns\BaseSettingsPage;
+use BackedEnum;
 use Exception;
 use Filament\Actions\Action;
 use Filament\Forms\Components\Select;
@@ -15,6 +16,8 @@ use Illuminate\Support\Facades\Mail;
 
 class ManageSmtpSettings extends BaseSettingsPage
 {
+    protected static string|BackedEnum|null $navigationIcon = 'heroicon-o-envelope';
+
     protected static ?string $slug = 'smtp';
 
     protected static ?int $navigationSort = 7;

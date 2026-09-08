@@ -3,6 +3,7 @@
 namespace App\Filament\Clusters\Settings\Pages;
 
 use App\Filament\Clusters\Settings\Pages\Concerns\BaseSettingsPage;
+use BackedEnum;
 use Filament\Actions\Action;
 use Filament\Forms\Components\Toggle;
 use Filament\Schemas\Components\Section;
@@ -10,6 +11,8 @@ use Filament\Schemas\Schema;
 
 class ManageApiSettings extends BaseSettingsPage
 {
+    protected static string|BackedEnum|null $navigationIcon = 'heroicon-o-command-line';
+
     protected static ?string $slug = 'api';
 
     protected static ?int $navigationSort = 8;

@@ -10,6 +10,7 @@ use Illuminate\Http\Client\Response as HttpClientResponse;
 use Illuminate\Http\Request;
 use Illuminate\Http\Response;
 use Illuminate\Support\Facades\Http;
+use Illuminate\Support\Facades\Image;
 use Illuminate\Support\Facades\Log;
 use Illuminate\Support\Facades\Storage;
 use Symfony\Component\HttpFoundation\StreamedResponse;
@@ -33,10 +34,15 @@ class LogoProxyController extends Controller
             // Make sure the cache directory exists
             Storage::disk('local')->makeDirectory(LogoCacheService::CACHE_DIRECTORY);
 
+            // Optional on-the-fly downscale hints (see config/proxy.php). A weak
+            // TV client asks for a poster-sized image instead of a 2 MB source.
+            $width = $this->clampDimension($request->query('w'));
+            $height = $this->clampDimension($request->query('h'));
+
             // Check if the logo is already cached
             $cacheFile = LogoCacheService::findCacheFileForUrl($originalUrl);
             if ($cacheFile && Storage::disk('local')->exists($cacheFile)) {
-                return $this->serveFromCache($cacheFile);
+                return $this->serveMaybeResized($cacheFile, null, $width, $height);
             }
 
             // Fetch the logo from the remote URL
@@ -57,7 +63,7 @@ class LogoProxyController extends Controller
             Storage::disk('local')->put($cacheFile, $logoData['content']);
             LogoCacheService::writeCacheMetadata($originalUrl, $cacheFile, $logoData['content_type'] ?? null);
 
-            return $this->serveFromCache($cacheFile, $logoData['content_type']);
+            return $this->serveMaybeResized($cacheFile, $logoData['content_type'], $width, $height);
         } catch (\Exception $e) {
             Log::error('Logo proxy error', [
                 'encoded_url' => $encodedUrl,
@@ -69,10 +75,19 @@ class LogoProxyController extends Controller
     }
 
     /**
-     * Generate a proxy URL for a given logo URL
+     * Generate a proxy URL for a given logo URL.
+     *
+     * When [$width] (and/or [$height]) is passed, the proxy is asked to
+     * downscale the image to that box before serving it, so clients pull a
+     * poster-sized file instead of the full-resolution source. A null size
+     * leaves the URL exactly as before (no query string).
      */
-    public static function generateProxyUrl(?string $originalUrl, $internal = false): string
-    {
+    public static function generateProxyUrl(
+        ?string $originalUrl,
+        $internal = false,
+        ?int $width = null,
+        ?int $height = null
+    ): string {
         // Get the config values (takes priority over settings values)
         $proxyUrlOverride = config('proxy.url_override');
         $includeLogosInOverride = config('proxy.url_override_include_logos', true);
@@ -100,6 +115,14 @@ class LogoProxyController extends Controller
             $url = $proxyUrlOverride && ! $internal && $includeLogosInOverride
                 ? rtrim($proxyUrlOverride, '/')."/logo-proxy/{$encodedUrl}/{$filename}"
                 : url("/logo-proxy/{$encodedUrl}/{$filename}");
+
+            $query = array_filter([
+                'w' => $width > 0 ? $width : null,
+                'h' => $height > 0 ? $height : null,
+            ]);
+            if ($query !== []) {
+                $url .= '?'.http_build_query($query);
+            }
         }
 
         return $url;
@@ -165,6 +188,100 @@ class LogoProxyController extends Controller
 
             return null;
         }
+    }
+
+    /**
+     * Parse and clamp a `?w=` / `?h=` query value. Returns null for anything
+     * missing, non-numeric, or <= 0 so callers fall back to the source size.
+     */
+    private function clampDimension(mixed $value): ?int
+    {
+        if ($value === null || $value === '' || ! is_numeric($value)) {
+            return null;
+        }
+
+        $pixels = (int) $value;
+        if ($pixels <= 0) {
+            return null;
+        }
+
+        $max = (int) config('proxy.image_resize_max', 1920);
+
+        return min($pixels, $max);
+    }
+
+    /**
+     * Serve [$cacheFile], first downscaling it to fit [$width] x [$height]
+     * (aspect preserved, never upscaled) when either bound is given and
+     * resizing is enabled. The scaled variant is cached alongside the original
+     * keyed by its dimensions, so the transform runs once per size. Any
+     * failure (unsupported format, decode error, larger result) falls back to
+     * streaming the original untouched.
+     */
+    private function serveMaybeResized(
+        string $cacheFile,
+        ?string $contentType,
+        ?int $width,
+        ?int $height
+    ): StreamedResponse {
+        if (($width === null && $height === null) || ! config('proxy.image_resize_enabled', true)) {
+            return $this->serveFromCache($cacheFile, $contentType);
+        }
+
+        // SVG scales losslessly on the client; rasterising it here only hurts.
+        $extension = strtolower(pathinfo($cacheFile, PATHINFO_EXTENSION));
+        if ($extension === 'svg') {
+            return $this->serveFromCache($cacheFile, $contentType);
+        }
+
+        $variantFile = $this->resizedCachePath($cacheFile, $width, $height);
+        if (Storage::disk('local')->exists($variantFile)) {
+            return $this->serveFromCache($variantFile, $contentType);
+        }
+
+        try {
+            $original = Storage::disk('local')->get($cacheFile);
+            if ($original === null || $original === '') {
+                return $this->serveFromCache($cacheFile, $contentType);
+            }
+
+            $resized = Image::fromBytes($original)
+                ->scale(width: $width, height: $height)
+                ->toBytes();
+
+            // A downscale that came back bigger (already-small source, format
+            // quirk) is not worth serving or caching.
+            if (strlen($resized) >= strlen($original)) {
+                return $this->serveFromCache($cacheFile, $contentType);
+            }
+
+            Storage::disk('local')->put($variantFile, $resized);
+
+            return $this->serveFromCache($variantFile, $contentType);
+        } catch (\Throwable $e) {
+            Log::warning('Logo proxy resize failed, serving original', [
+                'cache_file' => $cacheFile,
+                'width' => $width,
+                'height' => $height,
+                'error' => $e->getMessage(),
+            ]);
+
+            return $this->serveFromCache($cacheFile, $contentType);
+        }
+    }
+
+    /**
+     * Cache path for the [$width] x [$height] variant of [$cacheFile]:
+     * `name.jpg` -> `name@w600.jpg`.
+     */
+    private function resizedCachePath(string $cacheFile, ?int $width, ?int $height): string
+    {
+        $suffix = '@'.($width ? "w{$width}" : '').($height ? "h{$height}" : '');
+        $dot = strrpos($cacheFile, '.');
+
+        return $dot === false
+            ? $cacheFile.$suffix
+            : substr($cacheFile, 0, $dot).$suffix.substr($cacheFile, $dot);
     }
 
     /**

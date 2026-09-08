@@ -6,6 +6,7 @@ use App\Filament\Actions\CronHelperAction;
 use App\Filament\Clusters\Settings\Pages\Concerns\BaseSettingsPage;
 use App\Rules\Cron;
 use App\Services\DateFormatService;
+use BackedEnum;
 use Cron\CronExpression;
 use Filament\Forms\Components\TextInput;
 use Filament\Forms\Components\Toggle;
@@ -15,6 +16,8 @@ use Filament\Schemas\Schema;
 
 class ManageBackupSettings extends BaseSettingsPage
 {
+    protected static string|BackedEnum|null $navigationIcon = 'heroicon-o-archive-box';
+
     protected static ?string $slug = 'backups';
 
     protected static ?int $navigationSort = 6;

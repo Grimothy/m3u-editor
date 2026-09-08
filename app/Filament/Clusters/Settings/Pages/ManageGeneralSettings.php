@@ -4,6 +4,7 @@ namespace App\Filament\Clusters\Settings\Pages;
 
 use App\Filament\Clusters\Settings\Pages\Concerns\BaseSettingsPage;
 use App\Rules\ValidDateFormat;
+use BackedEnum;
 use Filament\Actions\Action;
 use Filament\Forms\Components\Select;
 use Filament\Forms\Components\TagsInput;
@@ -18,6 +19,8 @@ use Filament\Support\Enums\Width;
 
 class ManageGeneralSettings extends BaseSettingsPage
 {
+    protected static string|BackedEnum|null $navigationIcon = 'heroicon-o-cog-8-tooth';
+
     protected static ?string $slug = 'general';
 
     protected static ?int $navigationSort = 1;
