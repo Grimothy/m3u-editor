@@ -86,7 +86,13 @@ class DownloadCachedContentFile implements ShouldQueue
         }
 
         // Step 5: Create the row in Downloading status FIRST so the concurrency
-        // gate in step 3 sees it. Catch the unique-fingerprint race explicitly.
+        // gate in step 3 sees it. The catch block handles three cases:
+        //  - Failed row past cooldown  → atomically reclaim (retry the download)
+        //  - Stale Downloading row     → atomically reclaim (crashed worker recovery)
+        //  - Fresh Downloading row     → attach this group, return (another worker
+        //                                  is plausibly still on it)
+        // The affected-row-count on the reclaim UPDATE acts as a race guard so two
+        // workers reclaiming the same row simultaneously don't both proceed.
         try {
             $file = CachedContentFile::create([
                 'content_type' => $this->contentType,
@@ -99,13 +105,63 @@ class DownloadCachedContentFile implements ShouldQueue
                 'status' => CachedContentFileStatus::Downloading,
             ]);
         } catch (QueryException $e) {
-            // Race lost — another worker won the unique-constraint fight
-            $winner = CachedContentFile::where('content_fingerprint', $fingerprint)->first();
-            if ($winner) {
-                $winner->dynamicGroups()->syncWithoutDetaching([$this->dynamicGroup->id]);
+            $existing = CachedContentFile::where('content_fingerprint', $fingerprint)->first();
+            if (! $existing) {
+                // Race we lost AND no row found — permanent skip (defensive).
+                return;
             }
 
-            return;
+            if ($existing->status === CachedContentFileStatus::Failed) {
+                // Cooldown already expired (the dispatcher's shouldSkip() gates this
+                // before dispatch). Atomically flip Failed → Downloading using
+                // affected-row-count as the race guard.
+                $reclaimed = CachedContentFile::where('id', $existing->id)
+                    ->where('status', CachedContentFileStatus::Failed->value)
+                    ->update([
+                        'status' => CachedContentFileStatus::Downloading->value,
+                        'failure_count' => 0,
+                        'last_failed_at' => null,
+                    ]);
+
+                if ($reclaimed === 0) {
+                    // Another worker won the reclaim race — attach and exit
+                    $existing->dynamicGroups()->syncWithoutDetaching([$this->dynamicGroup->id]);
+
+                    return;
+                }
+                $file = $existing->fresh();
+            } elseif ($existing->status === CachedContentFileStatus::Downloading) {
+                // Stale = crashed worker. Threshold = job timeout + 5min safety margin.
+                $staleThreshold = now()->subSeconds($this->timeout + 300);
+                if ($existing->updated_at < $staleThreshold) {
+                    // WHERE clause pins both status AND updated_at so a concurrent
+                    // completion/failure can't be silently overwritten.
+                    $reclaimed = CachedContentFile::where('id', $existing->id)
+                        ->where('status', CachedContentFileStatus::Downloading->value)
+                        ->where('updated_at', '<', $staleThreshold)
+                        ->update([
+                            'failure_count' => 0,
+                            'last_failed_at' => null,
+                        ]);
+
+                    if ($reclaimed === 0) {
+                        $existing->dynamicGroups()->syncWithoutDetaching([$this->dynamicGroup->id]);
+
+                        return;
+                    }
+                    $file = $existing->fresh();
+                } else {
+                    // Fresh Downloading — another worker is plausibly still on it
+                    $existing->dynamicGroups()->syncWithoutDetaching([$this->dynamicGroup->id]);
+
+                    return;
+                }
+            } else {
+                // Pending (or any unexpected state) — attach and exit
+                $existing->dynamicGroups()->syncWithoutDetaching([$this->dynamicGroup->id]);
+
+                return;
+            }
         }
 
         // Step 6: Download to temp file (mirrors ProcessM3uImport.php:460-470 shape)

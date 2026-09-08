@@ -224,3 +224,159 @@ it('skips connection pre-flight when available_streams is 0 (disabled)', functio
 
     expect(CachedContentFile::first()->status)->toBe(CachedContentFileStatus::Completed);
 });
+
+it('reclaims a Failed row past cooldown and re-attempts the download', function () {
+    Storage::fake('local');
+    config()->set('filesystems.default', 'local');
+
+    Http::fake(['*' => Http::response('RETRYED_CONTENT', 200)]);
+
+    // Pre-seeded Failed row — dispatcher's shouldSkip() would not have queued
+    // this job if cooldown hadn't expired. last_failed_at 1h ago is well past
+    // the default 360-min retry cooldown anyway.
+    $existing = CachedContentFile::factory()->failed()->create([
+        'content_type' => 'movie',
+        'tmdb_id' => '550',
+        'quality' => '1080p',
+        'failure_count' => 3,
+        'last_failed_at' => now()->subHour(),
+    ]);
+
+    (new DownloadCachedContentFile(
+        dynamicGroup: $this->group,
+        contentType: 'movie',
+        tmdbId: '550',
+        tvdbId: null,
+        seasonNumber: null,
+        episodeNumber: null,
+        quality: '1080p',
+        sourceUrl: 'https://provider.example/movie.mp4',
+    ))->handle(
+        app(GeneralSettings::class),
+        app(M3uProxyService::class),
+    );
+
+    // Same row id, now Completed; file_path written; failure_count reset
+    $file = $existing->fresh();
+    expect(CachedContentFile::count())->toBe(1)
+        ->and($file->status)->toBe(CachedContentFileStatus::Completed)
+        ->and((int) $file->failure_count)->toBe(0)
+        ->and($file->last_failed_at)->toBeNull()
+        ->and($file->file_path)->not->toBeNull()
+        ->and($file->file_size_bytes)->toBeGreaterThan(0);
+
+    // Pivot attach
+    expect($file->dynamicGroups)->toHaveCount(1)
+        ->and($file->dynamicGroups->first()->id)->toBe($this->group->id);
+});
+
+it('reclaims a stale Downloading row and re-attempts the download', function () {
+    Storage::fake('local');
+    config()->set('filesystems.default', 'local');
+
+    Http::fake(['*' => Http::response('STALE_RETRYED', 200)]);
+
+    // Default job timeout is 3600s (1h). Stale = updated_at older than
+    // timeout + 300s safety margin = ~1h05m ago. Backdate updated_at to 2h
+    // ago to be safely stale.
+    $staleRow = CachedContentFile::factory()->create([
+        'content_type' => 'movie',
+        'tmdb_id' => '550',
+        'quality' => '1080p',
+        'status' => CachedContentFileStatus::Downloading,
+        'updated_at' => now()->subHours(2),
+    ]);
+
+    (new DownloadCachedContentFile(
+        dynamicGroup: $this->group,
+        contentType: 'movie',
+        tmdbId: '550',
+        tvdbId: null,
+        seasonNumber: null,
+        episodeNumber: null,
+        quality: '1080p',
+        sourceUrl: 'https://provider.example/movie.mp4',
+    ))->handle(
+        app(GeneralSettings::class),
+        app(M3uProxyService::class),
+    );
+
+    // Same row reclaimed — no new row created, file written
+    expect(CachedContentFile::count())->toBe(1);
+    $file = $staleRow->fresh();
+    expect($file->status)->toBe(CachedContentFileStatus::Completed)
+        ->and($file->file_path)->not->toBeNull()
+        ->and($file->file_size_bytes)->toBeGreaterThan(0)
+        ->and($file->dynamicGroups->first()->id)->toBe($this->group->id);
+});
+
+it('does not reclaim a fresh Downloading row (other worker plausibly active)', function () {
+    Storage::fake('local');
+    config()->set('filesystems.default', 'local');
+
+    // catch-all: if anything got re-downloaded this would record it
+    Http::fake(); // any outbound request would fail the test
+
+    // updated_at is now (fresh) — the staleness check at timeout + 300s won't trigger
+    $freshRow = CachedContentFile::factory()->create([
+        'content_type' => 'movie',
+        'tmdb_id' => '550',
+        'quality' => null,
+        'status' => CachedContentFileStatus::Downloading,
+        // updated_at defaults to now
+    ]);
+
+    (new DownloadCachedContentFile(
+        dynamicGroup: $this->group,
+        contentType: 'movie',
+        tmdbId: '550',
+        tvdbId: null,
+        seasonNumber: null,
+        episodeNumber: null,
+        quality: null,
+        sourceUrl: 'https://provider.example/movie.mp4',
+    ))->handle(
+        app(GeneralSettings::class),
+        app(M3uProxyService::class),
+    );
+
+    // No re-download attempted — fresh Downloading row stays as-is, group attached
+    expect(CachedContentFile::count())->toBe(1);
+    expect($freshRow->fresh()->status)->toBe(CachedContentFileStatus::Downloading)
+        ->and($freshRow->fresh()->file_path)->toBeNull();
+    expect($freshRow->fresh()->dynamicGroups->first()->id)->toBe($this->group->id);
+
+    Http::assertNothingSent();
+});
+
+it('resets failure_count to 0 when reclaiming a Failed row', function () {
+    Storage::fake('local');
+    config()->set('filesystems.default', 'local');
+
+    Http::fake(['*' => Http::response('OK', 200)]);
+
+    $existing = CachedContentFile::factory()->failed()->create([
+        'content_type' => 'movie',
+        'tmdb_id' => '550',
+        'quality' => null,
+        'failure_count' => 5, // past the 3-threshold for tier-2 cooldown
+        'last_failed_at' => now()->subHours(2),
+    ]);
+
+    (new DownloadCachedContentFile(
+        dynamicGroup: $this->group,
+        contentType: 'movie',
+        tmdbId: '550',
+        tvdbId: null,
+        seasonNumber: null,
+        episodeNumber: null,
+        quality: null,
+        sourceUrl: 'https://provider.example/movie.mp4',
+    ))->handle(
+        app(GeneralSettings::class),
+        app(M3uProxyService::class),
+    );
+
+    // failure_count reset to 0 so the dispatcher's tier logic starts fresh
+    expect((int) $existing->fresh()->failure_count)->toBe(0);
+});
