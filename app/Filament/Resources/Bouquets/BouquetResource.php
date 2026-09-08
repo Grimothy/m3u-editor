@@ -15,6 +15,7 @@ use App\Models\CustomPlaylist;
 use App\Models\MergedPlaylist;
 use App\Models\Playlist;
 use App\Traits\HasUserFiltering;
+use BackedEnum;
 use Filament\Actions\Action;
 use Filament\Actions\DeleteAction;
 use Filament\Actions\DeleteBulkAction;
@@ -36,6 +37,8 @@ use Illuminate\Validation\Rule;
 class BouquetResource extends Resource
 {
     use HasUserFiltering;
+
+    protected static string|BackedEnum|null $navigationIcon = 'heroicon-o-rectangle-group';
 
     protected static ?string $model = Bouquet::class;
 

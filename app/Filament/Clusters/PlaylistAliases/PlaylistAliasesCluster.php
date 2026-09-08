@@ -16,7 +16,7 @@ class PlaylistAliasesCluster extends Cluster
 
     protected static ?int $navigationSort = 5;
 
-    protected static ?SubNavigationPosition $subNavigationPosition = SubNavigationPosition::Top;
+    protected static ?SubNavigationPosition $subNavigationPosition = SubNavigationPosition::Start;
 
     /**
      * Explicit order: the aliases list is the primary tab, bouquets second.
