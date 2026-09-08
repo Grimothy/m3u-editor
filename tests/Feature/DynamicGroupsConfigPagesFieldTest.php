@@ -94,3 +94,50 @@ it('EditPlaylist page class is still instantiable after the schema change', func
     expect(class_exists(EditPlaylist::class))->toBeTrue()
         ->and(TmdbService::MAX_DYNAMIC_GROUP_PAGES)->toBe(5);
 });
+
+it('persists cache_enabled and all 8 cache_* keys on a rule round-trip', function () {
+    $rule = [
+        'enabled' => true,
+        'type' => 'vod',
+        'source' => 'now_playing',
+        'name' => 'In Theatres (cached)',
+        'tmdb_params' => ['pages' => 1],
+        'cache_enabled' => true,
+        'cache_content_selection' => 'recent',
+        'cache_content_days' => 14,
+        'cache_retention_mode' => 'lifetime_plus_days',
+        'cache_retention_extra_days' => 7,
+        'cache_location_override' => '/tmp/cache-override',
+        'cache_prefer_quality_keyword' => '4K',
+        'cache_avoid_duplicate_content' => false,
+    ];
+
+    $this->playlist->update(['dynamic_groups_config' => [$rule]]);
+    $persisted = $this->playlist->fresh()->dynamic_groups_config[0];
+
+    expect($persisted['cache_enabled'])->toBeTrue()
+        ->and($persisted['cache_content_selection'])->toBe('recent')
+        ->and($persisted['cache_content_days'])->toBe(14)
+        ->and($persisted['cache_retention_mode'])->toBe('lifetime_plus_days')
+        ->and($persisted['cache_retention_extra_days'])->toBe(7)
+        ->and($persisted['cache_location_override'])->toBe('/tmp/cache-override')
+        ->and($persisted['cache_prefer_quality_keyword'])->toBe('4K')
+        ->and($persisted['cache_avoid_duplicate_content'])->toBeFalse();
+});
+
+it('does not persist cache_* keys when the rule omits them (backwards compat)', function () {
+    $rule = [
+        'enabled' => true,
+        'type' => 'vod',
+        'source' => 'now_playing',
+        'name' => 'Plain',
+        'tmdb_params' => ['pages' => 1],
+        // intentionally NO cache_* keys
+    ];
+
+    $this->playlist->update(['dynamic_groups_config' => [$rule]]);
+    $persisted = $this->playlist->fresh()->dynamic_groups_config[0];
+
+    expect($persisted)->not->toHaveKey('cache_enabled')
+        ->and($persisted)->not->toHaveKey('cache_content_selection');
+});

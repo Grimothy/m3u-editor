@@ -2065,6 +2065,86 @@ class PlaylistResource extends Resource implements CopilotResource
                                 ->placeholder(__('e.g. Trending Now, Top Comedy, Netflix'))
                                 ->required()
                                 ->columnSpan(3),
+                            Toggle::make('cache_enabled')
+                                ->label(__('Enable Caching'))
+                                ->live()
+                                ->inline(false)
+                                ->columnSpan(3)
+                                ->helperText(function (Get $get): string {
+                                    // NOTE: $get('../../enable_proxy') is the standard Filament v3+
+                                    // path from inside a non-relationship Repeater item to a
+                                    // parent-form field. This repo has no confirmed in-repo
+                                    // precedent (Phase 1 grep returned zero matches) — Phase 2
+                                    // browser verification required. If this resolves to null,
+                                    // the helper text below will incorrectly say "Requires Proxy"
+                                    // even when proxy is on. Fallback: wire enable_proxy via a
+                                    // mutateFormDataBeforeFill hook on the EditPlaylist page to
+                                    // make it reliably readable, or replace this closure with a
+                                    // static helper text "Caching requires the playlist's Stream
+                                    // Proxy to be enabled."
+                                    return ! $get('../../enable_proxy')
+                                        ? __('Requires \'Enable Stream Proxy\' on this playlist.')
+                                        : __('Cache matching content so multiple playlists/Dynamic Groups don\'t each hit the provider.');
+                                }),
+                            Group::make()
+                                ->columns(12)
+                                ->hidden(fn (Get $get): bool => ! $get('cache_enabled'))
+                                ->schema([
+                                    Select::make('cache_content_selection')
+                                        ->label(__('Content to Cache'))
+                                        ->options([
+                                            'all' => __('All Content'),
+                                            'recent' => __('Recent (within X days)'),
+                                            'select' => __('Select Content (Phase 2)'),
+                                        ])
+                                        ->default('all')
+                                        ->live()
+                                        ->required()
+                                        ->columnSpan(3),
+                                    TextInput::make('cache_content_days')
+                                        ->label(__('Days Back'))
+                                        ->type('number')
+                                        ->minValue(1)
+                                        ->default(30)
+                                        ->helperText(__('Only cache content released within this many days from today.'))
+                                        ->columnSpan(3)
+                                        ->hidden(fn (Get $get): bool => (string) $get('cache_content_selection') !== 'recent'),
+                                    Select::make('cache_retention_mode')
+                                        ->label(__('Retention Mode'))
+                                        ->options([
+                                            'match_group_lifetime' => __('Match Group Lifetime'),
+                                            'lifetime_plus_days' => __('Group Lifetime + Extra Days'),
+                                            'never_expire' => __('Never Expire'),
+                                        ])
+                                        ->default('match_group_lifetime')
+                                        ->live()
+                                        ->required()
+                                        ->columnSpan(3),
+                                    TextInput::make('cache_retention_extra_days')
+                                        ->label(__('Extra Days After Group Removal'))
+                                        ->type('number')
+                                        ->minValue(0)
+                                        ->default(0)
+                                        ->helperText(__('Days to keep cached files after the Dynamic Group is removed from the playlist config.'))
+                                        ->columnSpan(3)
+                                        ->hidden(fn (Get $get): bool => (string) $get('cache_retention_mode') !== 'lifetime_plus_days'),
+                                    TextInput::make('cache_location_override')
+                                        ->label(__('Cache Location Override'))
+                                        ->placeholder(__('Leave blank to use the global cache location'))
+                                        ->helperText(__('Absolute path on disk. Per-group override; new downloads land here, but already-cached files are NOT moved.'))
+                                        ->columnSpan(6),
+                                    TextInput::make('cache_prefer_quality_keyword')
+                                        ->label(__('Preferred Quality Keyword'))
+                                        ->placeholder(__('e.g. 4K'))
+                                        ->helperText(__('Tie-break preference when multiple qualities match the same content. Free-text tag — e.g. "4K", "1080p".'))
+                                        ->columnSpan(3),
+                                    Toggle::make('cache_avoid_duplicate_content')
+                                        ->label(__('Avoid Duplicate Content Across Dynamic Groups'))
+                                        ->default(true)
+                                        ->inline(false)
+                                        ->helperText(__('Reuse the same cached file across multiple groups when content identity matches, instead of downloading once per group.'))
+                                        ->columnSpan(3),
+                                ]),
                         ])
                         ->columns(12)
                         ->reorderable()
