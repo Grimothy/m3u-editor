@@ -44,6 +44,7 @@ use App\Models\StreamProfile;
 use App\Rules\CheckIfUrlOrLocalPath;
 use App\Rules\Cron;
 use App\Rules\UrlIsAllowed;
+use App\Rules\UrlSafeCredential;
 use App\Rules\ValidRegexPattern;
 use App\Services\DateFormatService;
 use App\Services\EpgCacheService;
@@ -3785,6 +3786,7 @@ class PlaylistResource extends Resource implements CopilotResource
                                             ->label(__('Username'))
                                             ->helperText(__('Username for playlist access.'))
                                             ->required()
+                                            ->rules([new UrlSafeCredential])
                                             ->columnSpan(1),
 
                                         TextInput::make('auth_password')
@@ -3793,6 +3795,7 @@ class PlaylistResource extends Resource implements CopilotResource
                                             ->revealable()
                                             ->helperText(__('Password for playlist access.'))
                                             ->required()
+                                            ->rules([new UrlSafeCredential])
                                             ->columnSpan(1),
                                     ])
                                     ->visible(fn (Get $get): bool => $get('auth_option') === 'create'),

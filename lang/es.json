@@ -4613,6 +4613,7 @@
     "That EPG channel is not part of this candidate review row.": "Ese canal EPG no es parte de esta fila de revisión de candidatos.",
     "The \"From\" email address for outgoing emails. Defaults to no-reply@m3u-editor.dev.": "La dirección de correo electrónico \"De\" para los correos electrónicos salientes. El valor predeterminado es no-reply@m3u-editor.dev.",
     "The \"tvg-shift\" attribute is used in your generated M3U playlist to shift the EPG (Electronic Program Guide) time for specific channels by a certain number of hours. This allows for adjusting the EPG data for individual channels rather than applying a global shift.": "El atributo \"tvg-shift\" se utiliza en su lista de reproducción M3U generada para cambiar el tiempo de EPG (Guía electrónica de programas) para canales específicos en una cierta cantidad de horas. Esto permite ajustar los datos de EPG para canales individuales en lugar de aplicar un cambio global.",
+    "The :attribute cannot contain spaces or the characters / \\ ? # % because it is embedded in stream URLs.": "El campo :attribute no puede contener espacios ni los caracteres / \\ ? # % porque se incrusta en las URL de transmisión.",
     "The AED profile has been assigned to the selected channels.": "The AED profile has been assigned to the selected channels.",
     "The AED profile has been removed from the selected channels.": "The AED profile has been removed from the selected channels.",
     "The AI provider to use for the Copilot assistant.": "El proveedor de IA que se utilizará para el asistente del copiloto.",

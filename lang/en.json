@@ -5733,6 +5733,7 @@
     "That EPG channel is not part of this candidate review row.": "That EPG channel is not part of this candidate review row.",
     "The \"From\" email address for outgoing emails. Defaults to no-reply@m3u-editor.dev.": "The \"From\" email address for outgoing emails. Defaults to no-reply@m3u-editor.dev.",
     "The \"tvg-shift\" attribute is used in your generated M3U playlist to shift the EPG (Electronic Program Guide) time for specific channels by a certain number of hours. This allows for adjusting the EPG data for individual channels rather than applying a global shift.": "The \"tvg-shift\" attribute is used in your generated M3U playlist to shift the EPG (Electronic Program Guide) time for specific channels by a certain number of hours. This allows for adjusting the EPG data for individual channels rather than applying a global shift.",
+    "The :attribute cannot contain spaces or the characters / \\ ? # % because it is embedded in stream URLs.": "The :attribute cannot contain spaces or the characters / \\ ? # % because it is embedded in stream URLs.",
     "The AED profile has been assigned to the selected channels.": "The AED profile has been assigned to the selected channels.",
     "The AED profile has been removed from the selected channels.": "The AED profile has been removed from the selected channels.",
     "The AI provider to use for the Copilot assistant.": "The AI provider to use for the Copilot assistant.",

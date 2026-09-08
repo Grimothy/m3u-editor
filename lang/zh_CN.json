@@ -4612,6 +4612,7 @@
     "That EPG channel is not part of this candidate review row.": "该 EPG 频道不是此候选项审查行的一部分。",
     "The \"From\" email address for outgoing emails. Defaults to no-reply@m3u-editor.dev.": "外发电子邮件的“发件人”地址。默认为 no-reply@m3u-editor.dev。",
     "The \"tvg-shift\" attribute is used in your generated M3U playlist to shift the EPG (Electronic Program Guide) time for specific channels by a certain number of hours. This allows for adjusting the EPG data for individual channels rather than applying a global shift.": "“tvg-shift”属性用于在生成的 M3U 播放列表中将特定频道的 EPG（电子节目指南）时间移动一定的小时数。这允许调整各个频道的 EPG 数据，而不是应用全局偏移。",
+    "The :attribute cannot contain spaces or the characters / \\ ? # % because it is embedded in stream URLs.": ":attribute 不能包含空格或字符 / \\ ? # %，因为它会被嵌入到流媒体 URL 中。",
     "The AED profile has been assigned to the selected channels.": "The AED profile has been assigned to the selected channels.",
     "The AED profile has been removed from the selected channels.": "The AED profile has been removed from the selected channels.",
     "The AI provider to use for the Copilot assistant.": "用于 AI 助手的提供商。",

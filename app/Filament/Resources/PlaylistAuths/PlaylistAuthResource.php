@@ -16,6 +16,7 @@ use App\Models\PlaylistAlias;
 use App\Models\PlaylistAuth;
 use App\Models\StreamProfile;
 use App\Pivots\PlaylistAuthPivot;
+use App\Rules\UrlSafeCredential;
 use App\Services\DateFormatService;
 use App\Traits\HasUserFiltering;
 use EslamRedaDiv\FilamentCopilot\Contracts\CopilotResource;
@@ -338,6 +339,7 @@ class PlaylistAuthResource extends Resource implements CopilotResource
                                     return [
                                         Rule::unique('playlist_auths', 'username')->ignore($record?->id),
                                         Rule::unique('playlist_aliases', 'username'),
+                                        new UrlSafeCredential,
                                     ];
                                 })
                                 ->columnSpan(1),
@@ -345,6 +347,7 @@ class PlaylistAuthResource extends Resource implements CopilotResource
                                 ->label(__('Password'))
                                 ->password()
                                 ->required()
+                                ->rules([new UrlSafeCredential])
                                 ->revealable()
                                 ->suffixAction(GeneratePasswordAction::make())
                                 ->columnSpan(1),
