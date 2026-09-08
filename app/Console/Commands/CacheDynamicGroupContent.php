@@ -2,12 +2,9 @@
 
 namespace App\Console\Commands;
 
-use App\Enums\CachedContentFileStatus;
-use App\Jobs\DownloadCachedContentFile;
-use App\Models\CachedContentFile;
 use App\Models\DynamicGroup;
 use App\Models\Playlist;
-use App\Services\PlaylistUrlService;
+use App\Services\DynamicGroupCacheDispatchService;
 use App\Settings\GeneralSettings;
 use Cron\CronExpression;
 use Illuminate\Console\Command;
@@ -20,16 +17,28 @@ use Illuminate\Support\Facades\Log;
  *  - Playlists without any cache_enabled rule
  *  - Content already completed in CachedContentFile (dedup)
  *  - Content with a Failed row in cooldown
- *  - cache_content_selection='select' (no picker UI yet, deferred to Phase 3)
+ *  - cache_content_selection='select' (no picker UI yet, deferred to Phase 4)
  *
  * Run on a tight Laravel schedule (every 2 min via routes/console.php); the
  * command itself checks the user-configurable cron string via CronExpression::isDue().
+ *
+ * Dedup, fingerprint, dispatch, and quality resolution are owned by
+ * DynamicGroupCacheDispatchService so the playback-time lazy trigger
+ * (Phase 3 — `XtreamStreamController`) shares the same implementation.
+ * This command retains only the scheduled-dispatch-specific orchestration:
+ * the cron gate, the cursor-over-playlists loop, and the recency-window
+ * filter (`cache_content_selection === 'recent'`).
  */
 class CacheDynamicGroupContent extends Command
 {
     protected $signature = 'app:cache-dynamic-group-content';
 
     protected $description = 'Walk every playlist\'s Dynamic Group cache rules and dispatch DownloadCachedContentFile jobs for eligible content';
+
+    public function __construct(protected DynamicGroupCacheDispatchService $dispatchService)
+    {
+        parent::__construct();
+    }
 
     public function handle(GeneralSettings $settings): int
     {
@@ -74,7 +83,7 @@ class CacheDynamicGroupContent extends Command
 
                     $selection = $rule['cache_content_selection'] ?? 'all';
                     if ($selection === 'select') {
-                        Log::debug("CacheDynamicGroupContent: rule '{$rule['name']}' uses cache_content_selection='select' which is no-op until Phase 3 — skipping");
+                        Log::debug("CacheDynamicGroupContent: rule '{$rule['name']}' uses cache_content_selection='select' which is no-op until Phase 4 — skipping");
 
                         continue;
                     }
@@ -92,6 +101,11 @@ class CacheDynamicGroupContent extends Command
     /**
      * For one cache-enabled rule, iterate the rule's materialized DynamicGroup
      * row(s) and dispatch a DownloadCachedContentFile job for each eligible item.
+     *
+     * The recency filter (`cache_content_selection === 'recent'`) is
+     * scheduled-dispatch-specific — the playback-time lazy trigger does
+     * not apply it (the user is explicitly watching the content, so
+     * "within X days" doesn't apply).
      */
     private function dispatchForRule(Playlist $playlist, array $rule): void
     {
@@ -110,143 +124,59 @@ class CacheDynamicGroupContent extends Command
         foreach ($groups as $group) {
             if ($group->type === 'vod') {
                 foreach ($group->channels as $channel) {
-                    $this->maybeDispatchForChannel($playlist, $group, $channel, $rule, $selection, $days);
+                    if ($selection === 'recent'
+                        && ! $this->isWithinRecentWindow(
+                            $channel->info['release_date'] ?? null,
+                            $days,
+                            "channel {$channel->id}"
+                        )) {
+                        continue;
+                    }
+                    $this->dispatchService->dispatchForChannel($playlist, $group, $channel, $rule);
                 }
             } elseif ($group->type === 'series') {
                 foreach ($group->series as $series) {
                     foreach ($series->episodes as $episode) {
-                        $this->maybeDispatchForEpisode($playlist, $group, $series, $episode, $rule, $selection, $days);
+                        if ($selection === 'recent') {
+                            // Episode: try aio_air_date (real datetime) then fall back to info JSON.
+                            // Series: release_date lives in info JSON (no top-level column, intentionally not cast).
+                            $release = $episode->aio_air_date?->toDateString()
+                                ?? ($episode->info['release_date'] ?? null)
+                                ?? ($series->info['release_date'] ?? null);
+                            if (! $this->isWithinRecentWindow($release, $days, "episode {$episode->id}")) {
+                                continue;
+                            }
+                        }
+                        $this->dispatchService->dispatchForEpisode($playlist, $group, $episode, $rule);
                     }
                 }
             }
         }
     }
 
-    private function maybeDispatchForChannel(Playlist $playlist, DynamicGroup $group, $channel, array $rule, string $selection, int $days): void
+    /**
+     * True when `$releaseDate` parses and falls within the last `$days` days.
+     * Returns false for null / unparseable — the recency filter is opt-in via
+     * `cache_content_selection === 'recent'`, and a missing release date for
+     * a "recent only" rule means "exclude" (no evidence it actually aired
+     * within the window).
+     */
+    private function isWithinRecentWindow(?string $releaseDate, int $days, string $contextLabel): bool
     {
-        if ($selection === 'recent') {
-            // release_date lives in the info JSON column on Channel (not a top-level column).
-            $release = $channel->info['release_date'] ?? null;
-            if ($release && ! $this->withinDays($release, $days)) {
-                return;
-            }
+        if (! $releaseDate) {
+            return false;
         }
 
-        $tmdbId = $channel->tmdb_id !== null ? (string) $channel->tmdb_id : null;
-        $quality = $this->resolveQuality($rule);
-
-        $fingerprint = CachedContentFile::fingerprintFor([
-            'content_type' => 'movie',
-            'tmdb_id' => $tmdbId,
-            'quality' => $quality,
-        ]);
-
-        if ($this->shouldSkip($fingerprint)) {
-            return;
-        }
-
-        $url = PlaylistUrlService::getChannelUrl($channel, $playlist);
-        if (! $url) {
-            return;
-        }
-
-        $this->dispatchJob($group, 'movie', $tmdbId, null, null, null, $quality, $url);
-    }
-
-    private function maybeDispatchForEpisode(Playlist $playlist, DynamicGroup $group, $series, $episode, array $rule, string $selection, int $days): void
-    {
-        if ($selection === 'recent') {
-            // Episode: try aio_air_date (real datetime) then fall back to info JSON.
-            // Series: release_date lives in info JSON (no top-level column, intentionally not cast).
-            $release = $episode->aio_air_date?->toDateString()
-                ?? ($episode->info['release_date'] ?? null)
-                ?? ($series->info['release_date'] ?? null);
-            if ($release && ! $this->withinDays($release, $days)) {
-                return;
-            }
-        }
-
-        $tmdbId = $series->tmdb_id !== null ? (string) $series->tmdb_id : null;
-        $quality = $this->resolveQuality($rule);
-
-        $fingerprint = CachedContentFile::fingerprintFor([
-            'content_type' => 'episode',
-            'tmdb_id' => $tmdbId,
-            'season_number' => $episode->season,
-            'episode_number' => $episode->episode_number, // accessor returns (int) episode_num
-            'quality' => $quality,
-        ]);
-
-        if ($this->shouldSkip($fingerprint)) {
-            return;
-        }
-
-        $url = PlaylistUrlService::getEpisodeUrl($episode, $playlist);
-        if (! $url) {
-            return;
-        }
-
-        $this->dispatchJob($group, 'episode', $tmdbId, null, $episode->season, $episode->episode_number, $quality, $url);
-    }
-
-    private function resolveQuality(array $rule): ?string
-    {
-        return $rule['cache_prefer_quality_keyword'] ?? null;
-    }
-
-    private function withinDays(string $releaseDate, int $days): bool
-    {
         try {
             $release = new \DateTimeImmutable($releaseDate);
         } catch (\Exception) {
+            Log::debug("CacheDynamicGroupContent: unparseable release_date '{$releaseDate}' for {$contextLabel}");
+
             return false;
         }
 
         $cutoff = new \DateTimeImmutable("-{$days} days");
 
         return $release >= $cutoff;
-    }
-
-    /**
-     * Returns true if we should NOT dispatch — already completed, or
-     * failed within its cooldown window.
-     */
-    private function shouldSkip(string $fingerprint): bool
-    {
-        $existing = CachedContentFile::where('content_fingerprint', $fingerprint)->first();
-        if (! $existing) {
-            return false;
-        }
-
-        if ($existing->status === CachedContentFileStatus::Completed) {
-            return true; // cross-playlist dedup
-        }
-
-        if ($existing->status === CachedContentFileStatus::Failed) {
-            // Cooldown: short (retry_cooldown_minutes) for low failure_count,
-            // long (failure_cooldown_hours) once we cross 3 failures.
-            $settings = app(GeneralSettings::class);
-            $cooldownSeconds = (int) $existing->failure_count < 3
-                ? ((int) $settings->dynamic_group_cache_retry_cooldown_minutes * 60)
-                : ((int) $settings->dynamic_group_cache_failure_cooldown_hours * 3600);
-
-            return $existing->last_failed_at && $existing->last_failed_at->addSeconds($cooldownSeconds)->isFuture();
-        }
-
-        return false; // Pending or Downloading — proceed (no harm, job handles concurrency)
-    }
-
-    private function dispatchJob(DynamicGroup $group, string $contentType, ?string $tmdbId, ?string $tvdbId, ?int $seasonNumber, ?int $episodeNumber, ?string $quality, string $url): void
-    {
-        DownloadCachedContentFile::dispatch(
-            $group,
-            $contentType,
-            $tmdbId,
-            $tvdbId,
-            $seasonNumber,
-            $episodeNumber,
-            $quality,
-            $url,
-        )->onQueue('dynamic-group-cache');
     }
 }
