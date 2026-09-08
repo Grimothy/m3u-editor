@@ -369,6 +369,7 @@ class AdminPanelProvider extends PanelProvider
                 'live/*/*/*/*',
                 'movie/*/*/*',
                 'series/*/*/*/*',
+                'dvr/*/*/*',
             ]);
         if ($settings['navigation_position'] === 'top') {
             $adminPanel->topNavigation();
