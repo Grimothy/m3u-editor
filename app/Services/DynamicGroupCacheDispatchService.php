@@ -112,8 +112,13 @@ class DynamicGroupCacheDispatchService
      * — that is a scheduled-dispatch-only concern. At lazy-trigger time the
      * user is explicitly watching this content, so "within X days" doesn't
      * apply to "the user is watching it right now."
+     *
+     * Returns true if a DownloadCachedContentFile job was actually queued,
+     * false if skipped (already completed / failed-in-cooldown / no URL).
+     * Callers use this for accurate "dispatched N" reporting from group-
+     * scoped manual dispatches.
      */
-    public function dispatchForChannel(Playlist $playlist, DynamicGroup $group, Channel $channel, array $rule): void
+    public function dispatchForChannel(Playlist $playlist, DynamicGroup $group, Channel $channel, array $rule): bool
     {
         $tmdbId = $channel->tmdb_id !== null ? (string) $channel->tmdb_id : null;
         $quality = $this->resolveQuality($rule);
@@ -125,23 +130,26 @@ class DynamicGroupCacheDispatchService
         ]);
 
         if ($this->shouldSkip($fingerprint)) {
-            return;
+            return false;
         }
 
         $url = PlaylistUrlService::getChannelUrl($channel, $playlist);
         if (! $url) {
-            return;
+            return false;
         }
 
-        $this->dispatchJob($group, 'movie', $tmdbId, null, null, null, $quality, $url);
+        return $this->dispatchJob($group, 'movie', $tmdbId, null, null, null, $quality, $url);
     }
 
     /**
      * Same as dispatchForChannel but for Episode content. Uses the *series'*
      * tmdb_id (matches Phase 2's `CacheDynamicGroupContent::maybeDispatchForEpisode`
      * convention so a fingerprint built here matches what's already cached).
+     *
+     * Returns true if a DownloadCachedContentFile job was actually queued
+     * (see dispatchForChannel() docblock).
      */
-    public function dispatchForEpisode(Playlist $playlist, DynamicGroup $group, Episode $episode, array $rule): void
+    public function dispatchForEpisode(Playlist $playlist, DynamicGroup $group, Episode $episode, array $rule): bool
     {
         $series = $episode->series;
         $tmdbId = ($series && $series->tmdb_id !== null) ? (string) $series->tmdb_id : null;
@@ -156,15 +164,15 @@ class DynamicGroupCacheDispatchService
         ]);
 
         if ($this->shouldSkip($fingerprint)) {
-            return;
+            return false;
         }
 
         $url = PlaylistUrlService::getEpisodeUrl($episode, $playlist);
         if (! $url) {
-            return;
+            return false;
         }
 
-        $this->dispatchJob($group, 'episode', $tmdbId, null, $episode->season, $episode->episode_number, $quality, $url);
+        return $this->dispatchJob($group, 'episode', $tmdbId, null, $episode->season, $episode->episode_number, $quality, $url);
     }
 
     /**
@@ -279,7 +287,7 @@ class DynamicGroupCacheDispatchService
         ?int $episodeNumber,
         ?string $quality,
         string $url,
-    ): void {
+    ): bool {
         DownloadCachedContentFile::dispatch(
             $group,
             $contentType,
@@ -290,5 +298,66 @@ class DynamicGroupCacheDispatchService
             $quality,
             $url,
         )->onQueue('dynamic-group-cache');
+
+        return true;
+    }
+
+    /**
+     * Dispatch DownloadCachedContentFile jobs for every eligible channel
+     * (vod) or episode (series) in one DynamicGroup. Bypasses the cron
+     * gate + recency filter used by the scheduled `CacheDynamicGroupContent`
+     * command — this is the manual-trigger path, useful for one-off kicks
+     * from the Edit Group page or test harnesses.
+     *
+     * Same skip-cooldown / fingerprint / url-resolve checks as the
+     * scheduled path apply (shouldSkip), so re-runs on a group where
+     * everything is already Completed will return dispatched=0 instead of
+     * burning dispatch slots.
+     *
+     * @return array{dispatched: int, cache_enabled: bool, reason: ?string}
+     *                                                                      dispatched: count of DownloadCachedContentFile jobs actually queued
+     *                                                                      cache_enabled: whether the rule resolved for this group has cache_enabled=true
+     *                                                                      reason: human-readable explanation when dispatched=0 (cache disabled,
+     *                                                                      no rule, no playlist, etc.)
+     */
+    public function dispatchForGroup(DynamicGroup $group): array
+    {
+        $playlist = $group->playlist;
+        if (! $playlist) {
+            return ['dispatched' => 0, 'cache_enabled' => false, 'reason' => 'Group has no playlist.'];
+        }
+
+        $rule = $this->resolveRuleForGroup($group);
+        if ($rule === null) {
+            return ['dispatched' => 0, 'cache_enabled' => false, 'reason' => 'No cache rule for this group.'];
+        }
+
+        if (! ($rule['cache_enabled'] ?? false)) {
+            return ['dispatched' => 0, 'cache_enabled' => false, 'reason' => 'Cache is not enabled for this group (check the rule in Preferences > Dynamic Groups).'];
+        }
+
+        $dispatched = 0;
+
+        if ($group->type === 'vod') {
+            foreach ($group->channels as $channel) {
+                if ($this->dispatchForChannel($playlist, $group, $channel, $rule)) {
+                    $dispatched++;
+                }
+            }
+        } elseif ($group->type === 'series') {
+            foreach ($group->series as $series) {
+                foreach ($series->episodes as $episode) {
+                    if ($this->dispatchForEpisode($playlist, $group, $episode, $rule)) {
+                        $dispatched++;
+                    }
+                }
+            }
+        }
+
+        return [
+            'dispatched' => $dispatched,
+            'cache_enabled' => true,
+            'reason' => $dispatched === 0 ? 'All eligible content is already cached or in cooldown.' : null,
+        ];
     }
 }

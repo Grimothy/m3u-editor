@@ -8,9 +8,12 @@ use App\Filament\Resources\Categories\CategoryResource;
 use App\Jobs\ProcessM3uImportSeriesEpisodes;
 use App\Jobs\SyncSeriesStrmFiles;
 use App\Models\Category;
+use App\Models\DynamicGroup;
+use App\Services\DynamicGroupCacheDispatchService;
 use App\Services\GenreGroupReclassifyService;
 use App\Services\PlaylistService;
 use App\Services\TmdbService;
+use App\Settings\GeneralSettings;
 use Filament\Actions\Action;
 use Filament\Actions\ActionGroup;
 use Filament\Forms\Components\Select;
@@ -159,6 +162,65 @@ class EditCategory extends EditRecord
                     ->modalIcon('heroicon-o-document-arrow-down')
                     ->modalDescription(__('Sync category series .strm files now? This will generate .strm files for the enabled series at the path set for the series.'))
                     ->modalSubmitActionLabel(__('Yes, sync now')),
+
+                Action::make('cache_now')
+                    ->label(__('Cache Now'))
+                    ->icon('heroicon-o-cloud-arrow-down')
+                    ->color('info')
+                    ->requiresConfirmation()
+                    ->modalIcon('heroicon-o-cloud-arrow-down')
+                    ->modalDescription(__('Queue downloads for this category\'s episodes now? Existing cached files are reused via fingerprint dedup; new jobs appear in the Dynamic Group Cache Activity widget below.'))
+                    ->modalSubmitActionLabel(__('Yes, cache now'))
+                    ->action(function (Category $record): void {
+                        $settings = app(GeneralSettings::class);
+                        if (! $settings->enable_dynamic_group_cache) {
+                            Notification::make()
+                                ->warning()
+                                ->title(__('Dynamic Group Caching is disabled'))
+                                ->body(__('Enable it in Preferences → Dynamic Groups before queueing cache downloads.'))
+                                ->duration(10000)
+                                ->send();
+
+                            return;
+                        }
+
+                        $dynamicGroup = DynamicGroup::where('playlist_id', $record->playlist_id)
+                            ->where('name', $record->name)
+                            ->first();
+
+                        if (! $dynamicGroup) {
+                            Notification::make()
+                                ->warning()
+                                ->title(__('No DynamicGroup row for this category'))
+                                ->body(__('The cache scheduler will materialize one on its next run; in the meantime, run ').'`php artisan app:cache-dynamic-group-content` to force it.')
+                                ->duration(10000)
+                                ->send();
+
+                            return;
+                        }
+
+                        $result = app(DynamicGroupCacheDispatchService::class)->dispatchForGroup($dynamicGroup);
+
+                        if ($result['dispatched'] > 0) {
+                            $count = $result['dispatched'];
+                            $title = $count === 1
+                                ? __('Dispatched 1 cache job.')
+                                : __('Dispatched :count cache jobs.', ['count' => $count]);
+                            Notification::make()
+                                ->success()
+                                ->title($title)
+                                ->body(__('Track progress in the Dynamic Group Cache Activity widget below.'))
+                                ->duration(10000)
+                                ->send();
+                        } else {
+                            Notification::make()
+                                ->warning()
+                                ->title(__('No cache jobs queued'))
+                                ->body($result['reason'] ?? __('Nothing eligible to cache.'))
+                                ->duration(10000)
+                                ->send();
+                        }
+                    }),
                 Action::make('enable')
                     ->label(__('Enable category series'))
                     ->action(function ($record): void {

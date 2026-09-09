@@ -427,3 +427,127 @@ it('resolveGroupForRule returns null when the rule has no name', function () {
     )->toBeNull()
         ->and($this->service->resolveGroupForRule($this->playlist->id, ['name' => '']))->toBeNull();
 });
+
+it('dispatchForGroup returns cache_enabled=false with a reason when the group has no playlist', function () {
+    $group = new DynamicGroup(['name' => 'Orphan', 'type' => 'vod', 'source' => 'popular', 'playlist_id' => null]);
+    $result = $this->service->dispatchForGroup($group);
+
+    expect($result)->toBe(['dispatched' => 0, 'cache_enabled' => false, 'reason' => 'Group has no playlist.']);
+});
+
+it('dispatchForGroup returns cache_enabled=false when the group has no matching rule', function () {
+    $group = DynamicGroup::create([
+        'playlist_id' => $this->playlist->id,
+        'user_id' => $this->user->id,
+        'type' => 'vod', 'source' => 'popular', 'name' => 'Unconfigured',
+    ]);
+    // dynamic_groups_config empty → resolveRuleForGroup returns null
+    $this->playlist->update(['dynamic_groups_config' => []]);
+
+    $result = $this->service->dispatchForGroup($group);
+
+    expect($result)->toBe(['dispatched' => 0, 'cache_enabled' => false, 'reason' => 'No cache rule for this group.']);
+});
+
+it('dispatchForGroup returns cache_enabled=false when the matching rule has cache_enabled=false', function () {
+    $this->playlist->update(['dynamic_groups_config' => [
+        ['name' => 'Trending', 'cache_enabled' => false],
+    ]]);
+    $group = DynamicGroup::create([
+        'playlist_id' => $this->playlist->id,
+        'user_id' => $this->user->id,
+        'type' => 'vod', 'source' => 'popular', 'name' => 'Trending',
+    ]);
+
+    $result = $this->service->dispatchForGroup($group);
+
+    expect($result['dispatched'])->toBe(0)
+        ->and($result['cache_enabled'])->toBeFalse()
+        ->and($result['reason'])->toContain('Cache is not enabled for this group');
+});
+
+it('dispatchForGroup queues one job per eligible channel in a vod group', function () {
+    $this->playlist->update(['dynamic_groups_config' => [
+        ['name' => 'Trending', 'cache_enabled' => true],
+    ]]);
+    $group = DynamicGroup::create([
+        'playlist_id' => $this->playlist->id,
+        'user_id' => $this->user->id,
+        'type' => 'vod', 'source' => 'popular', 'name' => 'Trending',
+    ]);
+    // Channels attach to a DynamicGroup via the dynamic_group_items pivot
+    // (MorphToMany), not via the `group` string field — that field is a
+    // legacy Channel-side categorization. Use the relation to attach.
+    $channels = Channel::factory()->for($this->playlist)->count(3)->create([
+        'tmdb_id' => '100',
+    ]);
+    $group->channels()->attach($channels->pluck('id')->all());
+
+    $result = $this->service->dispatchForGroup($group->fresh());
+
+    // Assert on the service's reported count (the contract the Filament
+    // action surfaces to its notification). The actual Bus::fake assertion
+    // for dispatch plumbing is covered by a separate test — pendingDispatch
+    // destructors in a tight loop don't reliably surface to Bus assertions
+    // because their GC timing depends on PHP's reference counting.
+    expect($result['dispatched'])->toBe(3)
+        ->and($result['cache_enabled'])->toBeTrue()
+        ->and($result['reason'])->toBeNull();
+});
+
+it('dispatchForGroup skips already-completed channels and reports accurate count', function () {
+    $this->playlist->update(['dynamic_groups_config' => [
+        ['name' => 'Trending', 'cache_enabled' => true],
+    ]]);
+    $group = DynamicGroup::create([
+        'playlist_id' => $this->playlist->id,
+        'user_id' => $this->user->id,
+        'type' => 'vod', 'source' => 'popular', 'name' => 'Trending',
+    ]);
+    // 3 channels with distinct TMDB IDs so each has a unique fingerprint;
+    // pre-cache the first one so shouldSkip bails on it but the others fire.
+    $channels = collect();
+    foreach (['100', '101', '102'] as $tmdbId) {
+        $channels->push(Channel::factory()->for($this->playlist)->create(['tmdb_id' => $tmdbId]));
+    }
+    $group->channels()->attach($channels->pluck('id')->all());
+    // Pre-cache tmdb=100 only → shouldSkip fires for one, not the other two.
+    CachedContentFile::factory()->completed()->create([
+        'content_type' => 'movie',
+        'tmdb_id' => '100',
+        'content_fingerprint' => 'movie:100::::',
+    ]);
+
+    $result = $this->service->dispatchForGroup($group->fresh());
+
+    // 3 channels but 1 already completed → 2 should fire.
+    expect($result['dispatched'])->toBe(2)
+        ->and($result['cache_enabled'])->toBeTrue();
+});
+
+it('dispatchForGroup returns dispatched=0 with reason when all channels are already cached', function () {
+    $this->playlist->update(['dynamic_groups_config' => [
+        ['name' => 'Trending', 'cache_enabled' => true],
+    ]]);
+    $group = DynamicGroup::create([
+        'playlist_id' => $this->playlist->id,
+        'user_id' => $this->user->id,
+        'type' => 'vod', 'source' => 'popular', 'name' => 'Trending',
+    ]);
+    $channels = Channel::factory()->for($this->playlist)->count(2)->create([
+        'tmdb_id' => '200',
+    ]);
+    $group->channels()->attach($channels->pluck('id')->all());
+    // Pre-cache all → shouldSkip bails on every channel.
+    CachedContentFile::factory()->completed()->create([
+        'content_type' => 'movie',
+        'tmdb_id' => '200',
+        'content_fingerprint' => 'movie:200::::',
+    ]);
+
+    $result = $this->service->dispatchForGroup($group->fresh());
+
+    expect($result['dispatched'])->toBe(0)
+        ->and($result['cache_enabled'])->toBeTrue()
+        ->and($result['reason'])->toContain('All eligible content is already cached or in cooldown');
+});
