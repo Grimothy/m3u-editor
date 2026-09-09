@@ -7,6 +7,7 @@ use App\Models\DynamicGroup;
 use App\Models\Playlist;
 use App\Models\User;
 use App\Services\M3uProxyService;
+use App\Services\TmdbService;
 use App\Settings\GeneralSettings;
 use Illuminate\Foundation\Testing\RefreshDatabase;
 use Illuminate\Support\Facades\Bus;
@@ -21,6 +22,24 @@ beforeEach(function () {
     // against any unexpected outbound request during the test.
     Bus::fake();
     Http::preventStrayRequests();
+
+    // Job calls TmdbService::getMovieDetails / getTvSeriesDetails / getSeasonDetails
+    // right after row creation to populate the title column. Http::preventStrayRequests()
+    // would block those calls and fail every test, so wire a permissive default
+    // fake for all TMDB endpoints. Tests that care about the title assert against
+    // these responses explicitly.
+    Http::fake([
+        '*api.themoviedb.org/3/movie/*' => Http::response(['title' => 'Test Movie', 'original_title' => 'Test Movie'], 200),
+        '*api.themoviedb.org/3/tv/*/season/*' => Http::response([
+            'season_number' => 1,
+            'name' => 'Season 1',
+            'episodes' => [
+                ['episode_number' => 1, 'id' => 1001, 'name' => 'Pilot'],
+                ['episode_number' => 2, 'id' => 1002, 'name' => 'Cat\'s in the Bag'],
+            ],
+        ], 200),
+        '*api.themoviedb.org/3/tv/*' => Http::response(['name' => 'Test Series', 'original_name' => 'Test Series'], 200),
+    ]);
 
     $this->user = User::factory()->create();
     $this->playlist = Playlist::factory()->for($this->user)->create([
@@ -58,6 +77,7 @@ it('creates a Completed row on successful download', function () {
     ))->handle(
         app(GeneralSettings::class),
         app(M3uProxyService::class),
+        app(TmdbService::class),
     );
 
     $files = CachedContentFile::all();
@@ -97,6 +117,7 @@ it('creates a Failed row and increments failure_count on HTTP 404', function () 
     ))->handle(
         app(GeneralSettings::class),
         app(M3uProxyService::class),
+        app(TmdbService::class),
     );
 
     $file = CachedContentFile::first();
@@ -131,6 +152,7 @@ it('attaches to existing Completed row (cross-group dedup) and skips download', 
     ))->handle(
         app(GeneralSettings::class),
         app(M3uProxyService::class),
+        app(TmdbService::class),
     );
 
     expect(CachedContentFile::count())->toBe(1); // no new row
@@ -166,6 +188,7 @@ it('attaches to winner row on unique-fingerprint race', function () {
     ))->handle(
         app(GeneralSettings::class),
         app(M3uProxyService::class),
+        app(TmdbService::class),
     );
 
     expect(CachedContentFile::count())->toBe(1)
@@ -193,6 +216,7 @@ it('does not gate concurrency when Downloading count is below max', function () 
     ))->handle(
         app(GeneralSettings::class),
         app(M3uProxyService::class),
+        app(TmdbService::class),
     );
 
     // At 1 Downloading + this new one = 2, exactly at max but not OVER — runs fine.
@@ -220,6 +244,7 @@ it('skips connection pre-flight when available_streams is 0 (disabled)', functio
     ))->handle(
         app(GeneralSettings::class),
         app(M3uProxyService::class),
+        app(TmdbService::class),
     );
 
     expect(CachedContentFile::first()->status)->toBe(CachedContentFileStatus::Completed);
@@ -254,6 +279,7 @@ it('reclaims a Failed row past cooldown and re-attempts the download', function 
     ))->handle(
         app(GeneralSettings::class),
         app(M3uProxyService::class),
+        app(TmdbService::class),
     );
 
     // Same row id, now Completed; file_path written; failure_count reset
@@ -299,6 +325,7 @@ it('reclaims a stale Downloading row and re-attempts the download', function () 
     ))->handle(
         app(GeneralSettings::class),
         app(M3uProxyService::class),
+        app(TmdbService::class),
     );
 
     // Same row reclaimed — no new row created, file written
@@ -338,6 +365,7 @@ it('does not reclaim a fresh Downloading row (other worker plausibly active)', f
     ))->handle(
         app(GeneralSettings::class),
         app(M3uProxyService::class),
+        app(TmdbService::class),
     );
 
     // No re-download attempted — fresh Downloading row stays as-is, group attached
@@ -375,6 +403,7 @@ it('resets failure_count to 0 when reclaiming a Failed row', function () {
     ))->handle(
         app(GeneralSettings::class),
         app(M3uProxyService::class),
+        app(TmdbService::class),
     );
 
     // failure_count reset to 0 so the dispatcher's tier logic starts fresh
@@ -420,6 +449,7 @@ it('streams the downloaded temp file into storage instead of loading it into mem
     ))->handle(
         app(GeneralSettings::class),
         app(M3uProxyService::class),
+        app(TmdbService::class),
     );
 
     expect(CachedContentFile::first()->status)->toBe(CachedContentFileStatus::Completed);
@@ -559,6 +589,7 @@ it('stamps final bytes_downloaded from Storage::size() in Step 8 even if the las
     ))->handle(
         app(GeneralSettings::class),
         app(M3uProxyService::class),
+        app(TmdbService::class),
     );
 
     $file = CachedContentFile::first();

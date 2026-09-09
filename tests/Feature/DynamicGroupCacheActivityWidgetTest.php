@@ -234,3 +234,71 @@ it('getProgressAttributes() paints an amber bar when last_progress_at is older t
     expect($attrs['style'])->toContain('bg-amber-400')
         ->and($attrs['style'])->not->toContain('bg-primary-500');
 });
+
+it('renders the resolved TMDB title as the content label when present', function () {
+    // Movie with title populated by DownloadCachedContentFile::resolveAndStoreTitle()
+    // — the widget should prefer that over the legacy "type: tmdb N" fallback.
+    $movie = CachedContentFile::factory()->completed()->create([
+        'content_type' => 'movie', 'tmdb_id' => '550', 'title' => 'Fight Club',
+    ]);
+
+    Livewire::test(DynamicGroupCacheActivityWidget::class)
+        ->assertOk()
+        ->loadTable()
+        ->assertSee('Fight Club')
+        ->assertDontSee('movie: tmdb 550');
+});
+
+it('falls back to the legacy "type: tmdb N" label when title is null', function () {
+    // Pre-migration rows or rows whose TMDB lookup failed: still need a readable
+    // identity. The "movie: tmdb 550" / "episode: tmdb 1399 S1E3" shape lives on.
+    CachedContentFile::factory()->completed()->create([
+        'content_type' => 'movie', 'tmdb_id' => '550', 'title' => null,
+    ]);
+    CachedContentFile::factory()->completed()->create([
+        'content_type' => 'episode', 'tmdb_id' => '1399',
+        'season_number' => 1, 'episode_number' => 3, 'title' => null,
+    ]);
+
+    Livewire::test(DynamicGroupCacheActivityWidget::class)
+        ->assertOk()
+        ->loadTable()
+        ->assertSee('movie: tmdb 550')
+        ->assertSee('episode: tmdb 1399 S1E3');
+});
+
+it('renders series episode titles with the em-dash separator', function () {
+    // The TMDB-format title for an episode: "Breaking Bad — Pilot"
+    $episode = CachedContentFile::factory()->downloading(
+        downloaded: 100_000_000, expected: 1_000_000_000,
+    )->create([
+        'content_type' => 'episode', 'tmdb_id' => '1396',
+        'season_number' => 1, 'episode_number' => 1,
+        'title' => 'Breaking Bad — Pilot',
+    ]);
+
+    Livewire::test(DynamicGroupCacheActivityWidget::class)
+        ->assertOk()
+        ->loadTable()
+        ->assertSee('Breaking Bad — Pilot');
+});
+
+it('getContentLabel() returns the title field directly when set, regardless of content_type', function () {
+    // Direct unit-style coverage — table render only shows one row's label at a time
+    // so this protects the fallback ordering: title first, legacy shape second.
+    $movie = CachedContentFile::factory()->completed()->create([
+        'content_type' => 'movie', 'tmdb_id' => '550', 'title' => 'Fight Club',
+    ]);
+    expect(DynamicGroupCacheActivityWidget::getContentLabel($movie))->toBe('Fight Club');
+
+    $legacy = CachedContentFile::factory()->completed()->create([
+        'content_type' => 'movie', 'tmdb_id' => '999', 'title' => null,
+    ]);
+    expect(DynamicGroupCacheActivityWidget::getContentLabel($legacy))->toBe('movie: tmdb 999');
+
+    $legacyEpisode = CachedContentFile::factory()->completed()->create([
+        'content_type' => 'episode', 'tmdb_id' => '1399',
+        'season_number' => 1, 'episode_number' => 3, 'title' => null,
+    ]);
+    expect(DynamicGroupCacheActivityWidget::getContentLabel($legacyEpisode))->toBe('episode: tmdb 1399 S1E3');
+});

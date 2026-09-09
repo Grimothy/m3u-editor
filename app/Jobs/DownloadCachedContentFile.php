@@ -6,6 +6,7 @@ use App\Enums\CachedContentFileStatus;
 use App\Models\CachedContentFile;
 use App\Models\DynamicGroup;
 use App\Services\M3uProxyService;
+use App\Services\TmdbService;
 use App\Settings\GeneralSettings;
 use App\Traits\ProviderRequestDelay;
 use GuzzleHttp\RequestOptions;
@@ -57,7 +58,7 @@ class DownloadCachedContentFile implements ShouldQueue
         $this->onQueue('dynamic-group-cache');
     }
 
-    public function handle(GeneralSettings $settings, M3uProxyService $proxy): void
+    public function handle(GeneralSettings $settings, M3uProxyService $proxy, TmdbService $tmdb): void
     {
         // Step 1: Compute fingerprint
         $fingerprint = CachedContentFile::fingerprintFor([
@@ -178,6 +179,13 @@ class DownloadCachedContentFile implements ShouldQueue
             }
         }
 
+        // Step 5.5: Resolve and persist the TMDB title for the activity widget.
+        // - Synchronous (one TMDB HTTP call, ~200ms with built-in rate limiting)
+        //   because we already know tmdb_id here and the row is freshly created.
+        // - Wrapped in a try/catch — TMDB outage must NEVER block a download.
+        // - Skipped if title is already populated (reclaim / Step 2 dedup path).
+        $this->resolveAndStoreTitle($file, $tmdb);
+
         // Step 6: Download to temp file (mirrors ProcessM3uImport.php:460-470 shape)
         // and stream byte-level progress into the row for the Filament progress UI.
         // - PROGRESS callback fires from Guzzle on each chunk (~every 64KB); we throttle
@@ -290,6 +298,90 @@ class DownloadCachedContentFile implements ShouldQueue
         } catch (\Throwable $e) {
             Log::error("DownloadCachedContentFile: markFailed itself failed for {$file->content_fingerprint}: {$e->getMessage()}");
         }
+    }
+
+    /**
+     * Resolve the TMDB title for a freshly-created cached_content_files row and
+     * persist it on the row itself. The Filament activity widget reads this
+     * column to show "Wicked" instead of "movie: tmdb 860508".
+     *
+     * Format (matches the widget's getContentLabel() expectations):
+     *   movie        → "Wicked"
+     *   episode      → "Breaking Bad — I.F.T." (em-dash, space, episode name)
+     *                 or "Breaking Bad S01E03" if the season has no episode title
+     *   series       → "Breaking Bad"
+     *
+     * Failures are swallowed + logged at warning level — TMDB being down or
+     * rate-limited must never block a download. The widget falls back to the
+     * "type: tmdb N" label when title is null.
+     */
+    private function resolveAndStoreTitle(CachedContentFile $file, TmdbService $tmdb): void
+    {
+        if ($file->title !== null) {
+            return;
+        }
+
+        $tmdbId = $file->tmdb_id !== null ? (int) $file->tmdb_id : 0;
+        if ($tmdbId <= 0) {
+            return;
+        }
+
+        $title = null;
+        try {
+            $title = match ($file->content_type) {
+                'movie' => $this->resolveMovieTitle($tmdb, $tmdbId),
+                'episode' => $this->resolveEpisodeTitle($tmdb, $tmdbId, $file),
+                'series' => $this->resolveSeriesTitle($tmdb, $tmdbId),
+                default => null,
+            };
+        } catch (\Throwable $e) {
+            Log::warning("DownloadCachedContentFile: TMDB title lookup failed for fingerprint={$file->content_fingerprint}: ".$e->getMessage());
+
+            return;
+        }
+
+        if ($title !== null && $title !== '') {
+            $file->update(['title' => $title]);
+        }
+    }
+
+    private function resolveMovieTitle(TmdbService $tmdb, int $tmdbId): ?string
+    {
+        $details = $tmdb->getMovieDetails($tmdbId);
+
+        return $details['title'] ?? $details['original_title'] ?? null;
+    }
+
+    private function resolveSeriesTitle(TmdbService $tmdb, int $tmdbId): ?string
+    {
+        $details = $tmdb->getTvSeriesDetails($tmdbId);
+
+        return $details['name'] ?? $details['original_name'] ?? null;
+    }
+
+    private function resolveEpisodeTitle(TmdbService $tmdb, int $tmdbId, CachedContentFile $file): ?string
+    {
+        $seriesName = $this->resolveSeriesTitle($tmdb, $tmdbId);
+        if ($seriesName === null) {
+            return null;
+        }
+
+        $seasonNumber = $file->season_number;
+        $episodeNumber = $file->episode_number;
+        if ($seasonNumber === null || $episodeNumber === null) {
+            return $seriesName;
+        }
+
+        $season = $tmdb->getSeasonDetails($tmdbId, $seasonNumber);
+        $episodes = $season['episodes'] ?? [];
+        $episode = collect($episodes)->firstWhere('episode_number', $episodeNumber);
+        $episodeName = is_array($episode) ? ($episode['name'] ?? null) : null;
+
+        if ($episodeName !== null && $episodeName !== '') {
+            return "{$seriesName} — {$episodeName}";
+        }
+
+        return sprintf('%s S%02dE%02d', $seriesName, $seasonNumber, $episodeNumber);
     }
 
     /**

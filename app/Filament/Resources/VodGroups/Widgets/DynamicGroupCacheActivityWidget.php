@@ -28,11 +28,11 @@ use Filament\Widgets\TableWidget as BaseWidget;
  * `dynamic_group_cache_max_concurrent_downloads` (default 2) active
  * downloads, the polling cost is trivial.
  *
- * The `getContentLabel()` helper centralizes the content-identity label
- * ("type: tmdb 123") so the column stays readable without an expensive
- * cross-table lookup. Resolving TMDB titles would require either a
- * cached lookup or a join — neither worth the cost for a "what just
- * happened" feed.
+ * The `getContentLabel()` helper prefers the resolved TMDB title
+ * ("Wicked", "Breaking Bad — I.F.T.") populated by
+ * DownloadCachedContentFile::resolveAndStoreTitle() at row-create time.
+ * Falls back to the legacy "type: tmdb N S##E##" shape for rows that
+ * pre-date the title column or whose TMDB lookup failed.
  *
  * The `getProgressLabel()` helper formats the progress cell. Reuses
  * `ArrQueueMonitor::formatBytes()` so the unit display matches the
@@ -105,12 +105,20 @@ class DynamicGroupCacheActivityWidget extends BaseWidget
     }
 
     /**
-     * Human-readable content identity. Cheap (no DB lookups, no TMDB
-     * calls) — meant for an at-a-glance "what just happened" feed, not
-     * a fully-resolved title display.
+     * Human-readable content identity.
+     *
+     * Prefers the resolved title when present (populated by
+     * DownloadCachedContentFile::resolveAndStoreTitle() from TMDB). Falls
+     * back to the legacy "type: tmdb N S##E##" shape for rows that
+     * pre-date the title column or whose TMDB lookup failed — keeps the
+     * widget informative even with partial coverage.
      */
     public static function getContentLabel(CachedContentFile $record): string
     {
+        if ($record->title !== null && $record->title !== '') {
+            return $record->title;
+        }
+
         $tmdb = $record->tmdb_id ?: '?';
         $season = $record->season_number !== null ? " S{$record->season_number}" : '';
         $episode = $record->episode_number !== null ? "E{$record->episode_number}" : '';

@@ -19,6 +19,7 @@ use Illuminate\Support\Str;
  * @property int|null $episode_number
  * @property string|null $quality
  * @property string $content_fingerprint
+ * @property string|null $title
  * @property string|null $disk
  * @property string|null $file_path
  * @property int|null $file_size_bytes
@@ -44,6 +45,7 @@ class CachedContentFile extends Model
         'episode_number',
         'quality',
         'content_fingerprint',
+        'title',
         'disk',
         'file_path',
         'file_size_bytes',
