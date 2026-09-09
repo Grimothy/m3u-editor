@@ -17,6 +17,7 @@ use Illuminate\Foundation\Bus\Dispatchable;
 use Illuminate\Http\Client\ConnectionException;
 use Illuminate\Http\Client\RequestException;
 use Illuminate\Queue\InteractsWithQueue;
+use Illuminate\Support\Carbon;
 use Illuminate\Support\Facades\Http;
 use Illuminate\Support\Facades\Log;
 use Illuminate\Support\Facades\Storage;
@@ -37,6 +38,8 @@ class DownloadCachedContentFile implements ShouldQueue
     private ?int $bytesExpected = null;
 
     private int $lastReportedBytes = 0;
+
+    private ?Carbon $lastProgressAt = null;
 
     private int $progressThreshold = 1_048_576; // 1 MiB
 
@@ -459,14 +462,43 @@ class DownloadCachedContentFile implements ShouldQueue
         }
 
         try {
+            $now = now();
+            $bytesPerSecond = $this->computeBytesPerSecond($downloaded, $now);
             $this->progressFile->update([
                 'bytes_downloaded' => $downloaded,
                 'bytes_expected' => $this->bytesExpected,
-                'last_progress_at' => now(),
+                'bytes_per_second' => $bytesPerSecond,
+                'last_progress_at' => $now,
             ]);
             $this->lastReportedBytes = $downloaded;
+            $this->lastProgressAt = $now;
         } catch (\Throwable) {
             // Swallow: progress is advisory; don't kill the download.
         }
+    }
+
+    /**
+     * Compute the bytes/second rate for the just-completed progress window
+     * (typically ~1 MiB, gated by the throttle boundary in
+     * reportDownloadProgress()).
+     *
+     * Returns null on the first event (no previous timestamp to subtract from)
+     * or when the rate collapses to zero (defensive — would otherwise produce
+     * an "infinite" ETA). No EMA / smoothing — the widget polls every 5s and
+     * Guzzle's PROGRESS only fires on throttle-boundary crossings, so
+     * consecutive samples are already comparable in scale.
+     */
+    private function computeBytesPerSecond(int $downloaded, Carbon $now): ?int
+    {
+        if ($this->lastProgressAt === null || $this->lastReportedBytes <= 0) {
+            return null;
+        }
+
+        $bytesDelta = $downloaded - $this->lastReportedBytes;
+        $seconds = max(1, (int) round($this->lastProgressAt->diffInSeconds($now, absolute: true)));
+
+        $rate = (int) round($bytesDelta / $seconds);
+
+        return $rate > 0 ? $rate : null;
     }
 }

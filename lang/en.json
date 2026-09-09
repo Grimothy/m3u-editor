@@ -3177,6 +3177,7 @@
     "Download this release": "Download this release",
     "Downloaded": "Downloaded",
     "Downloading": "Downloading",
+    "ETA": "ETA",
     "Drag the groups into the order you want them delivered to the client.": "Drag the groups into the order you want them delivered to the client.",
     "Drag to re-order the assigned EPG sources. The first will be given the highest priority.": "Drag to re-order the assigned EPG sources. The first will be given the highest priority.",
     "Drag to reorder priority attributes. First attribute has highest priority. Leave empty for default order.": "Drag to reorder priority attributes. First attribute has highest priority. Leave empty for default order.",

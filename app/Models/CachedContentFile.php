@@ -25,6 +25,7 @@ use Illuminate\Support\Str;
  * @property int|null $file_size_bytes
  * @property int|null $bytes_downloaded
  * @property int|null $bytes_expected
+ * @property int|null $bytes_per_second
  * @property Carbon|null $last_progress_at
  * @property CachedContentFileStatus $status
  * @property Carbon|null $last_verified_at
@@ -51,6 +52,7 @@ class CachedContentFile extends Model
         'file_size_bytes',
         'bytes_downloaded',
         'bytes_expected',
+        'bytes_per_second',
         'last_progress_at',
         'status',
         'last_verified_at',
@@ -72,6 +74,7 @@ class CachedContentFile extends Model
             'file_size_bytes' => 'integer',
             'bytes_downloaded' => 'integer',
             'bytes_expected' => 'integer',
+            'bytes_per_second' => 'integer',
             'season_number' => 'integer',
             'episode_number' => 'integer',
         ];

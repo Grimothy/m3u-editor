@@ -6,9 +6,13 @@ use App\Enums\CachedContentFileStatus;
 use App\Livewire\ArrQueueMonitor;
 use App\Models\CachedContentFile;
 use App\Settings\GeneralSettings;
+use Filament\Actions\Action;
 use Filament\Tables\Columns\TextColumn;
+use Filament\Tables\Enums\RecordActionsPosition;
 use Filament\Tables\Table;
 use Filament\Widgets\TableWidget as BaseWidget;
+use Illuminate\Support\Facades\Log;
+use Illuminate\Support\Facades\Storage;
 
 /**
  * Footer widget on `ListVodGroups` AND `ListCategories` (registered from
@@ -84,6 +88,11 @@ class DynamicGroupCacheActivityWidget extends BaseWidget
                     ->getStateUsing(fn (CachedContentFile $record): ?string => self::getProgressLabel($record))
                     ->extraAttributes(fn (CachedContentFile $record): array => self::getProgressAttributes($record))
                     ->width('180px'),
+                TextColumn::make('eta')
+                    ->label(__('ETA'))
+                    ->placeholder('—')
+                    ->getStateUsing(fn (CachedContentFile $record): ?string => self::getEtaLabel($record))
+                    ->width('90px'),
                 TextColumn::make('failure_count')
                     ->label(__('Failures'))
                     ->numeric()
@@ -93,6 +102,44 @@ class DynamicGroupCacheActivityWidget extends BaseWidget
                     ->label(__('Last Activity'))
                     ->sortable(),
             ])
+            ->recordActions([
+                Action::make('deleteCache')
+                    ->icon('heroicon-o-trash')
+                    ->color('danger')
+                    ->button()
+                    ->size('sm')
+                    ->hiddenLabel()
+                    ->tooltip(__('Delete cache'))
+                    ->requiresConfirmation()
+                    ->modalHeading(__('Delete this cached file?'))
+                    ->modalDescription(function (CachedContentFile $record): string {
+                        $otherGroups = max(0, $record->dynamicGroups()->count() - 1);
+                        $sharedWarning = $otherGroups > 0
+                            ? sprintf(
+                                ' This file is also cached for %d other %s — deleting removes it from Storage entirely and those groups will fall back to the live source until a new download completes.',
+                                $otherGroups,
+                                $otherGroups === 1 ? 'group' : 'groups',
+                            )
+                            : '';
+
+                        return __('This removes the file from Storage and deletes the cached_content_files row. Playback will fall back to the live source.').$sharedWarning;
+                    })
+                    ->modalSubmitActionLabel(__('Delete'))
+                    ->before(function (CachedContentFile $record): void {
+                        if (! empty($record->file_path)) {
+                            try {
+                                Storage::disk($record->resolveStorageDisk())->delete($record->file_path);
+                            } catch (\Throwable $e) {
+                                Log::warning("DynamicGroupCacheActivityWidget: failed to delete storage file {$record->file_path} for cache entry {$record->id}: {$e->getMessage()}");
+                            }
+                        }
+                    })
+                    ->action(function (CachedContentFile $record): void {
+                        // Standard $record->delete() cascades the pivot FKs and is
+                        // enough on its own — the Storage file is gone by ->before().
+                        $record->delete();
+                    }),
+            ], RecordActionsPosition::BeforeCells)
             ->emptyStateHeading(__('No cache activity yet'))
             ->emptyStateDescription(__('Cached content downloads will appear here once the scheduler runs.'))
             ->emptyStateIcon('heroicon-o-clock')
@@ -197,5 +244,82 @@ class DynamicGroupCacheActivityWidget extends BaseWidget
                 $percent,
             ),
         ];
+    }
+
+    /**
+     * Formatted ETA cell for the widget's ETA column. Returns null when:
+     *   - status is not Downloading (placeholder "—" shows)
+     *   - bytes_expected is null (chunked transfer, no total known)
+     *   - bytes_per_second is null/0 (first window hasn't completed yet)
+     *   - last_progress_at is older than 30s (treat as stalled; consistent
+     *     with the amber "stalled" indicator on the Progress bar)
+     *
+     * Format:
+     *   < 60s       → "42s"
+     *   < 60m       → "2m 14s"
+     *   < 24h       → "1h 23m"
+     *   >= 24h      → "1d 2h"
+     *   <= 0 sec    → null (no point showing "ETA done")
+     */
+    public static function getEtaLabel(CachedContentFile $record): ?string
+    {
+        if ($record->status !== CachedContentFileStatus::Downloading) {
+            return null;
+        }
+
+        $rate = (int) ($record->bytes_per_second ?? 0);
+        $expected = $record->bytes_expected !== null ? (int) $record->bytes_expected : null;
+        $downloaded = (int) ($record->bytes_downloaded ?? 0);
+
+        if ($rate <= 0 || $expected === null || $expected <= $downloaded) {
+            return null;
+        }
+
+        // Stalled — last update too old, rate is no longer reliable.
+        if ($record->last_progress_at !== null
+            && $record->last_progress_at->lt(now()->subSeconds(30))) {
+            return null;
+        }
+
+        $remaining = $expected - $downloaded;
+        $etaSeconds = (int) ceil($remaining / $rate);
+
+        if ($etaSeconds <= 0) {
+            return null;
+        }
+
+        return self::formatEtaSeconds($etaSeconds);
+    }
+
+    /**
+     * Format a duration in seconds as a compact human-readable ETA label.
+     *
+     * Examples: 42 → "42s", 134 → "2m 14s", 4980 → "1h 23m",
+     * 90061 → "1d 1h".
+     */
+    public static function formatEtaSeconds(int $seconds): string
+    {
+        if ($seconds < 60) {
+            return $seconds.'s';
+        }
+
+        if ($seconds < 3600) {
+            $m = intdiv($seconds, 60);
+            $s = $seconds % 60;
+
+            return $s > 0 ? "{$m}m {$s}s" : "{$m}m";
+        }
+
+        if ($seconds < 86400) {
+            $h = intdiv($seconds, 3600);
+            $m = intdiv($seconds % 3600, 60);
+
+            return $m > 0 ? "{$h}h {$m}m" : "{$h}h";
+        }
+
+        $d = intdiv($seconds, 86400);
+        $h = intdiv($seconds % 86400, 3600);
+
+        return $h > 0 ? "{$d}d {$h}h" : "{$d}d";
     }
 }
