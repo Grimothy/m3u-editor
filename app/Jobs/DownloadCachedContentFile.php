@@ -8,6 +8,7 @@ use App\Models\DynamicGroup;
 use App\Services\M3uProxyService;
 use App\Settings\GeneralSettings;
 use App\Traits\ProviderRequestDelay;
+use GuzzleHttp\RequestOptions;
 use Illuminate\Bus\Queueable;
 use Illuminate\Contracts\Queue\ShouldQueue;
 use Illuminate\Database\QueryException;
@@ -26,6 +27,19 @@ class DownloadCachedContentFile implements ShouldQueue
     public int $tries = 1; // explicit in-handle retry; no queue-level retry (mirrors ProcessM3uImport.php:49)
 
     public int $timeout;
+
+    /**
+     * Transient per-job progress state (set in handle(), read by reportDownloadProgress()
+     * and Step 8). Horizon workers fork per job, so instance state is safe across the
+     * lifetime of a single handle() invocation.
+     */
+    private ?int $bytesExpected = null;
+
+    private int $lastReportedBytes = 0;
+
+    private int $progressThreshold = 1_048_576; // 1 MiB
+
+    private ?CachedContentFile $progressFile = null;
 
     public function __construct(
         public DynamicGroup $dynamicGroup,
@@ -165,13 +179,32 @@ class DownloadCachedContentFile implements ShouldQueue
         }
 
         // Step 6: Download to temp file (mirrors ProcessM3uImport.php:460-470 shape)
+        // and stream byte-level progress into the row for the Filament progress UI.
+        // - PROGRESS callback fires from Guzzle on each chunk (~every 64KB); we throttle
+        //   to a 1 MiB boundary so the DB doesn't get hammered on multi-GB downloads.
+        // - bytes_expected is set from Content-Length the first time Guzzle reports a
+        //   positive downloadSize (-1 means chunked / no Content-Length header).
+        // - Progress-write failures are swallowed — a missed update must NEVER abort the
+        //   actual download. Step 8 stamps the final tally from Storage::size().
         $tempPath = tempnam(sys_get_temp_dir(), 'dgc_');
+        $this->progressFile = $file;
+        $this->bytesExpected = null;
+        $this->lastReportedBytes = 0;
+
         try {
-            $this->withProviderThrottling(fn () => Http::withUserAgent('m3u-editor/'.config('app.version', '0.0'))
-                ->sink($tempPath)
-                ->timeout($this->timeout)
-                ->throw()
-                ->get($this->sourceUrl));
+            $this->withProviderThrottling(function () use ($tempPath) {
+                Http::withUserAgent('m3u-editor/'.config('app.version', '0.0'))
+                    ->withOptions([
+                        RequestOptions::PROGRESS => fn ($downloadSize, $downloaded) => $this->reportDownloadProgress(
+                            (int) $downloadSize,
+                            (int) $downloaded,
+                        ),
+                    ])
+                    ->sink($tempPath)
+                    ->timeout($this->timeout)
+                    ->throw()
+                    ->get($this->sourceUrl);
+            });
         } catch (RequestException|ConnectionException $e) {
             $this->markFailed($file, $e->getMessage());
             @unlink($tempPath);
@@ -195,18 +228,31 @@ class DownloadCachedContentFile implements ShouldQueue
         $path = 'cache/'.$fingerprint.'.'.$extension;
 
         try {
-            // Write the downloaded temp file into storage (Storage::move() expects
-            // both args relative to disk root — we have an absolute temp path).
-            Storage::disk($disk)->put($path, file_get_contents($tempPath));
+            // Stream the temp file into storage instead of loading it into memory.
+            // Multi-GB downloads would OOM against file_get_contents() (we hit a 2GB
+            // worker memory_limit exactly this way). Laravel's put() accepts a
+            // resource and writes it via Flysystem's writeStream, which streams in
+            // chunks — peak memory stays bounded regardless of file size.
+            $stream = fopen($tempPath, 'rb');
+            if ($stream === false) {
+                throw new \RuntimeException("Unable to open temp file for reading: {$tempPath}");
+            }
+            Storage::disk($disk)->put($path, $stream);
         } catch (\Throwable $e) {
             $this->markFailed($file, 'Failed to move downloaded file: '.$e->getMessage());
             @unlink($tempPath);
 
             return;
+        } finally {
+            if (isset($stream) && is_resource($stream)) {
+                fclose($stream);
+            }
         }
 
         // Step 8: Mark Completed. Use Storage::size() rather than filesize(Storage::path())
-        // so the call works against Storage::fake() in tests.
+        // so the call works against Storage::fake() in tests. bytes_downloaded is also
+        // re-stamped from Storage::size() in case the last 1-MiB progress window never
+        // crossed the throttle boundary (e.g. a 200 KB clip).
         $size = null;
         try {
             $size = Storage::disk($disk)->size($path) ?: null;
@@ -218,6 +264,9 @@ class DownloadCachedContentFile implements ShouldQueue
             'disk' => $disk,
             'file_path' => $path,
             'file_size_bytes' => $size,
+            'bytes_downloaded' => $size,
+            'bytes_expected' => $this->bytesExpected,
+            'last_progress_at' => now(),
             'last_verified_at' => now(),
         ]);
         $file->dynamicGroups()->syncWithoutDetaching([$this->dynamicGroup->id]);
@@ -240,6 +289,48 @@ class DownloadCachedContentFile implements ShouldQueue
             Log::warning("DownloadCachedContentFile: fingerprint={$file->content_fingerprint} failed: {$reason}");
         } catch (\Throwable $e) {
             Log::error("DownloadCachedContentFile: markFailed itself failed for {$file->content_fingerprint}: {$e->getMessage()}");
+        }
+    }
+
+    /**
+     * Throttled progress reporter wired to Guzzle's PROGRESS event.
+     *
+     * Called from the RequestOptions::PROGRESS closure during Step 6's HTTP GET.
+     * Guzzle fires this on every chunk (every ~64 KB on average); we update the DB
+     * only when the 1 MiB threshold is crossed (plus once more on the final chunk).
+     * bytes_expected is captured from the first non-zero downloadSize Guzzle reports
+     * (it sends -1 for chunked / no-Content-Length responses).
+     *
+     * Update failures are swallowed — progress is advisory; a missed write must NEVER
+     * abort the actual download.
+     */
+    public function reportDownloadProgress(int $downloadSize, int $downloaded): void
+    {
+        if ($this->progressFile === null) {
+            return;
+        }
+
+        if ($downloadSize > 0 && $this->bytesExpected === null) {
+            $this->bytesExpected = $downloadSize;
+        }
+
+        if ($downloaded <= 0) {
+            return;
+        }
+
+        if (($downloaded - $this->lastReportedBytes) < $this->progressThreshold) {
+            return;
+        }
+
+        try {
+            $this->progressFile->update([
+                'bytes_downloaded' => $downloaded,
+                'bytes_expected' => $this->bytesExpected,
+                'last_progress_at' => now(),
+            ]);
+            $this->lastReportedBytes = $downloaded;
+        } catch (\Throwable) {
+            // Swallow: progress is advisory; don't kill the download.
         }
     }
 }

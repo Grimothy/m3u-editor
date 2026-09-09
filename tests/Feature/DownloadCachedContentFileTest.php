@@ -380,3 +380,190 @@ it('resets failure_count to 0 when reclaiming a Failed row', function () {
     // failure_count reset to 0 so the dispatcher's tier logic starts fresh
     expect((int) $existing->fresh()->failure_count)->toBe(0);
 });
+
+it('streams the downloaded temp file into storage instead of loading it into memory', function () {
+    // Regression test for the 2GB OOM at Step 7 (DownloadCachedContentFile.php:200).
+    // Old code: file_get_contents($tempPath) loaded the whole file into RAM — multi-GB
+    // downloads blew the worker's memory_limit. Fix: open as a stream and pass the
+    // resource to Storage::put(), which Flysystem writes via writeStream in chunks.
+    // Asserting the second arg to Storage::put() is a resource catches any future
+    // regression back to file_get_contents() / Storage::putFileAs() with the wrong
+    // argument shape.
+    config()->set('filesystems.default', 'local');
+
+    $capturedContents = null;
+    $diskMock = Mockery::mock();
+    $diskMock->shouldReceive('put')
+        ->once()
+        ->andReturnUsing(function ($path, $contents) use (&$capturedContents) {
+            $capturedContents = $contents;
+
+            return true;
+        });
+    $diskMock->shouldReceive('size')->andReturn(50);
+
+    Storage::shouldReceive('disk')
+        ->with('local')
+        ->andReturn($diskMock);
+
+    Http::fake(['*' => Http::response('FAKE_CONTENT', 200)]);
+
+    (new DownloadCachedContentFile(
+        dynamicGroup: $this->group,
+        contentType: 'movie',
+        tmdbId: '550',
+        tvdbId: null,
+        seasonNumber: null,
+        episodeNumber: null,
+        quality: '1080p',
+        sourceUrl: 'https://provider.example/movie.mp4',
+    ))->handle(
+        app(GeneralSettings::class),
+        app(M3uProxyService::class),
+    );
+
+    expect(CachedContentFile::first()->status)->toBe(CachedContentFileStatus::Completed);
+    expect($capturedContents)->toBeResource();
+});
+
+it('throttles progress updates to the 1 MiB boundary', function () {
+    // Direct unit-style test of reportDownloadProgress(). A multi-GB download can
+    // fire the Guzzle PROGRESS callback thousands of times — we update the DB only
+    // on 1 MiB boundaries to avoid hammering Postgres with UPDATEs on every chunk.
+    $file = CachedContentFile::create([
+        'content_type' => 'movie',
+        'tmdb_id' => '1',
+        'content_fingerprint' => 'movie:1::::',
+        'status' => CachedContentFileStatus::Downloading,
+    ]);
+
+    $job = new DownloadCachedContentFile(
+        dynamicGroup: $this->group,
+        contentType: 'movie',
+        tmdbId: '1',
+        tvdbId: null,
+        seasonNumber: null,
+        episodeNumber: null,
+        quality: null,
+        sourceUrl: 'https://provider.example/movie.mp4',
+    );
+
+    // Reflectively set transient progress state (private properties).
+    $reflection = new ReflectionObject($job);
+    $reflection->getProperty('progressFile')->setValue($job, $file);
+    $reflection->getProperty('progressThreshold')->setValue($job, 1_048_576); // 1 MiB
+
+    // First call: downloadSize > 0, downloaded = 1 MiB → should update + capture bytes_expected.
+    $job->reportDownloadProgress(10_485_760, 1_048_576);
+    $file->refresh();
+    expect($file->bytes_downloaded)->toBe(1_048_576)
+        ->and($file->bytes_expected)->toBe(10_485_760)
+        ->and($file->last_progress_at)->not->toBeNull();
+
+    // Sub-threshold call: downloaded = 1 MiB + 64 KB (less than 1 MiB boundary) → no update.
+    $file->update(['bytes_downloaded' => 999]); // sentinel — proves no overwrite happened
+    $job->reportDownloadProgress(10_485_760, 1_048_576 + 65_536);
+    expect($file->fresh()->bytes_downloaded)->toBe(999);
+
+    // Crossing the 1 MiB boundary again: 2 MiB total → updates.
+    $job->reportDownloadProgress(10_485_760, 2_097_152);
+    expect($file->fresh()->bytes_downloaded)->toBe(2_097_152);
+});
+
+it('captures bytes_expected from the first non-zero Content-Length and ignores -1 (chunked)', function () {
+    // Guzzle sends downloadSize = -1 for chunked transfer / no Content-Length.
+    // bytes_expected must stay null in that case — never default to 0 or -1.
+    $file = CachedContentFile::create([
+        'content_type' => 'movie',
+        'tmdb_id' => '2',
+        'content_fingerprint' => 'movie:2::::',
+        'status' => CachedContentFileStatus::Downloading,
+    ]);
+
+    $job = new DownloadCachedContentFile(
+        dynamicGroup: $this->group,
+        contentType: 'movie',
+        tmdbId: '2',
+        tvdbId: null,
+        seasonNumber: null,
+        episodeNumber: null,
+        quality: null,
+        sourceUrl: 'https://provider.example/movie.mp4',
+    );
+
+    $reflection = new ReflectionObject($job);
+    $reflection->getProperty('progressFile')->setValue($job, $file);
+    $reflection->getProperty('progressThreshold')->setValue($job, 1);
+
+    // First event: downloadSize = -1 (unknown) → bytes_expected stays null.
+    $job->reportDownloadProgress(-1, 1_048_576);
+    expect($file->fresh()->bytes_expected)->toBeNull();
+
+    // Then a real Content-Length shows up later → bytes_expected is captured.
+    $job->reportDownloadProgress(50_000_000, 2_097_152);
+    expect($file->fresh()->bytes_expected)->toBe(50_000_000);
+});
+
+it('swallows progress-update failures without aborting the download', function () {
+    // A failed UPDATE on the progress row (e.g. row was deleted by retention mid-download)
+    // must not bubble up and crash the HTTP transfer. Call reportDownloadProgress with
+    // a progressFile that no longer exists in the DB → the catch (Throwable) absorbs it.
+    $job = new DownloadCachedContentFile(
+        dynamicGroup: $this->group,
+        contentType: 'movie',
+        tmdbId: '3',
+        tvdbId: null,
+        seasonNumber: null,
+        episodeNumber: null,
+        quality: null,
+        sourceUrl: 'https://provider.example/movie.mp4',
+    );
+
+    $file = CachedContentFile::create([
+        'content_type' => 'movie',
+        'tmdb_id' => '3',
+        'content_fingerprint' => 'movie:3::::',
+        'status' => CachedContentFileStatus::Downloading,
+    ]);
+    $file->delete();
+
+    $reflection = new ReflectionObject($job);
+    $reflection->getProperty('progressFile')->setValue($job, $file);
+    $reflection->getProperty('progressThreshold')->setValue($job, 1);
+
+    // Must NOT throw — even though $file->update() will fail with ModelNotFoundException.
+    expect(fn () => $job->reportDownloadProgress(100, 100))->not->toThrow(Throwable::class);
+});
+
+it('stamps final bytes_downloaded from Storage::size() in Step 8 even if the last progress window was under the threshold', function () {
+    // Edge case: a small clip (say 200 KB) never crosses the 1 MiB throttle boundary,
+    // so the only progress update is the final one from Step 8 — which uses
+    // Storage::size() instead of the progress callback. Verify the final row state
+    // has bytes_downloaded == file_size_bytes regardless.
+    Storage::fake('local');
+    config()->set('filesystems.default', 'local');
+
+    Http::fake([
+        'provider.example/small.mp4' => Http::response(str_repeat('x', 200), 200, ['Content-Length' => '200']),
+    ]);
+
+    (new DownloadCachedContentFile(
+        dynamicGroup: $this->group,
+        contentType: 'movie',
+        tmdbId: '4',
+        tvdbId: null,
+        seasonNumber: null,
+        episodeNumber: null,
+        quality: null,
+        sourceUrl: 'https://provider.example/small.mp4',
+    ))->handle(
+        app(GeneralSettings::class),
+        app(M3uProxyService::class),
+    );
+
+    $file = CachedContentFile::first();
+    expect($file->status)->toBe(CachedContentFileStatus::Completed)
+        ->and($file->bytes_downloaded)->toBe($file->file_size_bytes)
+        ->and($file->file_size_bytes)->toBe(200)
+        ->and($file->last_progress_at)->not->toBeNull();
+});

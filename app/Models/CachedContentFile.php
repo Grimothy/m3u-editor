@@ -22,6 +22,9 @@ use Illuminate\Support\Str;
  * @property string|null $disk
  * @property string|null $file_path
  * @property int|null $file_size_bytes
+ * @property int|null $bytes_downloaded
+ * @property int|null $bytes_expected
+ * @property Carbon|null $last_progress_at
  * @property CachedContentFileStatus $status
  * @property Carbon|null $last_verified_at
  * @property Carbon|null $last_failed_at
@@ -44,6 +47,9 @@ class CachedContentFile extends Model
         'disk',
         'file_path',
         'file_size_bytes',
+        'bytes_downloaded',
+        'bytes_expected',
+        'last_progress_at',
         'status',
         'last_verified_at',
         'last_failed_at',
@@ -60,7 +66,10 @@ class CachedContentFile extends Model
             'failure_count' => 'integer',
             'last_verified_at' => 'datetime',
             'last_failed_at' => 'datetime',
+            'last_progress_at' => 'datetime',
             'file_size_bytes' => 'integer',
+            'bytes_downloaded' => 'integer',
+            'bytes_expected' => 'integer',
             'season_number' => 'integer',
             'episode_number' => 'integer',
         ];
