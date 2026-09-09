@@ -1,5 +1,6 @@
 <?php
 
+use App\Enums\CachedContentFileStatus;
 use App\Models\CachedContentFile;
 use App\Models\Channel;
 use App\Models\DynamicGroup;
@@ -248,4 +249,76 @@ it('does nothing when there are no CachedContentFiles', function () {
     $this->service->runAll();
 
     expect(CachedContentFile::count())->toBe(0);
+});
+
+it('cleanupStorageOrphans() returns an empty array when cache/ has no files', function () {
+    Storage::fake('local');
+    config()->set('filesystems.default', 'local');
+
+    expect($this->service->cleanupStorageOrphans())->toBe([]);
+});
+
+it('cleanupStorageOrphans() reports unreferenced files in cache/ as orphans', function () {
+    Storage::fake('local');
+    config()->set('filesystems.default', 'local');
+
+    // Three files in Storage, two of which are referenced by DB rows.
+    Storage::disk('local')->put('cache/movie:1::::.mp4', 'referenced-1');
+    Storage::disk('local')->put('cache/movie:2::::.mp4', 'orphan');
+    Storage::disk('local')->put('cache/movie:3::::.mp4', 'referenced-2');
+    CachedContentFile::factory()->completed()->create([
+        'content_type' => 'movie', 'tmdb_id' => '1',
+        'file_path' => 'cache/movie:1::::.mp4',
+    ]);
+    CachedContentFile::factory()->completed()->create([
+        'content_type' => 'movie', 'tmdb_id' => '3',
+        'file_path' => 'cache/movie:3::::.mp4',
+    ]);
+
+    $orphans = $this->service->cleanupStorageOrphans();
+
+    expect($orphans)->toBe(['cache/movie:2::::.mp4']);
+    // delete=true by default → orphan file is gone, referenced files remain
+    expect(Storage::disk('local')->exists('cache/movie:2::::.mp4'))->toBeFalse()
+        ->and(Storage::disk('local')->exists('cache/movie:1::::.mp4'))->toBeTrue()
+        ->and(Storage::disk('local')->exists('cache/movie:3::::.mp4'))->toBeTrue();
+});
+
+it('cleanupStorageOrphans(delete: false) reports orphans without removing them', function () {
+    Storage::fake('local');
+    config()->set('filesystems.default', 'local');
+
+    Storage::disk('local')->put('cache/orphan.mp4', 'orphan-data');
+
+    $orphans = $this->service->cleanupStorageOrphans(delete: false);
+
+    expect($orphans)->toBe(['cache/orphan.mp4'])
+        ->and(Storage::disk('local')->exists('cache/orphan.mp4'))->toBeTrue();
+});
+
+it('hardDelete() removes the Storage file even for non-Completed rows that have file_path set', function () {
+    // Defense-in-depth: previously hardDelete() gated Storage::delete on
+    // hasFilePath() (status=Completed && file_path set). If any future code
+    // path leaves file_path set on a Failed/Downloading row, we still want
+    // the file cleaned up. Reflectively call the private hardDelete to
+    // exercise the full path (Storage delete + row delete) without needing
+    // to construct a retention scenario that triggers it organically.
+    Storage::fake('local');
+    config()->set('filesystems.default', 'local');
+
+    Storage::disk('local')->put('cache/movie:1::::.mp4', 'data');
+    $row = CachedContentFile::factory()->failed()->create([
+        'content_type' => 'movie', 'tmdb_id' => '1',
+        'file_path' => 'cache/movie:1::::.mp4',
+    ]);
+    expect($row->status)->not->toBe(CachedContentFileStatus::Completed)
+        ->and(Storage::disk('local')->exists($row->file_path))->toBeTrue();
+
+    $reflection = new ReflectionMethod($this->service, 'hardDelete');
+    $reflection->setAccessible(true);
+    $reflection->invoke($this->service, $row);
+
+    // Both halves: Storage file gone + row deleted.
+    expect(Storage::disk('local')->exists('cache/movie:1::::.mp4'))->toBeFalse()
+        ->and(CachedContentFile::find($row->id))->toBeNull();
 });

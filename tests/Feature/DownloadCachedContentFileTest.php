@@ -565,6 +565,89 @@ it('swallows progress-update failures without aborting the download', function (
     expect(fn () => $job->reportDownloadProgress(100, 100))->not->toThrow(Throwable::class);
 });
 
+it('rollbackStorageWrite() deletes the Storage file and marks the row Failed', function () {
+    // Step 8 can throw (DB connection lost, constraint violation). Without
+    // rollbackStorageWrite() the multi-GB file would be orphaned because the
+    // failed update never set file_path on the row, so hasFilePath() returns
+    // false and the retention service can't find or clean it up.
+    Storage::fake('local');
+    config()->set('filesystems.default', 'local');
+
+    Storage::disk('local')->put('cache/movie:42::::.mp4', 'fake-bytes');
+    $file = CachedContentFile::factory()->downloading()->create([
+        'content_type' => 'movie', 'tmdb_id' => '42',
+        'content_fingerprint' => 'movie:42::::',
+    ]);
+    expect(Storage::disk('local')->exists('cache/movie:42::::.mp4'))->toBeTrue()
+        ->and($file->status)->toBe(CachedContentFileStatus::Downloading);
+
+    $job = new DownloadCachedContentFile(
+        dynamicGroup: $this->group,
+        contentType: 'movie',
+        tmdbId: '42',
+        tvdbId: null,
+        seasonNumber: null,
+        episodeNumber: null,
+        quality: null,
+        sourceUrl: 'https://provider.example/movie.mp4',
+    );
+
+    // Reflectively call the private rollbackStorageWrite() with a simulated cause.
+    $reflection = new ReflectionObject($job);
+    $method = $reflection->getMethod('rollbackStorageWrite');
+    $method->setAccessible(true);
+    $method->invoke($job, 'local', 'cache/movie:42::::.mp4', $file, new RuntimeException('Simulated DB failure'));
+
+    // Storage file is gone — no orphan.
+    expect(Storage::disk('local')->exists('cache/movie:42::::.mp4'))->toBeFalse();
+    // Row is marked Failed so the dispatcher's failure-cooldown governs the retry.
+    expect($file->fresh()->status)->toBe(CachedContentFileStatus::Failed)
+        ->and($file->fresh()->failure_count)->toBeGreaterThan(0);
+});
+
+it('rollbackStorageWrite() does NOT throw if the Storage delete itself fails', function () {
+    // Worst case: Step 7 wrote to Storage, Step 8 update threw, AND the
+    // rollback Storage::delete() also fails (e.g. S3 500). The row must still
+    // be marked Failed — better to have an unrecoverable orphan in logs than
+    // a row stuck in Downloading that retries forever. We log the orphan so
+    // an operator can clean it up manually.
+    Storage::fake('local');
+    config()->set('filesystems.default', 'local');
+
+    // Use a path that Storage::fake's delete() would still work on — to force
+    // a delete failure we wrap Storage in a Mockery double that throws.
+    Storage::disk('local')->put('cache/orphan.mp4', 'data');
+    $file = CachedContentFile::factory()->downloading()->create([
+        'content_type' => 'movie', 'tmdb_id' => '99',
+        'content_fingerprint' => 'movie:99::::',
+    ]);
+
+    $diskMock = Mockery::mock();
+    $diskMock->shouldReceive('delete')->andThrow(new RuntimeException('S3 500'));
+    Storage::shouldReceive('disk')->with('local')->andReturn($diskMock);
+
+    $job = new DownloadCachedContentFile(
+        dynamicGroup: $this->group,
+        contentType: 'movie',
+        tmdbId: '99',
+        tvdbId: null,
+        seasonNumber: null,
+        episodeNumber: null,
+        quality: null,
+        sourceUrl: 'https://provider.example/movie.mp4',
+    );
+
+    $reflection = new ReflectionObject($job);
+    $method = $reflection->getMethod('rollbackStorageWrite');
+    $method->setAccessible(true);
+
+    // Must not throw — the row gets marked Failed either way, and we log the
+    // Storage failure so an operator can clean up manually.
+    expect(fn () => $method->invoke($job, 'local', 'cache/orphan.mp4', $file, new RuntimeException('Step 8 update failed')))
+        ->not->toThrow(Throwable::class);
+    expect($file->fresh()->status)->toBe(CachedContentFileStatus::Failed);
+});
+
 it('stamps final bytes_downloaded from Storage::size() in Step 8 even if the last progress window was under the threshold', function () {
     // Edge case: a small clip (say 200 KB) never crosses the 1 MiB throttle boundary,
     // so the only progress update is the final one from Step 8 — which uses

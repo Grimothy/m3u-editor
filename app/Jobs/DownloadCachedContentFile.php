@@ -261,23 +261,67 @@ class DownloadCachedContentFile implements ShouldQueue
         // so the call works against Storage::fake() in tests. bytes_downloaded is also
         // re-stamped from Storage::size() in case the last 1-MiB progress window never
         // crossed the throttle boundary (e.g. a 200 KB clip).
+        //
+        // The final $file->update() can throw (DB connection lost, constraint
+        // violation, etc). Step 7 already wrote the bytes to Storage, so a thrown
+        // update leaves a multi-GB orphan: file_path stays null on the row, and
+        // DynamicGroupCacheRetentionService::hardDelete() gates Storage cleanup
+        // on hasFilePath() (which checks file_path is set). Roll back via
+        // rollbackStorageWrite() on any Throwable so a future dispatch re-downloads
+        // cleanly instead of leaking the file forever.
         $size = null;
         try {
             $size = Storage::disk($disk)->size($path) ?: null;
         } catch (\Throwable) {
             // file_path no longer exists on disk — leave size null
         }
-        $file->update([
-            'status' => CachedContentFileStatus::Completed,
-            'disk' => $disk,
-            'file_path' => $path,
-            'file_size_bytes' => $size,
-            'bytes_downloaded' => $size,
-            'bytes_expected' => $this->bytesExpected,
-            'last_progress_at' => now(),
-            'last_verified_at' => now(),
-        ]);
+
+        try {
+            $file->update([
+                'status' => CachedContentFileStatus::Completed,
+                'disk' => $disk,
+                'file_path' => $path,
+                'file_size_bytes' => $size,
+                'bytes_downloaded' => $size,
+                'bytes_expected' => $this->bytesExpected,
+                'last_progress_at' => now(),
+                'last_verified_at' => now(),
+            ]);
+        } catch (\Throwable $e) {
+            $this->rollbackStorageWrite($disk, $path, $file, $e);
+            // Temp file was already consumed by Step 7's storage stream — no
+            // unlink needed, but kept the safety net in case Step 7 short-circuited
+            // before reading the whole file.
+            @unlink($tempPath);
+
+            return;
+        }
+
+        // Sync the pivot AFTER the row update succeeded. If syncWithoutDetaching
+        // throws here, the row is still Completed with file_path set, so the
+        // retention service can clean it up later. No Storage leak risk.
         $file->dynamicGroups()->syncWithoutDetaching([$this->dynamicGroup->id]);
+    }
+
+    /**
+     * Roll back a Step 7 storage write when the Step 8 row update fails.
+     *
+     * Deletes the file from Storage (best-effort, logs on failure) and marks
+     * the row Failed so the dispatcher's failure-cooldown logic governs when
+     * the next attempt happens. Without this, the multi-GB file sits in
+     * Storage forever — hasFilePath() returns false (file_path is still null
+     * because the failed update never wrote it), so the retention service
+     * can't find or clean it up.
+     */
+    private function rollbackStorageWrite(?string $disk, string $path, CachedContentFile $file, \Throwable $cause): void
+    {
+        try {
+            Storage::disk($disk)->delete($path);
+        } catch (\Throwable $deleteError) {
+            Log::error("DownloadCachedContentFile: ORPHAN at {$path} after Step 8 update failure — Storage::delete also failed: {$deleteError->getMessage()}");
+        }
+
+        $this->markFailed($file, 'Step 8 update failed (Storage rolled back): '.$cause->getMessage());
     }
 
     /**

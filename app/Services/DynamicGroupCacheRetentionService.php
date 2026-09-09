@@ -226,10 +226,15 @@ class DynamicGroupCacheRetentionService
 
     /**
      * Hard-delete: remove file from disk + the row. Pivot cascade-deletes via FK.
+     *
+     * Cleanup is gated on $file->file_path being set rather than hasFilePath()
+     * (which additionally requires status=Completed). Defense-in-depth: any
+     * future code path that sets file_path on a Failed/Downloading row will
+     * still trigger Storage cleanup here, instead of leaving the file behind.
      */
     private function hardDelete(CachedContentFile $file): void
     {
-        if ($file->hasFilePath()) {
+        if (! empty($file->file_path)) {
             try {
                 Storage::disk($file->resolveStorageDisk())->delete($file->file_path);
             } catch (\Throwable $e) {
@@ -242,5 +247,63 @@ class DynamicGroupCacheRetentionService
         } catch (\Throwable $e) {
             Log::warning("DynamicGroupCacheRetention: failed to delete row {$file->id}: {$e->getMessage()}");
         }
+    }
+
+    /**
+     * Walk the configured cache directory and return paths that are not
+     * referenced by any cached_content_files row. Used by the
+     * `app:cache-dynamic-group-content-cleanup-orphans` command to clean
+     * up orphans that escaped the normal retention lifecycle (e.g. files
+     * written by a Step 7-success / Step 8-failure race before that path
+     * had try/catch protection, or files left over from manual Storage
+     * edits).
+     *
+     * When $delete is true (default), the orphans are deleted from Storage.
+     * Returns the array of orphan paths (deleted-or-listed, depending on $delete).
+     */
+    public function cleanupStorageOrphans(bool $delete = true): array
+    {
+        $disk = Storage::disk(config('filesystems.default'));
+        $cacheDir = $this->cacheDirectory();
+
+        // Flip for O(1) isset() lookup against potentially tens of thousands of paths.
+        $referenced = CachedContentFile::query()
+            ->whereNotNull('file_path')
+            ->pluck('file_path')
+            ->flip();
+
+        $orphans = [];
+        foreach ($disk->files($cacheDir) as $path) {
+            if (! $referenced->has($path)) {
+                $orphans[] = $path;
+            }
+        }
+
+        if (! $delete || $orphans === []) {
+            return $orphans;
+        }
+
+        $deleted = 0;
+        foreach ($orphans as $path) {
+            try {
+                $disk->delete($path);
+                $deleted++;
+            } catch (\Throwable $e) {
+                Log::warning("cleanupStorageOrphans: failed to delete {$path}: {$e->getMessage()}");
+            }
+        }
+
+        Log::info("cleanupStorageOrphans: deleted {$deleted}/".count($orphans)." orphan files in {$cacheDir}");
+
+        return $orphans;
+    }
+
+    /**
+     * Cache directory under the configured default disk where DownloadCachedContentFile
+     * writes its completed files. Centralized so the orphan scan and the job agree.
+     */
+    private function cacheDirectory(): string
+    {
+        return trim((string) config('dynamic_group_cache.path_prefix', 'cache'), '/');
     }
 }
