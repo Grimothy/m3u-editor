@@ -592,7 +592,7 @@ class SortService
         if ($driver === 'mysql' || $driver === 'mariadb') {
             $isNullExpr = "JSON_EXTRACT(info, '$.rating')";
             $valueExpr = "CAST(COALESCE(JSON_UNQUOTE(JSON_EXTRACT(info, '$.rating')), '0') AS DECIMAL(4,2))";
-            DB::statement("UPDATE channels c JOIN (SELECT id, ROW_NUMBER() OVER (ORDER BY {$isNullExpr} IS NULL ASC, {$valueExpr} {$direction}, c.id) AS rn FROM channels WHERE group_id = ?) t ON c.id = t.id SET c.sort = t.rn", [$record->id]);
+            DB::statement("UPDATE channels c JOIN (SELECT id, ROW_NUMBER() OVER (ORDER BY {$isNullExpr} IS NULL ASC, {$valueExpr} {$direction}, id) AS rn FROM channels WHERE group_id = ?) t ON c.id = t.id SET c.sort = t.rn", [$record->id]);
 
             return;
         }
@@ -658,7 +658,7 @@ class SortService
         $valueExpr = "CAST(NULLIF(rating, '') AS DECIMAL)";
 
         if ($driver === 'mysql' || $driver === 'mariadb') {
-            DB::statement("UPDATE series s JOIN (SELECT id, ROW_NUMBER() OVER (ORDER BY {$isNullExpr} IS NULL ASC, {$valueExpr} {$direction}, s.id) AS rn FROM series WHERE category_id = ?) t ON s.id = t.id SET s.sort = t.rn", [$record->id]);
+            DB::statement("UPDATE series s JOIN (SELECT id, ROW_NUMBER() OVER (ORDER BY {$isNullExpr} IS NULL ASC, {$valueExpr} {$direction}, id) AS rn FROM series WHERE category_id = ?) t ON s.id = t.id SET s.sort = t.rn", [$record->id]);
 
             return;
         }
@@ -712,7 +712,7 @@ class SortService
         if ($driver === 'mysql' || $driver === 'mariadb') {
             $isNullExpr = "JSON_EXTRACT(info, '$.rating')";
             $valueExpr = "CAST(COALESCE(JSON_UNQUOTE(JSON_EXTRACT(info, '$.rating')), '0') AS DECIMAL(4,2))";
-            DB::statement("UPDATE channels c JOIN (SELECT id, ROW_NUMBER() OVER (ORDER BY {$isNullExpr} IS NULL ASC, {$valueExpr} {$direction}, c.id) AS rn FROM channels WHERE playlist_id = ? AND is_vod = 1) t ON c.id = t.id SET c.sort = t.rn", [$playlist->id]);
+            DB::statement("UPDATE channels c JOIN (SELECT id, ROW_NUMBER() OVER (ORDER BY {$isNullExpr} IS NULL ASC, {$valueExpr} {$direction}, id) AS rn FROM channels WHERE playlist_id = ? AND is_vod = 1) t ON c.id = t.id SET c.sort = t.rn", [$playlist->id]);
 
             return;
         }
@@ -771,7 +771,7 @@ class SortService
         $valueExpr = "CAST(NULLIF(rating, '') AS DECIMAL)";
 
         if ($driver === 'mysql' || $driver === 'mariadb') {
-            DB::statement("UPDATE series s JOIN (SELECT id, ROW_NUMBER() OVER (ORDER BY {$isNullExpr} IS NULL ASC, {$valueExpr} {$direction}, s.id) AS rn FROM series WHERE playlist_id = ?) t ON s.id = t.id SET s.sort = t.rn", [$playlist->id]);
+            DB::statement("UPDATE series s JOIN (SELECT id, ROW_NUMBER() OVER (ORDER BY {$isNullExpr} IS NULL ASC, {$valueExpr} {$direction}, id) AS rn FROM series WHERE playlist_id = ?) t ON s.id = t.id SET s.sort = t.rn", [$playlist->id]);
 
             return;
         }
