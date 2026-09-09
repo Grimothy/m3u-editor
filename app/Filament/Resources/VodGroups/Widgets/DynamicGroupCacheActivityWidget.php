@@ -103,6 +103,30 @@ class DynamicGroupCacheActivityWidget extends BaseWidget
                     ->sortable(),
             ])
             ->recordActions([
+                Action::make('viewError')
+                    ->label(__('View error'))
+                    ->icon('heroicon-o-exclamation-triangle')
+                    ->color('warning')
+                    ->button()
+                    ->size('sm')
+                    ->hiddenLabel()
+                    ->tooltip(__('Why did this fail?'))
+                    ->visible(fn (CachedContentFile $record): bool => $record->status === CachedContentFileStatus::Failed)
+                    ->modalHeading(__('Download failure'))
+                    ->modalContent(function (CachedContentFile $record) {
+                        $message = $record->last_error_message ?? 'No error message recorded.';
+                        $lastFailedAt = $record->last_failed_at?->toDateTimeString() ?? 'never';
+                        $failures = (int) ($record->failure_count ?? 0);
+
+                        return view('filament.widgets.partials.download-error-modal', [
+                            'message' => $message,
+                            'lastFailedAt' => $lastFailedAt,
+                            'failures' => $failures,
+                        ]);
+                    })
+                    ->modalSubmitAction(false)
+                    ->modalCancelActionLabel(__('Close')),
+
                 Action::make('deleteCache')
                     ->icon('heroicon-o-trash')
                     ->color('danger')

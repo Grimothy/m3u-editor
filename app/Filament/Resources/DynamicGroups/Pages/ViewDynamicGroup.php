@@ -6,8 +6,11 @@ use App\Filament\Resources\Categories\CategoryResource;
 use App\Filament\Resources\DynamicGroups\DynamicGroupResource;
 use App\Filament\Resources\VodGroups\VodGroupResource;
 use App\Models\DynamicGroup;
+use App\Services\DynamicGroupCacheDispatchService;
+use App\Settings\GeneralSettings;
 use Filament\Actions\Action;
 use Filament\Actions\DeleteAction;
+use Filament\Notifications\Notification;
 use Filament\Resources\Pages\ViewRecord;
 
 /**
@@ -60,6 +63,53 @@ class ViewDynamicGroup extends ViewRecord
     protected function getHeaderActions(): array
     {
         return [
+            Action::make('cache_now')
+                ->label(__('Cache Now'))
+                ->icon('heroicon-o-cloud-arrow-down')
+                ->color('info')
+                ->requiresConfirmation()
+                ->modalHeading(__('Cache Now'))
+                ->modalDescription(fn (DynamicGroup $record): string => $record->type === 'series'
+                    ? __('Queue downloads for this category\'s episodes now? Existing cached files are reused via fingerprint dedup; new jobs appear in the Dynamic Group Cache Activity widget.')
+                    : __('Queue downloads for this group\'s content now? Existing cached files are reused via fingerprint dedup; new jobs appear in the Dynamic Group Cache Activity widget.')
+                )
+                ->modalSubmitActionLabel(__('Yes, cache now'))
+                ->action(function (DynamicGroup $record): void {
+                    $settings = app(GeneralSettings::class);
+                    if (! $settings->enable_dynamic_group_cache) {
+                        Notification::make()
+                            ->warning()
+                            ->title(__('Dynamic Group Caching is disabled'))
+                            ->body(__('Enable it in Preferences → Dynamic Groups before queueing cache downloads.'))
+                            ->duration(10000)
+                            ->send();
+
+                        return;
+                    }
+
+                    $result = app(DynamicGroupCacheDispatchService::class)->dispatchForGroup($record);
+
+                    if ($result['dispatched'] > 0) {
+                        $count = $result['dispatched'];
+                        $title = $count === 1
+                            ? __('Dispatched 1 cache job.')
+                            : __('Dispatched :count cache jobs.', ['count' => $count]);
+                        Notification::make()
+                            ->success()
+                            ->title($title)
+                            ->body(__('Track progress in the Dynamic Group Cache Activity widget.'))
+                            ->duration(10000)
+                            ->send();
+                    } else {
+                        Notification::make()
+                            ->warning()
+                            ->title(__('No cache jobs queued'))
+                            ->body($result['reason'] ?? __('Nothing eligible to cache.'))
+                            ->duration(10000)
+                            ->send();
+                    }
+                }),
+
             Action::make('back_to_index')
                 ->label(fn (): string => $this->isVodRecord($this->getRecord()) ? __('Back to Groups') : __('Back to Categories'))
                 ->url(fn (): string => $this->rootIndexUrl($this->getRecord()))

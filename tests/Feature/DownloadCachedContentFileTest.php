@@ -124,7 +124,46 @@ it('creates a Failed row and increments failure_count on HTTP 404', function () 
     expect($file->status)->toBe(CachedContentFileStatus::Failed)
         ->and((int) $file->failure_count)->toBe(1)
         ->and($file->last_failed_at)->not->toBeNull()
-        ->and($file->file_path)->toBeNull();
+        ->and($file->file_path)->toBeNull()
+        // last_error_message persists the exception onto the row itself so the
+        // activity widget's "View error" action can show it without a log dive.
+        ->and($file->last_error_message)
+        ->not->toBeNull()
+        ->and($file->last_error_message)->toContain('404');
+});
+
+it('truncates last_error_message to 8000 chars so Postgres row-size budgets stay sane', function () {
+    Storage::fake('local');
+    config()->set('filesystems.default', 'local');
+
+    // Generate an error message longer than the 8000-char truncation cap:
+    // 250 repetitions of ~50-char string = ~12,500 chars.
+    $longMessage = str_repeat('A long error explaining nothing in particular. ', 250);
+    expect(mb_strlen($longMessage))->toBeGreaterThan(8000);
+
+    Http::fake([
+        'provider.example/long.mp4' => Http::response($longMessage, 500),
+    ]);
+
+    (new DownloadCachedContentFile(
+        dynamicGroup: $this->group,
+        contentType: 'movie',
+        tmdbId: '777',
+        tvdbId: null,
+        seasonNumber: null,
+        episodeNumber: null,
+        quality: null,
+        sourceUrl: 'https://provider.example/long.mp4',
+    ))->handle(
+        app(GeneralSettings::class),
+        app(M3uProxyService::class),
+        app(TmdbService::class),
+    );
+
+    $file = CachedContentFile::first();
+    expect($file->status)->toBe(CachedContentFileStatus::Failed)
+        ->and($file->last_error_message)->not->toBeNull()
+        ->and(mb_strlen($file->last_error_message))->toBeLessThanOrEqual(8000);
 });
 
 it('attaches to existing Completed row (cross-group dedup) and skips download', function () {

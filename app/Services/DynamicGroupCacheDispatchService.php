@@ -10,6 +10,7 @@ use App\Models\DynamicGroup;
 use App\Models\Episode;
 use App\Models\Playlist;
 use App\Settings\GeneralSettings;
+use Illuminate\Support\Collection;
 
 /**
  * Shared dispatch + lookup helpers for the Dynamic Group Cache feature.
@@ -358,6 +359,45 @@ class DynamicGroupCacheDispatchService
             'dispatched' => $dispatched,
             'cache_enabled' => true,
             'reason' => $dispatched === 0 ? 'All eligible content is already cached or in cooldown.' : null,
+        ];
+    }
+
+    /**
+     * Bulk dispatch over an arbitrary Collection of DynamicGroup records.
+     * Used by the bulk "Cache Now" action on `DynamicGroupsWidget` (the
+     * per-row checkbox-driven action menu that mirrors what the Movies
+     * relation manager on the Edit Group page exposes for per-channel
+     * actions — same operator UX, scoped to the Dynamic Groups grid).
+     *
+     * Each group runs through `dispatchForGroup()` so the same
+     * skip-cooldown / fingerprint / url-resolve checks apply.
+     *
+     * Counts returned:
+     *   - dispatched: total DownloadCachedContentFile jobs actually queued
+     *                  across the selected groups
+     *   - groups_processed: groups where cache_enabled=true (skipped rules
+     *                       are still counted in groups_total)
+     *   - groups_total: total groups passed in
+     *
+     * @return array{dispatched: int, groups_processed: int, groups_total: int}
+     */
+    public function dispatchForGroups(Collection $groups): array
+    {
+        $dispatched = 0;
+        $processed = 0;
+
+        foreach ($groups as $group) {
+            $result = $this->dispatchForGroup($group);
+            $dispatched += $result['dispatched'];
+            if ($result['cache_enabled']) {
+                $processed++;
+            }
+        }
+
+        return [
+            'dispatched' => $dispatched,
+            'groups_processed' => $processed,
+            'groups_total' => $groups->count(),
         ];
     }
 }

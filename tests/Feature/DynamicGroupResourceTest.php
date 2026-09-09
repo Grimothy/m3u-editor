@@ -8,6 +8,7 @@ use App\Filament\Resources\DynamicGroups\Pages\ViewDynamicGroup;
 use App\Filament\Resources\DynamicGroups\RelationManagers\ChannelsRelationManager;
 use App\Filament\Resources\DynamicGroups\RelationManagers\SeriesRelationManager;
 use App\Filament\Resources\VodGroups\VodGroupResource;
+use App\Jobs\DownloadCachedContentFile;
 use App\Models\Channel;
 use App\Models\DynamicGroup;
 use App\Models\DynamicGroupItemSnapshot;
@@ -15,6 +16,7 @@ use App\Models\Playlist;
 use App\Models\Series;
 use App\Models\SyncRun;
 use App\Models\User;
+use App\Settings\GeneralSettings;
 use Illuminate\Foundation\Testing\RefreshDatabase;
 use Illuminate\Support\Facades\Bus;
 use Illuminate\Support\Facades\Cache;
@@ -330,4 +332,68 @@ it('deletes the DynamicGroup and cascades its dynamic_group_items when the View 
 
     expect(DynamicGroup::find($group->id))->toBeNull()
         ->and(DB::table('dynamic_group_items')->where('dynamic_group_id', $group->id)->exists())->toBeFalse();
+});
+
+it('ViewDynamicGroup exposes a Cache Now header action that dispatches DownloadCachedContentFile jobs', function () {
+    // The action lives on the /dynamic-groups/{id} view page (Cloud +
+    // arrow-down icon, info/blue) so operators can kick off a cache build
+    // for one specific group without going through the cron. Bulk
+    // selection on the DynamicGroupsWidget is the multi-group equivalent;
+    // this is the single-group surface.
+    Bus::fake();
+
+    // Prime Spatie Settings before mutating — see the project test pattern
+    // documented at DynamicGroupCacheActivityWidgetTest:22.
+    app(GeneralSettings::class)->refresh();
+    app(GeneralSettings::class)->enable_dynamic_group_cache = true;
+    app(GeneralSettings::class)->save();
+    app(GeneralSettings::class)->refresh();
+
+    $this->playlist->update(['dynamic_groups_config' => [
+        ['name' => 'Trending', 'cache_enabled' => true],
+    ]]);
+
+    $group = DynamicGroup::create([
+        'playlist_id' => $this->playlist->id, 'user_id' => $this->user->id,
+        'type' => 'vod', 'source' => 'trending', 'name' => 'Trending',
+    ]);
+    $channels = collect(['600', '601', '602'])->map(
+        fn (string $tmdbId) => Channel::factory()->for($this->playlist)->create(['tmdb_id' => $tmdbId])
+    );
+    $group->channels()->attach($channels->pluck('id')->all());
+
+    $tester = Livewire::test(ViewDynamicGroup::class, ['record' => $group->id])
+        ->assertOk();
+
+    // callAction drives both the existence check (assertActionVisible) and
+    // the closure invocation. If the action isn't wired into the page's
+    // header actions, this throws — no separate assertPageActionExists
+    // needed (the v5 test API doesn't expose it for view pages).
+    $tester->callAction('cache_now');
+
+    // 3 channels → 3 DownloadCachedContentFile dispatches.
+    Bus::assertDispatchedTimes(DownloadCachedContentFile::class, 3);
+});
+
+it('ViewDynamicGroup cache_now fires a warning notification when dynamic-group caching is disabled', function () {
+    // Defensive UX: master toggle off → no silent dispatch, the action
+    // shows a Filament notification with the "how to enable" hint.
+    Bus::fake();
+
+    app(GeneralSettings::class)->refresh();
+    app(GeneralSettings::class)->enable_dynamic_group_cache = false;
+    app(GeneralSettings::class)->save();
+    app(GeneralSettings::class)->refresh();
+
+    $group = DynamicGroup::create([
+        'playlist_id' => $this->playlist->id, 'user_id' => $this->user->id,
+        'type' => 'vod', 'source' => 'trending', 'name' => 'Trending',
+    ]);
+
+    $tester = Livewire::test(ViewDynamicGroup::class, ['record' => $group->id])
+        ->assertOk()
+        ->callAction('cache_now');
+
+    Bus::assertNotDispatched(DownloadCachedContentFile::class);
+    $tester->assertNotified('Dynamic Group Caching is disabled');
 });

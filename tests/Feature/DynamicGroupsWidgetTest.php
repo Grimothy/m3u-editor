@@ -5,6 +5,7 @@ use App\Filament\Resources\Categories\Widgets\DynamicGroupsWidget as SeriesDynam
 use App\Filament\Resources\DynamicGroups\DynamicGroupResource;
 use App\Filament\Resources\VodGroups\Pages\ListVodGroups;
 use App\Filament\Resources\VodGroups\Widgets\DynamicGroupsWidget as VodDynamicGroupsWidget;
+use App\Jobs\DownloadCachedContentFile;
 use App\Models\CachedContentFile;
 use App\Models\Channel;
 use App\Models\DynamicGroup;
@@ -13,6 +14,7 @@ use App\Models\Playlist;
 use App\Models\Series;
 use App\Models\User;
 use App\Services\TmdbService;
+use App\Settings\GeneralSettings;
 use Illuminate\Foundation\Testing\RefreshDatabase;
 use Illuminate\Support\Facades\Bus;
 use Livewire\Livewire;
@@ -619,4 +621,188 @@ it('the Series widget\'s Cached column counts EPISODES, not series', function ()
         ->assertOk()
         ->loadTable()
         ->assertTableColumnStateSet('cache_status', '1/2', $group);
+});
+
+it('the VOD widget exposes a cache_now bulk action on the dynamic groups grid', function () {
+    // The operator selects rows via the checkbox column (added automatically
+    // by ->bulkActions()) and triggers Cache Now from the bulk-action menu
+    // that drops down at the table footer. This is the analogue of the
+    // row icon-buttons on the Movies relation manager — but here Cache Now
+    // is at the GROUP level across multiple selected dynamic groups.
+    $group = DynamicGroup::create([
+        'playlist_id' => $this->playlist->id, 'user_id' => $this->user->id,
+        'type' => 'vod', 'source' => 'trending', 'name' => 'Mine',
+    ]);
+
+    Livewire::test(VodDynamicGroupsWidget::class)
+        ->assertOk()
+        ->loadTable()
+        ->assertTableBulkActionExists('cache_now');
+});
+
+it('the Series widget exposes a cache_now bulk action on the dynamic categories grid', function () {
+    // Series-side parallel of the VOD existence check — same operator UX
+    // (checkbox selection + bulk action menu) on the Series-list page.
+    $group = DynamicGroup::create([
+        'playlist_id' => $this->playlist->id, 'user_id' => $this->user->id,
+        'type' => 'series', 'source' => 'trending', 'name' => 'Mine Series',
+    ]);
+
+    Livewire::test(SeriesDynamicGroupsWidget::class)
+        ->assertOk()
+        ->loadTable()
+        ->assertTableBulkActionExists('cache_now');
+});
+
+it('the VOD widget cache_now bulk action dispatches one DownloadCachedContentFile job per channel across selected groups', function () {
+    // End-to-end wiring: select rows → click cache_now → service iterates
+    // each group → DownloadCachedContentFile::dispatch per channel.
+    // Bus::fake() intercepts the actual queue write.
+    Bus::fake();
+
+    // Prime the singleton from DB first — Spatie SettingsMapper throws
+    // MissingSettings if any declared property is unset on save. Mirrors
+    // the DynamicGroupCacheActivityWidgetTest:22 beforeEach pattern.
+    app(GeneralSettings::class)->refresh();
+    app(GeneralSettings::class)->enable_dynamic_group_cache = true;
+    app(GeneralSettings::class)->save();
+    app(GeneralSettings::class)->refresh();
+
+    $this->playlist->update(['dynamic_groups_config' => [
+        ['name' => 'Trending', 'cache_enabled' => true],
+        ['name' => 'Popular', 'cache_enabled' => true],
+    ]]);
+
+    $groupA = DynamicGroup::create([
+        'playlist_id' => $this->playlist->id, 'user_id' => $this->user->id,
+        'type' => 'vod', 'source' => 'trending', 'name' => 'Trending',
+    ]);
+    $groupAChannels = collect(['800', '801', '802'])->map(
+        fn (string $tmdbId) => Channel::factory()->for($this->playlist)->create(['tmdb_id' => $tmdbId])
+    );
+    $groupA->channels()->attach($groupAChannels->pluck('id')->all());
+
+    $groupB = DynamicGroup::create([
+        'playlist_id' => $this->playlist->id, 'user_id' => $this->user->id,
+        'type' => 'vod', 'source' => 'popular', 'name' => 'Popular',
+    ]);
+    $groupBChannels = collect(['900', '901'])->map(
+        fn (string $tmdbId) => Channel::factory()->for($this->playlist)->create(['tmdb_id' => $tmdbId])
+    );
+    $groupB->channels()->attach($groupBChannels->pluck('id')->all());
+
+    // Bulk action applies to ALL selected records (2 groups, 5 channels total).
+    Livewire::test(VodDynamicGroupsWidget::class)
+        ->assertOk()
+        ->loadTable()
+        ->callTableBulkAction('cache_now', [$groupA->id, $groupB->id]);
+
+    // 3 + 2 = 5 DownloadCachedContentFile dispatches across both groups.
+    Bus::assertDispatchedTimes(DownloadCachedContentFile::class, 5);
+});
+
+it('the Series widget cache_now bulk action dispatches one DownloadCachedContentFile job per episode across selected groups', function () {
+    // Series mirror: each episode produces its own job.
+    Bus::fake();
+
+    app(GeneralSettings::class)->refresh();
+    app(GeneralSettings::class)->enable_dynamic_group_cache = true;
+    app(GeneralSettings::class)->save();
+    app(GeneralSettings::class)->refresh();
+
+    $this->playlist->update(['dynamic_groups_config' => [
+        ['name' => 'Top Series', 'cache_enabled' => true],
+        ['name' => 'Top Drama', 'cache_enabled' => true],
+    ]]);
+
+    // Series A: 2 episodes
+    $seriesA = Series::factory()->for($this->playlist)->create(['tmdb_id' => '1399']);
+    Episode::factory()->for($this->playlist)->for($seriesA)->create([
+        'season' => 1, 'episode_num' => 1, 'url' => 'http://test/stream-a-1.m3u8',
+    ]);
+    Episode::factory()->for($this->playlist)->for($seriesA)->create([
+        'season' => 1, 'episode_num' => 2, 'url' => 'http://test/stream-a-2.m3u8',
+    ]);
+
+    // Series B: 1 episode (Episode factory doesn't set url by default —
+    // PlaylistUrlService::getEpisodeUrl returns '' for null url →
+    // dispatchForEpisode bails. Seed url so dispatch fires.)
+    $seriesB = Series::factory()->for($this->playlist)->create(['tmdb_id' => '1668']);
+    Episode::factory()->for($this->playlist)->for($seriesB)->create([
+        'season' => 1, 'episode_num' => 1, 'url' => 'http://test/stream-b-1.m3u8',
+    ]);
+
+    $groupA = DynamicGroup::create([
+        'playlist_id' => $this->playlist->id, 'user_id' => $this->user->id,
+        'type' => 'series', 'source' => 'trending', 'name' => 'Top Series',
+    ]);
+    $groupA->series()->attach($seriesA);
+
+    $groupB = DynamicGroup::create([
+        'playlist_id' => $this->playlist->id, 'user_id' => $this->user->id,
+        'type' => 'series', 'source' => 'popular', 'name' => 'Top Drama',
+    ]);
+    $groupB->series()->attach($seriesB);
+
+    Livewire::test(SeriesDynamicGroupsWidget::class)
+        ->assertOk()
+        ->loadTable()
+        ->callTableBulkAction('cache_now', [$groupA->id, $groupB->id]);
+
+    // 2 + 1 = 3 DownloadCachedContentFile dispatches across both groups.
+    Bus::assertDispatchedTimes(DownloadCachedContentFile::class, 3);
+});
+
+it('the cache_now bulk action fires a warning notification when dynamic-group caching is disabled', function () {
+    // Defensive UX: master toggle off → no silent dispatch, the bulk action
+    // shows a Filament notification with the "how to enable" hint.
+    Bus::fake();
+
+    app(GeneralSettings::class)->refresh();
+    app(GeneralSettings::class)->enable_dynamic_group_cache = false;
+    app(GeneralSettings::class)->save();
+    app(GeneralSettings::class)->refresh();
+
+    $group = DynamicGroup::create([
+        'playlist_id' => $this->playlist->id, 'user_id' => $this->user->id,
+        'type' => 'vod', 'source' => 'trending', 'name' => 'Mine',
+    ]);
+
+    $tester = Livewire::test(VodDynamicGroupsWidget::class)
+        ->assertOk()
+        ->loadTable()
+        ->callTableBulkAction('cache_now', [$group->id]);
+
+    Bus::assertNotDispatched(DownloadCachedContentFile::class);
+    $tester->assertNotified('Dynamic Group Caching is disabled');
+});
+
+it('the cache_now bulk action fires an info notification when no eligible content to cache', function () {
+    // Edge case: cache enabled, group selected, but dispatchForGroup finds no
+    // eligible content (no channels attached, or all already cached). The bulk
+    // action must surface the service's aggregated reason rather than fabricate
+    // fake success.
+    Bus::fake();
+
+    app(GeneralSettings::class)->refresh();
+    app(GeneralSettings::class)->enable_dynamic_group_cache = true;
+    app(GeneralSettings::class)->save();
+    app(GeneralSettings::class)->refresh();
+
+    $this->playlist->update(['dynamic_groups_config' => [
+        ['name' => 'Empty Group', 'cache_enabled' => true],
+    ]]);
+
+    $group = DynamicGroup::create([
+        'playlist_id' => $this->playlist->id, 'user_id' => $this->user->id,
+        'type' => 'vod', 'source' => 'trending', 'name' => 'Empty Group',
+    ]);
+
+    $tester = Livewire::test(VodDynamicGroupsWidget::class)
+        ->assertOk()
+        ->loadTable()
+        ->callTableBulkAction('cache_now', [$group->id]);
+
+    Bus::assertNotDispatched(DownloadCachedContentFile::class);
+    $tester->assertNotified('No cache jobs queued');
 });

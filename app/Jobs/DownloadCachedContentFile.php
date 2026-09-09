@@ -328,10 +328,18 @@ class DownloadCachedContentFile implements ShouldQueue
     }
 
     /**
-     * Update the row to Failed, increment failure_count, stamp last_failed_at.
+     * Update the row to Failed, increment failure_count, stamp last_failed_at,
+     * and persist the error message onto the row itself.
+     *
      * Never throws — wraps any exception so we don't bubble up and trigger Laravel's
      * queue retry (per $tries=1, the dispatcher controls retry timing via the
      * failure-cooldown settings).
+     *
+     * `last_error_message` is what surfaces in the activity widget's "View error"
+     * record action so operators can see WHY a row failed without grepping logs.
+     * Truncated to 8000 chars to fit reasonable Postgres row-size budgets while
+     * still capturing the meaningful prefix of long Guzzle / Symfony exception
+     * messages.
      */
     private function markFailed(CachedContentFile $file, string $reason): void
     {
@@ -340,6 +348,7 @@ class DownloadCachedContentFile implements ShouldQueue
                 'status' => CachedContentFileStatus::Failed,
                 'last_failed_at' => now(),
                 'failure_count' => (int) ($file->failure_count ?? 0) + 1,
+                'last_error_message' => mb_substr($reason, 0, 8000),
             ]);
             Log::warning("DownloadCachedContentFile: fingerprint={$file->content_fingerprint} failed: {$reason}");
         } catch (\Throwable $e) {

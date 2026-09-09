@@ -8,14 +8,18 @@ use App\Models\CachedContentFile;
 use App\Models\DynamicGroup;
 use App\Services\DynamicGroupCacheDispatchService;
 use App\Services\TmdbService;
+use App\Settings\GeneralSettings;
 use Filament\Actions\Action;
+use Filament\Actions\BulkAction;
 use Filament\Actions\DeleteAction;
+use Filament\Notifications\Notification;
 use Filament\Tables\Columns\IconColumn;
 use Filament\Tables\Columns\TextColumn;
 use Filament\Tables\Enums\RecordActionsPosition;
 use Filament\Tables\Table;
 use Filament\Widgets\TableWidget as BaseWidget;
 use Illuminate\Database\Eloquent\Builder;
+use Illuminate\Support\Collection;
 use Livewire\Attributes\Reactive;
 
 /**
@@ -237,6 +241,57 @@ class DynamicGroupsWidget extends BaseWidget
                     ->size('sm')
                     ->hiddenLabel(),
             ], RecordActionsPosition::BeforeCells)
+            ->bulkActions([
+                BulkAction::make('cache_now')
+                    ->label(__('Cache Now'))
+                    ->icon('heroicon-o-cloud-arrow-down')
+                    ->color('info')
+                    ->requiresConfirmation()
+                    ->modalHeading(__('Cache selected dynamic categories'))
+                    ->modalDescription(__('Queue downloads for every selected Dynamic Category now? Existing cached files are reused via fingerprint dedup; new jobs appear in the Dynamic Group Cache Activity widget below.'))
+                    ->modalSubmitActionLabel(__('Yes, cache now'))
+                    ->action(function (Collection $records): void {
+                        $settings = app(GeneralSettings::class);
+                        if (! $settings->enable_dynamic_group_cache) {
+                            Notification::make()
+                                ->warning()
+                                ->title(__('Dynamic Group Caching is disabled'))
+                                ->body(__('Enable it in Preferences → Dynamic Groups before queueing cache downloads.'))
+                                ->duration(10000)
+                                ->send();
+
+                            return;
+                        }
+
+                        $result = app(DynamicGroupCacheDispatchService::class)->dispatchForGroups($records);
+
+                        if ($result['dispatched'] === 0) {
+                            Notification::make()
+                                ->info()
+                                ->title(__('No cache jobs queued'))
+                                ->body(__('Processed :processed of :total groups.', [
+                                    'processed' => $result['groups_processed'],
+                                    'total' => $result['groups_total'],
+                                ]))
+                                ->send();
+
+                            return;
+                        }
+
+                        $title = $result['dispatched'] === 1
+                            ? __('Dispatched 1 cache job.')
+                            : __('Dispatched :count cache jobs.', ['count' => $result['dispatched']]);
+
+                        Notification::make()
+                            ->success()
+                            ->title($title)
+                            ->body(__('Processed :processed of :total groups. Track progress in the Dynamic Group Cache Activity widget below.', [
+                                'processed' => $result['groups_processed'],
+                                'total' => $result['groups_total'],
+                            ]))
+                            ->send();
+                    }),
+            ])
             ->emptyStateHeading(__('No Dynamic Categories configured'))
             ->emptyStateDescription($this->getDynamicGroupsHelpText())
             ->emptyStateIcon('heroicon-o-sparkles');

@@ -520,3 +520,38 @@ it('Delete cache action cascades pivot rows via the FK', function () {
         ->and(DB::table('cached_content_file_dynamic_groups')->where('cached_content_file_id', $file->id)->count())->toBe(0)
         ->and(Storage::disk('local')->exists('cache/movie:552::::.mp4'))->toBeFalse();
 });
+
+it('View error action is visible only on Failed rows and surfaces last_error_message in the modal', function () {
+    // Operators need to see WHY a download failed without grepping logs. The
+    // activity widget's "View error" record action (warning triangle icon)
+    // is gated on status=Failed and pulls the message from last_error_message
+    // (populated by DownloadCachedContentFile::markFailed()).
+    $failed = CachedContentFile::factory()->failed()->create([
+        'content_type' => 'movie',
+        'tmdb_id' => '700',
+        'title' => 'Broken File',
+        'last_error_message' => 'HTTP 502 Bad Gateway — upstream provider returned a transient error',
+        'last_failed_at' => now()->subMinutes(2),
+        'failure_count' => 3,
+    ]);
+
+    $completed = CachedContentFile::factory()->completed()->create([
+        'content_type' => 'movie',
+        'tmdb_id' => '701',
+        'title' => 'Working File',
+    ]);
+
+    $pending = CachedContentFile::factory()->create([
+        'content_type' => 'movie',
+        'tmdb_id' => '702',
+        'title' => 'In Flight',
+        'status' => CachedContentFileStatus::Pending,
+    ]);
+
+    Livewire::test(DynamicGroupCacheActivityWidget::class)
+        ->assertOk()
+        ->loadTable()
+        ->assertTableActionVisible('viewError', $failed)
+        ->assertTableActionHidden('viewError', $completed)
+        ->assertTableActionHidden('viewError', $pending);
+});
