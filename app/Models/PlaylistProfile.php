@@ -314,6 +314,24 @@ class PlaylistProfile extends Model
                 ->where('enabled', true)
                 ->first();
 
+        // Fallback for 2-step setups: when the source playlist was imported via
+        // Xtream (numeric source_id) but the target playlist was imported as a
+        // plain M3U (hash-based source_id), the ids never match. Resolve the
+        // channel by exact name instead, using the `group` string as a
+        // tie-breaker. Skip when still ambiguous rather than guess wrong.
+        if (! $targetModel && ! $isEpisode && $model->name) {
+            $candidates = $targetPlaylist->channels()
+                ->where('enabled', true)
+                ->where('name', $model->name)
+                ->get();
+
+            if ($candidates->count() === 1) {
+                $targetModel = $candidates->first();
+            } elseif ($candidates->count() > 1 && $model->group) {
+                $targetModel = $candidates->firstWhere('group', $model->group);
+            }
+        }
+
         if (! $targetModel) {
             Log::warning('Could not resolve internal profile URL to target playlist', [
                 'profile_id' => $this->id,
