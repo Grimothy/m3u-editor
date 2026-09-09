@@ -53,6 +53,16 @@ class CachedContentFileFactory extends Factory
         ]);
     }
 
+    public function downloading(int $downloaded = 524_288_000, ?int $expected = 2_147_483_648): static
+    {
+        return $this->state(fn (array $attributes) => [
+            'status' => CachedContentFileStatus::Downloading,
+            'bytes_downloaded' => $downloaded,
+            'bytes_expected' => $expected,
+            'last_progress_at' => now(),
+        ]);
+    }
+
     public function forMovie(string $tmdbId, ?string $quality = '1080p'): static
     {
         return $this->state(fn (array $attributes) => [

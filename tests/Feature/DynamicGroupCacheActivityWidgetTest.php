@@ -128,3 +128,109 @@ it('the Failed status shows the failure_count column for non-zero failures', fun
         ->loadTable()
         ->assertSee('3');
 });
+
+it('renders a "current / total (percent)" progress label for Downloading rows with both byte fields', function () {
+    // 1 GiB downloaded of a 4 GiB expected = 25%
+    $downloading = CachedContentFile::factory()->downloading(
+        downloaded: 1_073_741_824,
+        expected: 4_294_967_296,
+    )->create([
+        'content_type' => 'movie', 'tmdb_id' => '550',
+    ]);
+
+    Livewire::test(DynamicGroupCacheActivityWidget::class)
+        ->assertOk()
+        ->loadTable()
+        ->assertSee('1.00 GB / 4.00 GB (25%)');
+});
+
+it('renders only the current byte count when bytes_expected is null (chunked transfer)', function () {
+    $downloading = CachedContentFile::factory()->downloading(
+        downloaded: 524_288_000,
+        expected: null,
+    )->create([
+        'content_type' => 'movie', 'tmdb_id' => '551',
+    ]);
+
+    Livewire::test(DynamicGroupCacheActivityWidget::class)
+        ->assertOk()
+        ->loadTable()
+        ->assertSee('500.00 MB')
+        // No "X / Y" framing, no percent suffix
+        ->assertDontSee('%');
+});
+
+it('renders the progress placeholder for non-Downloading rows when Downloading rows are also present', function () {
+    // Confirms the column shows the placeholder for Completed/Failed rows
+    // alongside actual progress for Downloading rows. The placeholder character
+    // (em-dash, U+2014) is used by Filament's default placeholder rendering.
+    CachedContentFile::factory()->completed()->create(['content_type' => 'movie', 'tmdb_id' => '100']);
+    CachedContentFile::factory()->failed()->create(['content_type' => 'movie', 'tmdb_id' => '101']);
+    CachedContentFile::factory()->downloading(
+        downloaded: 1_610_612_736, // 1.5 GiB
+        expected: 3_221_225_472,  // 3.0 GiB
+    )->create([
+        'content_type' => 'movie', 'tmdb_id' => '102',
+    ]);
+
+    Livewire::test(DynamicGroupCacheActivityWidget::class)
+        ->assertOk()
+        ->loadTable()
+        // Downloading row IS rendered with progress text (positive proof).
+        ->assertSee('1.50 GB / 3.00 GB (50%)')
+        // The placeholder character appears at least once for the non-Downloading rows.
+        ->assertSee('—');
+});
+
+it('getProgressLabel() returns null for rows with no bytes_downloaded yet', function () {
+    // Real-world case: Step 6 just started, no chunk has crossed the 1-MiB threshold
+    $fresh = CachedContentFile::factory()->downloading(downloaded: 0, expected: 1_000_000)->create([
+        'content_type' => 'movie', 'tmdb_id' => '999',
+    ]);
+
+    expect(DynamicGroupCacheActivityWidget::getProgressLabel($fresh))->toBeNull();
+});
+
+it('getProgressLabel() clamps the percent display at 100', function () {
+    // Bytes can briefly exceed expected during buffering — must never show >100%.
+    $overshoot = CachedContentFile::factory()->downloading(
+        downloaded: 5_000_000_000,
+        expected: 4_000_000_000,
+    )->create([
+        'content_type' => 'movie', 'tmdb_id' => '888',
+    ]);
+
+    $label = DynamicGroupCacheActivityWidget::getProgressLabel($overshoot);
+    expect($label)->toContain('(100%)')
+        ->and($label)->not->toContain('(125%)');
+});
+
+it('getProgressAttributes() paints a primary-color bar at the right percentage', function () {
+    $downloading = CachedContentFile::factory()->downloading(
+        downloaded: 1_073_741_824, // 25% of 4 GiB
+        expected: 4_294_967_296,
+    )->create([
+        'content_type' => 'movie', 'tmdb_id' => '777',
+    ]);
+
+    $attrs = DynamicGroupCacheActivityWidget::getProgressAttributes($downloading);
+
+    expect($attrs)->toHaveKey('style')
+        ->and($attrs['style'])->toContain('25%')
+        ->and($attrs['style'])->toContain('bg-primary-500');
+});
+
+it('getProgressAttributes() paints an amber bar when last_progress_at is older than 30 seconds', function () {
+    $stalled = CachedContentFile::factory()->downloading(
+        downloaded: 524_288_000,
+        expected: 2_147_483_648,
+    )->create([
+        'content_type' => 'movie', 'tmdb_id' => '666',
+        'last_progress_at' => now()->subSeconds(120),
+    ]);
+
+    $attrs = DynamicGroupCacheActivityWidget::getProgressAttributes($stalled);
+
+    expect($attrs['style'])->toContain('bg-amber-400')
+        ->and($attrs['style'])->not->toContain('bg-primary-500');
+});
