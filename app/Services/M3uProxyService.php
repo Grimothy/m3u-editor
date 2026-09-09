@@ -957,6 +957,16 @@ class M3uProxyService
             $profileSourcePlaylist = $channel->playlist;
         }
 
+        // When streaming a pooled channel through a MergedPlaylist/CustomPlaylist/PlaylistAlias,
+        // $playlist is the wrapper and $originalPlaylistUuid is its UUID. Pool search keys and
+        // Redis channel->stream mappings must key on the SOURCE playlist UUID so a stream created
+        // via the source playlist is found (and reused) when the same channel is requested through
+        // the wrapper. Only applies when a pooled source playlist was resolved above; non-pooled
+        // channels keep the wrapper UUID and are unaffected.
+        if ($profileSourcePlaylist && $profileSourcePlaylist->uuid !== $originalPlaylistUuid) {
+            $originalPlaylistUuid = $profileSourcePlaylist->uuid;
+        }
+
         // IMPORTANT: Check for existing pooled stream BEFORE capacity check AND provider profile selection
         // If a pooled stream exists, we can reuse it without consuming additional capacity
         // We search WITHOUT filtering by provider profile to maximize pooling opportunities:
@@ -1515,6 +1525,12 @@ class M3uProxyService
         } elseif ($episode->playlist instanceof Playlist && $episode->playlist->profiles_enabled) {
             // Streaming through CustomPlaylist/MergedPlaylist/PlaylistAlias - use episode's source Playlist
             $profileSourcePlaylist = $episode->playlist;
+        }
+
+        // See getChannelUrl(): key pool search / Redis mappings on the SOURCE playlist UUID
+        // when streaming a pooled episode through a wrapper playlist.
+        if ($profileSourcePlaylist && $profileSourcePlaylist->uuid !== $originalPlaylistUuid) {
+            $originalPlaylistUuid = $profileSourcePlaylist->uuid;
         }
 
         // Cached failover episodes so the relationship is only queried once per request
