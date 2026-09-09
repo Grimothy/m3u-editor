@@ -59,7 +59,7 @@
                     color="gray"
                     tag="a"
                     size="sm"
-                    href="/preferences?tab=tv-app%3A%3Adata%3A%3Atab"
+                    href="{{ \App\Filament\Clusters\Settings\Pages\ManageTvAppSettings::getUrl() }}"
                     icon="heroicon-m-device-phone-mobile"
                 >
                     {{ __('Settings') }}

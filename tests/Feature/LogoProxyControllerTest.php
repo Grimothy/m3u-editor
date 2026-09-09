@@ -1,5 +1,6 @@
 <?php
 
+use App\Http\Controllers\LogoProxyController;
 use App\Services\LogoCacheService;
 use Illuminate\Support\Facades\Http;
 use Illuminate\Support\Facades\Storage;
@@ -111,4 +112,90 @@ it('falls back to the placeholder when the body is not an image', function () {
     // bytes rather than the HTML payload.
     $response->assertOk();
     $response->assertDontSee('not an image');
+});
+
+function bigJpegBytes(int $width = 1200, int $height = 800): string
+{
+    $image = imagecreatetruecolor($width, $height);
+    // Some visual noise so the encoder produces a non-trivial payload that
+    // clearly shrinks when downscaled.
+    for ($i = 0; $i < 400; $i++) {
+        $colour = imagecolorallocate($image, random_int(0, 255), random_int(0, 255), random_int(0, 255));
+        imagefilledrectangle(
+            $image,
+            random_int(0, $width),
+            random_int(0, $height),
+            random_int(0, $width),
+            random_int(0, $height),
+            $colour
+        );
+    }
+    ob_start();
+    imagejpeg($image, null, 90);
+    $bytes = ob_get_clean();
+    imagedestroy($image);
+
+    return $bytes;
+}
+
+it('downscales a large image when ?w= is requested and caches the variant', function () {
+    $remoteUrl = 'https://example.com/big-backdrop.jpg';
+    $original = bigJpegBytes(1600, 900);
+
+    Http::fake([
+        $remoteUrl => Http::response($original, 200, ['Content-Type' => 'image/jpeg']),
+    ]);
+
+    $resized = $this->get(proxyPathFor($remoteUrl).'?w=400');
+    $resized->assertOk();
+
+    $body = $resized->streamedContent();
+    expect(strlen($body))->toBeLessThan(strlen($original));
+
+    // Second request for the same size is served from the cached variant with
+    // no further outbound fetch.
+    Http::fake([
+        $remoteUrl => Http::response('should-not-be-called', 500),
+    ]);
+    $again = $this->get(proxyPathFor($remoteUrl).'?w=400');
+    $again->assertOk();
+    expect($again->streamedContent())->toBe($body);
+});
+
+it('serves the original when ?w= resizing is disabled by config', function () {
+    config()->set('proxy.image_resize_enabled', false);
+
+    $remoteUrl = 'https://example.com/no-resize.jpg';
+    $original = bigJpegBytes(1600, 900);
+
+    Http::fake([
+        $remoteUrl => Http::response($original, 200, ['Content-Type' => 'image/jpeg']),
+    ]);
+
+    $response = $this->get(proxyPathFor($remoteUrl).'?w=400');
+
+    $response->assertOk();
+    expect(strlen($response->streamedContent()))->toBe(strlen($original));
+});
+
+it('never rasterises an SVG even when ?w= is passed', function () {
+    $remoteUrl = 'https://example.com/vector.svg';
+
+    Http::fake([
+        $remoteUrl => Http::response(svgBytes(), 200, ['Content-Type' => 'image/svg+xml']),
+    ]);
+
+    $response = $this->get(proxyPathFor($remoteUrl).'?w=64');
+
+    $response->assertOk();
+    expect($response->headers->get('Content-Type'))->toStartWith('image/svg');
+});
+
+it('generateProxyUrl bakes in a width only when one is given', function () {
+    $url = 'https://example.com/poster.jpg';
+
+    expect(LogoProxyController::generateProxyUrl($url))
+        ->not->toContain('?')
+        ->and(LogoProxyController::generateProxyUrl($url, width: 600))
+        ->toContain('w=600');
 });

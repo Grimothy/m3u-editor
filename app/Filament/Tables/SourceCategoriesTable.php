@@ -3,6 +3,7 @@
 namespace App\Filament\Tables;
 
 use App\Filament\Tables\Traits\FiltersBySelection;
+use App\Filament\Tables\Traits\HasBouquetPickerColumns;
 use App\Models\SourceCategory;
 use Filament\Actions\BulkActionGroup;
 use Filament\Tables\Columns\TextColumn;
@@ -13,6 +14,7 @@ use Illuminate\Database\Eloquent\Builder;
 class SourceCategoriesTable
 {
     use FiltersBySelection;
+    use HasBouquetPickerColumns;
 
     public static function configure(Table $table): Table
     {
@@ -21,7 +23,12 @@ class SourceCategoriesTable
             ->modifyQueryUsing(function (Builder $query) use ($table): Builder {
                 $arguments = $table->getArguments();
 
-                if ($playlistId = $arguments['playlist_id'] ?? null) {
+                // Scoped by a single playlist_id (playlist import preferences) or a
+                // playlist_ids list (a merged-playlist alias picking across its sources).
+                // An explicit empty list yields no rows rather than every row.
+                if (array_key_exists('playlist_ids', $arguments)) {
+                    $query->whereIn('playlist_id', (array) $arguments['playlist_ids'])->with('playlist');
+                } elseif ($playlistId = $arguments['playlist_id'] ?? null) {
                     $query->where('playlist_id', $playlistId);
                 }
 
@@ -33,6 +40,8 @@ class SourceCategoriesTable
                     ->label(__('Category Name'))
                     ->searchable()
                     ->sortable(),
+                self::sourcePlaylistColumn($table),
+                self::bouquetMembershipColumn($table),
             ])
             ->filters([
                 TernaryFilter::make('enabled')

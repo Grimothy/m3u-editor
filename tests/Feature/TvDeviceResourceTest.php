@@ -203,8 +203,6 @@ it('filters to stale devices past the prune window', function () {
         ->assertCanNotSeeTableRecords([$fresh]);
 });
 
-it('renames the first tab to Registered Devices', function () {
-    $tabs = Livewire::test(ListTvDevices::class)->instance()->getTabs();
-
-    expect($tabs['devices']->getLabel())->toBe('Registered Devices');
+it('labels the clustered devices list as Registered Devices', function () {
+    expect(TvDeviceResource::getNavigationLabel())->toBe('Registered Devices');
 });

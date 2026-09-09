@@ -1198,8 +1198,8 @@ class XtreamApiController extends Controller
                     $backdropPaths = array_filter($backdropPaths);
                     $clearLogo = $seriesItem->metadata['clearlogo'] ?? null;
                     if ($playlist->enable_logo_proxy) {
-                        $cover = $this->proxyImageUrl($cover);
-                        $backdropPaths = array_map(fn ($path) => $this->proxyImageUrl($path), $backdropPaths);
+                        $cover = $this->proxyImageUrl($cover, self::posterProxyWidth());
+                        $backdropPaths = array_map(fn ($path) => $this->proxyImageUrl($path, self::backdropProxyWidth()), $backdropPaths);
                         $clearLogo = $clearLogo ? $this->proxyImageUrl($clearLogo) : null;
                     }
 
@@ -1326,8 +1326,8 @@ class XtreamApiController extends Controller
             $backdropPaths = array_filter($backdropPaths);
             $clearLogo = $seriesItem->metadata['clearlogo'] ?? null;
             if ($playlist->enable_logo_proxy) {
-                $cover = $this->proxyImageUrl($cover);
-                $backdropPaths = array_map(fn ($path) => $this->proxyImageUrl($path), $backdropPaths);
+                $cover = $this->proxyImageUrl($cover, self::posterProxyWidth());
+                $backdropPaths = array_map(fn ($path) => $this->proxyImageUrl($path, self::backdropProxyWidth()), $backdropPaths);
                 $clearLogo = $clearLogo ? $this->proxyImageUrl($clearLogo) : null;
             }
 
@@ -1376,7 +1376,7 @@ class XtreamApiController extends Controller
                 $castList = $seriesItem->metadata['cast_list'];
                 if ($playlist->enable_logo_proxy) {
                     $castList = array_map(function ($member) {
-                        $member['photo'] = $this->proxyImageUrl($member['photo'] ?? null);
+                        $member['photo'] = $this->proxyImageUrl($member['photo'] ?? null, self::photoProxyWidth());
 
                         return $member;
                     }, $castList);
@@ -1397,13 +1397,13 @@ class XtreamApiController extends Controller
                 foreach ($seriesItem->seasons as $season) {
                     $seasonNumber = $season->season_number;
                     $seasonCover = $playlist->enable_logo_proxy && ($season->cover ?? false)
-                        ? $this->proxyImageUrl($season->cover)
+                        ? $this->proxyImageUrl($season->cover, self::posterProxyWidth())
                         : $season->cover;
                     $tmdbCover = $playlist->enable_logo_proxy && ($seriesItem->metadata['cover_tmdb'] ?? false)
-                        ? $this->proxyImageUrl($seriesItem->metadata['cover_tmdb'])
+                        ? $this->proxyImageUrl($seriesItem->metadata['cover_tmdb'], self::posterProxyWidth())
                         : ($seriesItem->metadata['cover_tmdb'] ?? null);
                     $coverBig = $playlist->enable_logo_proxy && ($season->cover_big ?? false)
-                        ? $this->proxyImageUrl($season->cover_big)
+                        ? $this->proxyImageUrl($season->cover_big, self::posterProxyWidth())
                         : ($season->cover_big ?? null);
                     $seasons[] = [
                         'name' => $season->metadata['name'] ?? "Season {$seasonNumber}",
@@ -1424,12 +1424,12 @@ class XtreamApiController extends Controller
                             $containerExtension = $episode->container_extension ?? 'mp4';
                             if ($episode->info['movie_image'] ?? false) {
                                 $movieImage = $playlist->enable_logo_proxy
-                                    ? $this->proxyImageUrl($episode->info['movie_image'])
+                                    ? $this->proxyImageUrl($episode->info['movie_image'], self::posterProxyWidth())
                                     : $episode->info['movie_image'];
                             }
                             if ($episode->info['cover_big'] ?? false) {
                                 $movieImage = $playlist->enable_logo_proxy
-                                    ? $this->proxyImageUrl($episode->info['cover_big'])
+                                    ? $this->proxyImageUrl($episode->info['cover_big'], self::posterProxyWidth())
                                     : $episode->info['cover_big'];
                             }
 
@@ -1830,9 +1830,9 @@ class XtreamApiController extends Controller
             $backdropPaths = array_filter($backdropPaths);
             $clearLogo = $info['clearlogo'] ?? null;
             if ($playlist->enable_logo_proxy) {
-                $cover = $this->proxyImageUrl($cover);
-                $movieImage = $this->proxyImageUrl($movieImage);
-                $backdropPaths = array_map(fn ($path) => $this->proxyImageUrl($path), $backdropPaths);
+                $cover = $this->proxyImageUrl($cover, self::posterProxyWidth());
+                $movieImage = $this->proxyImageUrl($movieImage, self::posterProxyWidth());
+                $backdropPaths = array_map(fn ($path) => $this->proxyImageUrl($path, self::backdropProxyWidth()), $backdropPaths);
                 $clearLogo = $clearLogo ? $this->proxyImageUrl($clearLogo) : null;
             }
 
@@ -1905,7 +1905,7 @@ class XtreamApiController extends Controller
                 $castList = $info['cast_list'];
                 if ($playlist->enable_logo_proxy) {
                     $castList = array_map(function ($member) {
-                        $member['photo'] = $this->proxyImageUrl($member['photo'] ?? null);
+                        $member['photo'] = $this->proxyImageUrl($member['photo'] ?? null, self::photoProxyWidth());
 
                         return $member;
                     }, $castList);
@@ -2992,7 +2992,7 @@ class XtreamApiController extends Controller
                     $backdrop = $this->extractFirstUrl($backdropPath);
                 }
                 if ($backdrop && ($playlist->enable_logo_proxy ?? false)) {
-                    $backdrop = $this->proxyImageUrl($backdrop);
+                    $backdrop = $this->proxyImageUrl($backdrop, self::backdropProxyWidth());
                 }
 
                 $data['title'] = $series?->name ?? $episode?->title ?? null;
@@ -3013,7 +3013,7 @@ class XtreamApiController extends Controller
                 }
                 $backdropPaths = array_filter($backdropPaths);
                 if ($playlist->enable_logo_proxy ?? false) {
-                    $backdropPaths = array_map(fn ($path) => $this->proxyImageUrl($path), $backdropPaths);
+                    $backdropPaths = array_map(fn ($path) => $this->proxyImageUrl($path, self::backdropProxyWidth()), $backdropPaths);
                 }
 
                 $data['title'] = $channel?->title ?? $channel?->name ?? null;
@@ -3139,7 +3139,7 @@ class XtreamApiController extends Controller
             $backdrop = $this->extractFirstUrl($series?->backdrop_path ?? null);
         }
         if ($backdrop && ($playlist->enable_logo_proxy ?? false)) {
-            $backdrop = $this->proxyImageUrl($backdrop);
+            $backdrop = $this->proxyImageUrl($backdrop, self::backdropProxyWidth());
         }
 
         return [
@@ -3398,13 +3398,38 @@ class XtreamApiController extends Controller
      * (e.g. a media server image proxied at sync time), in which case it's returned
      * untouched to avoid double-proxying it through the logo proxy's own fetch.
      */
-    private function proxyImageUrl(?string $url): ?string
+    /**
+     * Role-based downscale widths baked into proxied artwork URLs so clients
+     * pull a right-sized file. Null (resize disabled) leaves URLs unchanged.
+     */
+    private static function posterProxyWidth(): ?int
+    {
+        return config('proxy.image_resize_enabled', true)
+            ? (int) config('proxy.image_resize_poster_width', 600)
+            : null;
+    }
+
+    private static function backdropProxyWidth(): ?int
+    {
+        return config('proxy.image_resize_enabled', true)
+            ? (int) config('proxy.image_resize_backdrop_width', 1280)
+            : null;
+    }
+
+    private static function photoProxyWidth(): ?int
+    {
+        return config('proxy.image_resize_enabled', true)
+            ? (int) config('proxy.image_resize_photo_width', 300)
+            : null;
+    }
+
+    private function proxyImageUrl(?string $url, ?int $width = null): ?string
     {
         if (! $url || ! filter_var($url, FILTER_VALIDATE_URL) || str_starts_with($url, url('/'))) {
             return $url;
         }
 
-        return LogoProxyController::generateProxyUrl($url);
+        return LogoProxyController::generateProxyUrl($url, width: $width);
     }
 
     /**

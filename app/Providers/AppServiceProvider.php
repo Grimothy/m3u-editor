@@ -19,6 +19,7 @@ use App\Listeners\AlertOnJobFailed;
 use App\Listeners\PersistUserLocale;
 use App\Livewire\BackupDestinationListRecords;
 use App\Livewire\TmdbSearch;
+use App\Models\Bouquet;
 use App\Models\Channel;
 use App\Models\ChannelFailover;
 use App\Models\ChannelScrubber;
@@ -44,6 +45,7 @@ use App\Services\NetworkChannelSyncService;
 use App\Services\PlaylistService;
 use App\Services\ProxyService;
 use App\Services\SortService;
+use App\Services\TagRenamePropagationService;
 use App\Settings\GeneralSettings;
 use App\Support\CopilotProvider;
 use CraftForge\FilamentLanguageSwitcher\Events\LocaleChanged;
@@ -81,6 +83,7 @@ use Illuminate\Support\Facades\Storage;
 use Illuminate\Support\Facades\URL;
 use Illuminate\Support\ServiceProvider;
 use Illuminate\Support\Str;
+use InvalidArgumentException;
 use Laravel\Ai\AiManager;
 use Livewire\Livewire;
 use PDO;
@@ -752,6 +755,10 @@ class AppServiceProvider extends ServiceProvider
                 }
             });
 
+            // Custom playlist group/category tags: propagate renames into bouquets
+            // and alias group filters (issue #1391). See TagRenamePropagationService.
+            Tag::updated(fn (Tag $tag) => TagRenamePropagationService::handle($tag));
+
             // Auto-generate UUID for channels
             Channel::creating(function (Channel $channel) {
                 if (empty($channel->uuid)) {
@@ -820,6 +827,64 @@ class AppServiceProvider extends ServiceProvider
                     ->delete();
 
                 return $playlistAlias;
+            });
+
+            // Bouquets (issue #1391)
+            //
+            // Everything hangs off `saving`, which fires before `creating` on a new
+            // model: the owner has to be assigned before the ownership check below
+            // runs, so a bouquet created without an explicit user_id (relying on the
+            // auth()->id() fallback) still passes it.
+            Bouquet::saving(function (Bouquet $bouquet) {
+                if (! $bouquet->user_id) {
+                    $bouquet->user_id = auth()->id();
+                }
+
+                $hasPlaylist = $bouquet->playlist_id !== null;
+                $hasCustom = $bouquet->custom_playlist_id !== null;
+                $hasMerged = $bouquet->merged_playlist_id !== null;
+                if (count(array_filter([$hasPlaylist, $hasCustom, $hasMerged])) !== 1) {
+                    throw new InvalidArgumentException('A bouquet must target exactly one of playlist_id, custom_playlist_id or merged_playlist_id.');
+                }
+                if ($hasCustom) {
+                    // Auto-include is a provider-sync concept; custom playlists never sync.
+                    $bouquet->auto_include_new_live = false;
+                    $bouquet->auto_include_new_vod = false;
+                }
+
+                // The hidden target FK is otherwise a name-existence oracle for other
+                // users' playlists (the staleness callout would reveal group/tag names
+                // on a playlist the requester doesn't own) - confirm the target actually
+                // belongs to this bouquet's user. No auth() dependency: this must also
+                // hold during queue-context saves (e.g. applyProviderRenames()).
+                $target = match (true) {
+                    $hasPlaylist => Playlist::find($bouquet->playlist_id),
+                    $hasCustom => CustomPlaylist::find($bouquet->custom_playlist_id),
+                    default => MergedPlaylist::find($bouquet->merged_playlist_id),
+                };
+                if (! $target || $target->user_id !== $bouquet->user_id) {
+                    throw new InvalidArgumentException('A bouquet must target a playlist owned by its user.');
+                }
+
+                return $bouquet;
+            });
+            Bouquet::updated(function (Bouquet $bouquet) {
+                if ($bouquet->wasChanged('group_selections')) {
+                    // Selections feed attached aliases' effective filters - their cached
+                    // EPG XML was generated against the old selection.
+                    $bouquet->playlistAliases->each(
+                        fn (PlaylistAlias $alias) => EpgCacheService::clearPlaylistEpgCacheFile($alias)
+                    );
+                }
+            });
+            Bouquet::deleting(function (Bouquet $bouquet) {
+                // Pivot rows cascade at the DB level (no pivot events fire there), so
+                // clear the attached aliases' caches while they are still attached.
+                $bouquet->playlistAliases->each(
+                    fn (PlaylistAlias $alias) => EpgCacheService::clearPlaylistEpgCacheFile($alias)
+                );
+
+                return $bouquet;
             });
 
             // StreamProfile

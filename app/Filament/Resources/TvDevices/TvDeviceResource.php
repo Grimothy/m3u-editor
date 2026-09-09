@@ -2,6 +2,7 @@
 
 namespace App\Filament\Resources\TvDevices;
 
+use App\Filament\Clusters\Devices\DevicesCluster;
 use App\Filament\Concerns\HasCopilotSupport;
 use App\Filament\Resources\TvDevices\Pages\ListTvDevices;
 use App\Models\CustomPlaylist;
@@ -37,14 +38,11 @@ class TvDeviceResource extends Resource implements CopilotResource
 
     protected static string|BackedEnum|null $navigationIcon = null;
 
+    protected static ?string $cluster = DevicesCluster::class;
+
     public static function getNavigationLabel(): string
     {
-        return __('Devices');
-    }
-
-    public static function getNavigationGroup(): ?string
-    {
-        return __('Administration');
+        return __('Registered Devices');
     }
 
     public static function getModelLabel(): string
@@ -57,28 +55,28 @@ class TvDeviceResource extends Resource implements CopilotResource
         return __('Devices');
     }
 
-    protected static ?int $navigationSort = 6;
+    protected static ?int $navigationSort = 1;
 
-    // Kept short and stable across the PushDeviceToken -> TvDevice rename so the
-    // admin URL stays /devices rather than following the class name.
-    protected static ?string $slug = 'devices';
+    // Slug is prefixed by the Devices cluster - the admin URL is /devices/registered.
+    protected static ?string $slug = 'registered';
 
     protected static ?string $recordTitleAttribute = 'device_name';
 
     /**
      * Admin-only resource (see canAccess()) - every registered device across
      * every user is visible here, unlike Playlist Viewers which scopes to the
-     * signed-in user's own playlists.
+     * signed-in user's own playlists. This is the push-relay device list; the
+     * Device Pairing surface is a separate page in the same cluster.
      */
     public static function canAccess(): bool
     {
         return auth()->check() && auth()->user()->isAdmin()
-            && (static::isPushRelayEnabled() || static::isDevicePairingEnabled());
+            && static::isPushRelayEnabled();
     }
 
     public static function shouldRegisterNavigation(): bool
     {
-        return static::isPushRelayEnabled() || static::isDevicePairingEnabled();
+        return static::isPushRelayEnabled();
     }
 
     /**

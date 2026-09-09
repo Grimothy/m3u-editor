@@ -1,6 +1,6 @@
 <?php
 
-use App\Filament\Resources\TvDevices\TvDeviceResource;
+use App\Filament\Clusters\Devices\Pages\PairDevice;
 use App\Http\Controllers\AIOStreamsProxyController;
 use App\Http\Controllers\Api\DispatcharrController;
 use App\Http\Controllers\AssetPreviewController;
@@ -41,8 +41,7 @@ use Illuminate\Support\Facades\Route;
 // Vanity URL for Device Pairing — short and easy to type from a phone/computer
 // while looking at a TV. Forwards ?code= through if present (e.g. from a QR link).
 Route::get('/pdt', function () {
-    return redirect(TvDeviceResource::getUrl('index', array_filter([
-        'tab' => 'pairing',
+    return redirect(PairDevice::getUrl(array_filter([
         'code' => request()->query('code'),
     ])));
 })->name('device-pairing.vanity');
@@ -157,6 +156,30 @@ Route::get('/logo-repository/logos/{filename}', [LogoRepositoryController::class
 // Generate M3U playlist from the playlist configuration
 Route::get('/{uuid}/playlist.m3u', PlaylistGenerateController::class)
     ->name('playlist.generate');
+
+// Xtream API stream endpoints - defined BEFORE HDHR/{uuid} catch-all routes
+// to prevent the HDHR pattern {uuid}/hdhr/{username}/{password} from
+// matching URLs like /live/hdhr/hdhr/90982.m3u8 (where uuid=live).
+Route::get('/live/{username}/{password}/{streamId}.{format?}', [XtreamStreamController::class, 'handleLive'])
+    ->name('xtream.stream.live.root');
+Route::get('/movie/{username}/{password}/{streamId}.{format?}', [XtreamStreamController::class, 'handleVod'])
+    ->name('xtream.stream.vod.root');
+Route::get('/series/{username}/{password}/{streamId}.{format?}', [XtreamStreamController::class, 'handleSeries'])
+    ->name('xtream.stream.series.root');
+Route::get('/timeshift/{username}/{password}/{duration}/{date}/{streamId}.{format?}', [XtreamStreamController::class, 'handleTimeshift'])
+    ->name('xtream.stream.timeshift.root');
+
+// DVR file streaming routes - also declared before the HDHR /{uuid}/... catch-all.
+// Stream auth mirrors the Xtream stream pattern: username + password (playlist UUID)
+// or PlaylistAuth credentials embedded in the URL. Keep the more specific
+// live.m3u8 and edl routes ahead of the generic {uuid}.{format?} stream route so
+// Laravel does not consume "live.m3u8" as {uuid}.{format?}.
+Route::get('/dvr/{username}/{password}/{uuid}/live.m3u8', [DvrStreamController::class, 'hlsPlaylist'])
+    ->name('dvr.recording.hls.playlist');
+Route::get('/dvr/{username}/{password}/{uuid}/edl', [DvrStreamController::class, 'edl'])
+    ->name('dvr.recording.edl');
+Route::get('/dvr/{username}/{password}/{uuid}.{format?}', [DvrStreamController::class, 'stream'])
+    ->name('dvr.recording.stream');
 
 // Auth-aware HDHR routes (path-based auth to support clients that ignore query string auth)
 Route::get('/{uuid}/hdhr/{username}/{password}/device.xml', [PlaylistGenerateController::class, 'hdhr'])
@@ -343,18 +366,6 @@ Route::match(['get', 'post'], '/player_api.php', [XtreamApiController::class, 'h
 Route::match(['get', 'post'], '/get.php', [XtreamApiController::class, 'handle'])->name('xtream.api.get');
 Route::get('/xmltv.php', [XtreamApiController::class, 'epg'])->name('xtream.api.epg');
 
-// Xtream API stream endpoints
-Route::get('/live/{username}/{password}/{streamId}.{format?}', [XtreamStreamController::class, 'handleLive'])
-    ->name('xtream.stream.live.root');
-Route::get('/movie/{username}/{password}/{streamId}.{format?}', [XtreamStreamController::class, 'handleVod'])
-    ->name('xtream.stream.vod.root');
-Route::get('/series/{username}/{password}/{streamId}.{format?}', [XtreamStreamController::class, 'handleSeries'])
-    ->name('xtream.stream.series.root');
-
-// Timeshift endpoints
-Route::get('/timeshift/{username}/{password}/{duration}/{date}/{streamId}.{format?}', [XtreamStreamController::class, 'handleTimeshift'])
-    ->name('xtream.stream.timeshift.root');
-
 // Dispatcharr-compatible proxy stream endpoint (used by emby-xtream plugin)
 Route::get('/proxy/ts/stream/{uuid}', [DispatcharrController::class, 'proxyStream'])
     ->name('dispatcharr.proxy.stream')
@@ -440,34 +451,18 @@ Route::get('/webdav-media/{integration}/stream/{item}', [
 Route::get('/aiostreams-media/{integration}/channel/{channel}/stream', [
     MediaServerProxyController::class,
     'streamAioStreamsChannel',
-])->middleware(ValidateSignature::relative())->name('aiostreams-media.channel.stream');
+])->middleware(ValidateSignature::relative('proxy'))->name('aiostreams-media.channel.stream');
 
 Route::get('/aiostreams-media/{integration}/episode/{episode}/stream', [
     MediaServerProxyController::class,
     'streamAioStreamsEpisode',
-])->middleware(ValidateSignature::relative())->name('aiostreams-media.episode.stream');
+])->middleware(ValidateSignature::relative('proxy'))->name('aiostreams-media.episode.stream');
 
 Route::get('/aiostreams-media/{integration}/live/{item}/stream', [
     MediaServerProxyController::class,
     'streamAioStreamsLive',
-])->middleware(ValidateSignature::relative())->name('aiostreams-media.live.stream');
+])->middleware(ValidateSignature::relative('proxy'))->name('aiostreams-media.live.stream');
 
-/*
- * DVR routes — file streaming and proxy callbacks
- * Stream auth mirrors the Xtream stream pattern: username + password (playlist UUID)
- * or PlaylistAuth credentials embedded in the URL.
- * The callback route is unauthenticated (validated by API token in the controller).
- */
-
-// HLS playlist for in-progress DVR recordings. Must be declared before the generic
-// dvr.recording.stream route so Laravel does not consume "live.m3u8" as {uuid}.{format?}.
-// Only the playlist (~1 KB) passes through the editor; segment URLs are rewritten to
-// point directly at the proxy's public segment endpoint.
-Route::get('/dvr/{username}/{password}/{uuid}/live.m3u8', [DvrStreamController::class, 'hlsPlaylist'])
-    ->name('dvr.recording.hls.playlist');
-
-Route::get('/dvr/{username}/{password}/{uuid}/edl', [DvrStreamController::class, 'edl'])
-    ->name('dvr.recording.edl');
-
-Route::get('/dvr/{username}/{password}/{uuid}.{format?}', [DvrStreamController::class, 'stream'])
-    ->name('dvr.recording.stream');
+// NOTE: The DVR file streaming routes (dvr.recording.*) were relocated earlier in
+// this file, ahead of the /{uuid}/hdhr/... catch-all, so the HDHR pattern no
+// longer swallows /dvr/... URLs. See the "DVR file streaming routes" block above.

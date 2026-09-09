@@ -3,6 +3,7 @@
 namespace App\Filament\Tables;
 
 use App\Filament\Tables\Traits\FiltersBySelection;
+use App\Filament\Tables\Traits\HasBouquetPickerColumns;
 use App\Models\Group;
 use App\Models\SourceGroup;
 use Filament\Actions\BulkActionGroup;
@@ -14,6 +15,7 @@ use Illuminate\Database\Eloquent\Builder;
 class SourceGroupsTable
 {
     use FiltersBySelection;
+    use HasBouquetPickerColumns;
 
     public static function configure(Table $table): Table
     {
@@ -22,9 +24,13 @@ class SourceGroupsTable
             ->modifyQueryUsing(function (Builder $query) use ($table): Builder {
                 $arguments = $table->getArguments();
                 $type = $arguments['type'] ?? null;
-                $playlistId = $arguments['playlist_id'] ?? null;
 
-                if ($playlistId) {
+                // Scoped by a single playlist_id (playlist import preferences) or a
+                // playlist_ids list (a merged-playlist alias picking across its sources).
+                // An explicit empty list yields no rows rather than every row.
+                if (array_key_exists('playlist_ids', $arguments)) {
+                    $query->whereIn('source_groups.playlist_id', (array) $arguments['playlist_ids'])->with('playlist');
+                } elseif ($playlistId = $arguments['playlist_id'] ?? null) {
                     $query->where('source_groups.playlist_id', $playlistId);
                 }
                 if ($type) {
@@ -71,6 +77,8 @@ class SourceGroupsTable
                         });
                     })
                     ->sortable(),
+                self::sourcePlaylistColumn($table),
+                self::bouquetMembershipColumn($table),
             ])
             ->filters([
                 TernaryFilter::make('enabled')

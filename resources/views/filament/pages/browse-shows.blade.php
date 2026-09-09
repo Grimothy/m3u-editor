@@ -11,7 +11,7 @@
                     <p class="mt-1 text-amber-700 dark:text-amber-300">
                         {{ __('Air times are shown in UTC. To see times in your local timezone,') }}
                         <a
-                            href="{{ \App\Filament\Pages\Preferences::getUrl() }}"
+                            href="{{ \App\Filament\Clusters\Settings\Pages\ManageGeneralSettings::getUrl() }}"
                             class="font-medium underline hover:text-amber-900 dark:hover:text-amber-100"
                         >
                             {{ __('set your timezone in Preferences') }} </a

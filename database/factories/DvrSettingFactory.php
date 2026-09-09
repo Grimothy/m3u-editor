@@ -31,6 +31,7 @@ class DvrSettingFactory extends Factory
             'default_end_late_seconds' => 30,
             'enable_metadata_enrichment' => true,
             'include_disabled_channels' => false,
+            'transcode_recordings' => false,
             'tmdb_api_key' => null,
             'global_disk_quota_gb' => null,
             'retention_days' => null,

@@ -55,6 +55,14 @@ class ListStreamProfiles extends ListRecords
                         ],
                         [
                             'user_id' => $userId,
+                            'name' => 'HDHomeRun / OTA Live',
+                            'description' => 'For ATSC OTA broadcasts (HDHomeRun). Deinterlaces MPEG-2, encodes to H.264 High Profile Level 4.1 with superfast preset, and converts audio to AAC stereo.',
+                            'backend' => 'ffmpeg',
+                            'format' => 'ts',
+                            'args' => '-fflags +genpts -i {input_url} -max_muxing_queue_size 1024 -vf yadif=1:-1:0 -c:v libx264 -preset superfast -b:v {bitrate|2000k} -maxrate {maxrate|2500k} -bufsize {bufsize|5000k} -fps_mode vfr -profile:v high -level 41 -c:a aac -b:a {audio_bitrate|128k} -ac 2 -f mpegts {output_args|pipe:1}',
+                        ],
+                        [
+                            'user_id' => $userId,
                             'name' => 'Default Streamlink Profile',
                             'description' => 'For platforms like Twitch and YouTube — extracts the stream directly without re-encoding.',
                             'backend' => 'streamlink',

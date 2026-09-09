@@ -7,6 +7,7 @@ use App\Facades\SortFacade;
 use App\Filament\Actions\AssetPickerAction;
 use App\Filament\Actions\BulkModalActionGroup;
 use App\Filament\Actions\RegexTesterAction;
+use App\Filament\Clusters\Settings\Pages\ManageSyncSettings;
 use App\Filament\Concerns\HasCopilotSupport;
 use App\Filament\Resources\VodResource\Pages;
 use App\Filament\Resources\Vods\Pages\ListVod;
@@ -2120,7 +2121,7 @@ class VodResource extends Resource implements CopilotResource
                                         ->icon('heroicon-o-cog-6-tooth')
                                         ->iconPosition('after')
                                         ->size('sm')
-                                        ->url('/preferences?tab=sync-options%3A%3Adata%3A%3Atab')
+                                        ->url(ManageSyncSettings::getUrl())
                                         ->openUrlInNewTab(false)
                                 )
                                 ->helperText(__('Select a Stream File Setting profile to override global/group settings for this VOD channel. Leave empty to use group or global settings. Priority: VOD > Group > Global.')),

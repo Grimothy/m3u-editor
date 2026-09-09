@@ -3,12 +3,14 @@
 namespace App\Filament\Support;
 
 use App\Enums\DvrSeriesMode;
+use App\Filament\Clusters\Settings\Pages\ManageIntegrationSettings;
 use App\Models\MediaServerIntegration;
 use App\Settings\GeneralSettings;
 use Filament\Forms\Components\Select;
 use Filament\Forms\Components\TextInput;
 use Filament\Forms\Components\Toggle;
 use Filament\Schemas\Components\Callout;
+use Filament\Schemas\Components\Fieldset;
 use Filament\Schemas\Components\Grid;
 use Filament\Schemas\Components\Section;
 use Filament\Schemas\Components\Tabs\Tab;
@@ -37,25 +39,39 @@ class DvrRequestsAiostreamsTabs
                     ->icon('heroicon-m-video-camera')
                     ->description(__('Configure digital video recording for this playlist. Enable DVR to schedule recordings from the EPG guide.'))
                     ->schema([
-                        Toggle::make('dvr_enabled')
-                            ->label(__('Enable DVR'))
-                            ->helperText(__('When enabled, the EPG guide will show record buttons and the scheduler will process recording rules.'))
+                        Grid::make()
+                            ->columns(3)
+                            ->columnSpanFull()
+                            ->schema([
+                                Toggle::make('dvr_enabled')
+                                    ->label(__('Enable DVR'))
+                                    ->helperText(__('When enabled, the EPG guide will show record buttons and the scheduler will process recording rules.'))
+                                    ->default(false)
+                                    ->inline(false)
+                                    ->live(),
+                                Select::make('dvr_output_format')
+                                    ->label(__('Output Format'))
+                                    ->columnSpan(2)
+                                    ->helperText(__('Container format for the final recording file. All options use stream copy (no re-encoding) - only the container changes.'))
+                                    ->options([
+                                        'ts' => 'MPEG-TS (.ts) — fastest, direct segment join, no remuxing',
+                                        'mp4' => 'MP4 (.mp4) — best compatibility with media players',
+                                        'mkv' => 'MKV (.mkv) — flexible container, good player support',
+                                    ])
+                                    ->default('ts')
+                                    ->required()
+                                    ->hidden(fn (Get $get): bool => ! $get('dvr_enabled')),
+                            ]),
+
+                        Toggle::make('dvr_transcode_recordings')
+                            ->label(__('Transcode Recordings'))
+                            ->helperText(__('Have the proxy deinterlace and transcode recordings to H.264/AAC while they record. Recommended for HDHomeRun / OTA sources so recordings play in a browser and take less disk space. Leave off for IPTV sources that are already H.264 (stream copy, no re-encoding).'))
                             ->default(false)
                             ->inline(false)
-                            ->live(),
-                        Select::make('dvr_output_format')
-                            ->label(__('Output Format'))
-                            ->helperText(__('Container format for the final recording file. All options use stream copy (no re-encoding) - only the container changes.'))
-                            ->options([
-                                'ts' => 'MPEG-TS (.ts) — fastest, direct segment join, no remuxing',
-                                'mp4' => 'MP4 (.mp4) — best compatibility with media players',
-                                'mkv' => 'MKV (.mkv) — flexible container, good player support',
-                            ])
-                            ->default('ts')
-                            ->required()
                             ->hidden(fn (Get $get): bool => ! $get('dvr_enabled')),
-                        Grid::make()
-                            ->columns(2)
+                        Fieldset::make()
+                            ->label(__('Recording Defaults'))
+                            ->columns(3)
                             ->columnSpanFull()
                             ->hidden(fn (Get $get): bool => ! $get('dvr_enabled'))
                             ->schema([
@@ -98,48 +114,58 @@ class DvrRequestsAiostreamsTabs
                             ->columnSpanFull()
                             ->hidden(fn (Get $get): bool => ! $get('dvr_enabled'))
                             ->schema([
-                                Toggle::make('dvr_enable_metadata_enrichment')
-                                    ->label(__('Enable Metadata Enrichment'))
-                                    ->helperText(__('Automatically fetch metadata (artwork, descriptions, episode info) from TMDB and TVMaze after recording.'))
-                                    ->default(true)
-                                    ->inline(false)
-                                    ->live(),
-                                Toggle::make('dvr_enable_comskip')
-                                    ->label(__('Enable Commercial Detection (Comskip)'))
-                                    ->helperText(new HtmlString(__('Run comskip after recording to detect and mark commercials. Produces .edl files that Kodi, Jellyfin, and Emby can use for automatic commercial skipping. The Emby.ComSkiper plugin for Emby is available at <a href="https://github.com/BillOatmanWork/Emby.ComSkipper" class="underline" target="_blank" rel="noopener">GitHub/BillOatmanWork/Emby.ComSkipper</a>.')))
-                                    ->default(false)
-                                    ->inline(false)
-                                    ->columnSpanFull(),
-                                Callout::make(__('TMDB'))
-                                    ->description(function (): HtmlString {
-                                        $hasKey = ! empty(app(GeneralSettings::class)->tmdb_api_key);
+                                Fieldset::make()
+                                    ->label(__('Metadata Enrichment'))
+                                    ->columns(2)
+                                    ->columnSpanFull()
+                                    ->hidden(fn (Get $get): bool => ! $get('dvr_enabled'))
+                                    ->schema([
+                                        Toggle::make('dvr_enable_metadata_enrichment')
+                                            ->label(__('Enable Metadata Enrichment'))
+                                            ->helperText(__('Automatically fetch metadata (artwork, descriptions, episode info) from TMDB and TVMaze after recording.'))
+                                            ->default(true)
+                                            ->inline(false)
+                                            ->live(),
+                                        Callout::make(__('TMDB'))
+                                            ->description(function (): HtmlString {
+                                                $hasKey = ! empty(app(GeneralSettings::class)->tmdb_api_key);
 
-                                        if ($hasKey) {
-                                            return new HtmlString(
-                                                '<span class="text-sm text-success-600 dark:text-success-400 font-medium">✓ TMDB API key configured in Settings</span>'
-                                            );
-                                        }
+                                                if ($hasKey) {
+                                                    return new HtmlString(
+                                                        '<span class="text-sm text-success-600 dark:text-success-400 font-medium">✓ TMDB API key configured in Settings</span>'
+                                                    );
+                                                }
 
-                                        $url = route('filament.admin.pages.preferences').'#tmdb';
+                                                $url = ManageIntegrationSettings::getUrl(['tab' => 'tmdb']);
 
-                                        return new HtmlString(
-                                            '<span class="text-sm text-warning-600 dark:text-warning-400">No TMDB API key found. '
-                                            .'<a href="'.e($url).'" class="underline font-medium">Configure it in Settings → TMDB</a> '
-                                            .'to enable TMDB metadata lookups. TVMaze will be used as a fallback.</span>'
-                                        );
-                                    })
-                                    ->hidden(fn (Get $get): bool => ! $get('dvr_enable_metadata_enrichment')),
-                                Toggle::make('dvr_generate_nfo_files')
-                                    ->label(__('Generate NFO Files'))
-                                    ->helperText(__('Write Kodi/Jellyfin/Plex compatible .nfo metadata files alongside each recording (uses enriched TMDB/TVMaze metadata).'))
-                                    ->default(false)
-                                    ->inline(false)
-                                    ->columnSpanFull(),
-                                Toggle::make('dvr_include_disabled_channels')
-                                    ->label(__('Show Disabled Channels in Browse Shows'))
-                                    ->helperText(__('When enabled, Browse Shows will include content from channels that are disabled. Allows scheduling recordings for content on non-enabled channels.'))
-                                    ->default(false)
-                                    ->inline(false),
+                                                return new HtmlString(
+                                                    '<span class="text-sm text-warning-600 dark:text-warning-400">No TMDB API key found. '
+                                                    .'<a href="'.e($url).'" class="underline font-medium">Configure it in Settings &rarr; TMDB</a> '
+                                                    .'to enable TMDB metadata lookups. TVMaze will be used as a fallback.</span>'
+                                                );
+                                            })
+                                            ->hidden(fn (Get $get): bool => ! $get('dvr_enable_metadata_enrichment')),
+                                    ]),
+                                Fieldset::make(__('Advanced DVR Settings'))
+                                    ->schema([
+                                        Toggle::make('dvr_enable_comskip')
+                                            ->label(__('Enable Commercial Detection (Comskip)'))
+                                            ->helperText(new HtmlString(__('Run comskip after recording to detect and mark commercials. Produces .edl files that Kodi, Jellyfin, and Emby can use for automatic commercial skipping. The Emby.ComSkiper plugin for Emby is available at <a href="https://github.com/BillOatmanWork/Emby.ComSkipper" class="underline" target="_blank" rel="noopener">GitHub/BillOatmanWork/Emby.ComSkipper</a>.')))
+                                            ->default(false)
+                                            ->inline(false)
+                                            ->columnSpanFull(),
+                                        Toggle::make('dvr_generate_nfo_files')
+                                            ->label(__('Generate NFO Files'))
+                                            ->helperText(__('Write Kodi/Jellyfin/Plex compatible .nfo metadata files alongside each recording (uses enriched TMDB/TVMaze metadata).'))
+                                            ->default(false)
+                                            ->inline(false)
+                                            ->columnSpanFull(),
+                                        Toggle::make('dvr_include_disabled_channels')
+                                            ->label(__('Show Disabled Channels in Browse Shows'))
+                                            ->helperText(__('When enabled, Browse Shows will include content from channels that are disabled. Allows scheduling recordings for content on non-enabled channels.'))
+                                            ->default(false)
+                                            ->inline(false),
+                                    ]),
                             ]),
                     ]),
                 Section::make(__('Series Recording Defaults'))

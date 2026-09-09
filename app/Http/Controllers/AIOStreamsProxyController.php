@@ -3,7 +3,10 @@
 namespace App\Http\Controllers;
 
 use App\Facades\PlaylistFacade;
+use App\Models\CustomPlaylist;
 use App\Models\MediaServerIntegration;
+use App\Models\MergedPlaylist;
+use App\Models\Playlist;
 use App\Models\PlaylistAuth;
 use App\Services\AIOStreamsAuthorizationService;
 use App\Services\AIOStreamsService;
@@ -73,8 +76,34 @@ class AIOStreamsProxyController extends Controller
             return response()->json(['error' => 'Unauthorized'], 401);
         }
 
+        // Debrid addons only resolve IMDb IDs to streams, not TMDB IDs.
+        // When the catalog returns a TMDB ID (e.g. "tmdb:603"), resolve it to
+        // an IMDb ID via the meta lookup before requesting streams.
+        $resolvedId = $id;
+        if (str_starts_with($id, 'tmdb:')) {
+            // Stremio series episode ids carry ":season:episode" after the tmdb
+            // id (e.g. "tmdb:1399:1:1"); the meta lookup needs the bare
+            // "tmdb:1399", and the coordinates must be re-attached to the
+            // resolved IMDb id so the stream request targets the right episode.
+            [$tmdbId, $episodeSuffix] = $this->splitStremioId($id);
+
+            // A tmdb -> imdb mapping never changes, so cache it to keep this
+            // extra upstream call off the hot path (the stream route runs under
+            // nginx's default 60s fastcgi_read_timeout). Reuses the same meta
+            // resolution (with public Stremio-addon fallback) as meta().
+            $imdbId = Cache::remember(
+                "aiostreams.imdb.{$integrationId}.{$type}.{$tmdbId}",
+                now()->addWeek(),
+                fn () => AIOStreamsService::make($integration)->fetchMeta($type, $tmdbId)['meta']['imdb_id'] ?? null
+            );
+
+            if (! empty($imdbId)) {
+                $resolvedId = $imdbId.$episodeSuffix;
+            }
+        }
+
         // Streams are not cached — always fetch fresh to get current availability
-        $response = Http::timeout(30)->get("{$integration->manifest_base_url}/stream/{$type}/{$id}.json");
+        $response = Http::timeout(30)->get("{$integration->manifest_base_url}/stream/{$type}/{$resolvedId}.json");
 
         if (! $response->successful()) {
             return response()->json(['error' => 'Failed to fetch streams from AIOStreams'], 502);
@@ -114,7 +143,8 @@ class AIOStreamsProxyController extends Controller
      */
     public function meta(Request $request, string $username, string $password, int $integrationId, string $type, string $id): JsonResponse
     {
-        $integration = $this->resolveIntegration($username, $password, $integrationId);
+        $playlist = null;
+        $integration = $this->resolveIntegration($username, $password, $integrationId, $playlist);
 
         if (! $integration) {
             return response()->json(['error' => 'Unauthorized'], 401);
@@ -125,8 +155,9 @@ class AIOStreamsProxyController extends Controller
         // Delegates to AIOStreamsService::fetchMeta(), which falls back to the
         // public Stremio meta addons (Cinemeta / Kitsu / TMDB) when the operator's
         // AIOStreams instance has no metadata addon configured and 404s the
-        // request. Keeps this proxy path and the admin/guest browse UI on one
-        // implementation.
+        // request, then (when enabled) enriches the meta object with TMDB
+        // cast_list / clearlogo / season metadata. Keeps this proxy path and the
+        // admin/guest browse UI on one implementation.
         $data = Cache::remember($cacheKey, 300, function () use ($integration, $type, $id) {
             return AIOStreamsService::make($integration)->fetchMeta($type, $id);
         });
@@ -135,7 +166,72 @@ class AIOStreamsProxyController extends Controller
             return response()->json(['error' => 'Meta not found'], 404);
         }
 
+        // Route any TMDB-sourced images (cast photos, transparent title logo)
+        // through the logo proxy so clients never hit image.tmdb.org directly -
+        // mirrors XtreamApiController's get_vod_info / get_series_info handling.
+        if ($playlist && $playlist->enable_logo_proxy && is_array($data['meta'] ?? null)) {
+            $data['meta'] = $this->proxyMetaImages($data['meta']);
+        }
+
         return response()->json($data);
+    }
+
+    /**
+     * Wrap the TMDB-enriched image URLs on a meta object in the logo proxy.
+     * Only the keys the enrichment step adds are touched - poster/background
+     * from the upstream Stremio addon are left as-is (parity with how the
+     * pre-enrichment passthrough behaved).
+     *
+     * @param  array<string, mixed>  $meta
+     * @return array<string, mixed>
+     */
+    private function proxyMetaImages(array $meta): array
+    {
+        if (is_string($meta['clearlogo'] ?? null)) {
+            $meta['clearlogo'] = $this->proxyImageUrl($meta['clearlogo']);
+        }
+
+        if (is_array($meta['cast_list'] ?? null)) {
+            $meta['cast_list'] = array_map(function ($member) {
+                if (is_array($member) && isset($member['photo'])) {
+                    $member['photo'] = $this->proxyImageUrl($member['photo']);
+                }
+
+                return $member;
+            }, $meta['cast_list']);
+        }
+
+        return $meta;
+    }
+
+    /**
+     * Wrap an image URL in the logo proxy unless it is already app-hosted.
+     */
+    private function proxyImageUrl(?string $url): ?string
+    {
+        if (! $url || ! filter_var($url, FILTER_VALIDATE_URL) || str_starts_with($url, url('/'))) {
+            return $url;
+        }
+
+        return LogoProxyController::generateProxyUrl($url);
+    }
+
+    /**
+     * Split a Stremio content id into its base id and any trailing
+     * ":season:episode" coordinates.
+     *
+     *   "tmdb:1399:1:1" => ["tmdb:1399", ":1:1"]
+     *   "tmdb:603"      => ["tmdb:603", ""]
+     *
+     * @return array{0: string, 1: string}
+     */
+    private function splitStremioId(string $id): array
+    {
+        $parts = explode(':', $id);
+        $baseId = implode(':', array_slice($parts, 0, 2));
+        $suffix = count($parts) > 2 ? ':'.implode(':', array_slice($parts, 2)) : '';
+
+        return [$baseId, $suffix];
     }
 
     /**
@@ -143,8 +239,13 @@ class AIOStreamsProxyController extends Controller
      * credentials - only the integration actually assigned to the caller's effective
      * playlist is ever returned, never an arbitrary integration ID owned by the same
      * user (see #1384). Mirrors the authorization Xtream's feature advertisement uses.
+     *
+     * @param  Playlist|MergedPlaylist|CustomPlaylist|null  $playlist
+     *                                                                 Out-param set to the caller's effective playlist when authentication
+     *                                                                 succeeds, so callers can read playlist-level settings (e.g.
+     *                                                                 enable_logo_proxy) without a second authenticate() round trip.
      */
-    private function resolveIntegration(string $username, string $password, int $integrationId): ?MediaServerIntegration
+    private function resolveIntegration(string $username, string $password, int $integrationId, &$playlist = null): ?MediaServerIntegration
     {
         $auth = PlaylistFacade::authenticate($username, $password);
 

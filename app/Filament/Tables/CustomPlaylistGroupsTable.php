@@ -2,6 +2,7 @@
 
 namespace App\Filament\Tables;
 
+use App\Filament\Tables\Traits\HasBouquetPickerColumns;
 use App\Models\CustomPlaylist;
 use App\Models\CustomPlaylistGroup;
 use Filament\Actions\BulkActionGroup;
@@ -11,6 +12,8 @@ use Illuminate\Database\Eloquent\Builder;
 
 class CustomPlaylistGroupsTable
 {
+    use HasBouquetPickerColumns;
+
     public static function configure(Table $table): Table
     {
         return $table
@@ -42,6 +45,7 @@ class CustomPlaylistGroupsTable
                         ['%'.mb_strtolower($search).'%']
                     ))
                     ->sortable(),
+                self::bouquetMembershipColumn($table),
             ])
             ->filters([
                 //

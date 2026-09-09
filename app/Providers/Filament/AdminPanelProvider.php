@@ -4,6 +4,9 @@ namespace App\Providers\Filament;
 
 use App\Filament\Auth\EditProfile;
 use App\Filament\Auth\Login;
+use App\Filament\Clusters\Devices\DevicesCluster;
+use App\Filament\Clusters\PlaylistAliases\PlaylistAliasesCluster;
+use App\Filament\Clusters\Settings\SettingsCluster;
 use App\Filament\CopilotTools\EpgMappingStateTool;
 use App\Filament\Pages\Backups;
 use App\Filament\Pages\BrowseShows;
@@ -12,7 +15,6 @@ use App\Filament\Pages\CustomDashboard;
 use App\Filament\Pages\LogViewer;
 use App\Filament\Pages\M3uProxyStreamMonitor;
 use App\Filament\Pages\PluginsDashboard;
-use App\Filament\Pages\Preferences;
 use App\Filament\Pages\ReleaseLogs;
 use App\Filament\Pages\RequestContent;
 use App\Filament\Resources\AedProfiles\AedProfileResource;
@@ -32,7 +34,6 @@ use App\Filament\Resources\MergedEpgs\MergedEpgResource;
 use App\Filament\Resources\MergedPlaylists\MergedPlaylistResource;
 use App\Filament\Resources\Networks\NetworkResource;
 use App\Filament\Resources\PersonalAccessTokens\PersonalAccessTokenResource;
-use App\Filament\Resources\PlaylistAliases\PlaylistAliasResource;
 use App\Filament\Resources\PlaylistAuths\PlaylistAuthResource;
 use App\Filament\Resources\Playlists\PlaylistResource;
 use App\Filament\Resources\PlaylistViewers\PlaylistViewerResource;
@@ -43,7 +44,6 @@ use App\Filament\Resources\QueueMonitor\QueueMonitorResource;
 use App\Filament\Resources\Series\SeriesResource;
 use App\Filament\Resources\StreamFileSettings\StreamFileSettingResource;
 use App\Filament\Resources\StreamProfiles\StreamProfileResource;
-use App\Filament\Resources\TvDevices\TvDeviceResource;
 use App\Filament\Resources\Users\UserResource;
 use App\Filament\Resources\VodGroups\VodGroupResource;
 use App\Filament\Resources\Vods\VodResource;
@@ -179,6 +179,7 @@ class AdminPanelProvider extends PanelProvider
             ->globalSearchKeyBindings(['command+k', 'ctrl+k'])
             ->discoverResources(in: app_path('Filament/Resources'), for: 'App\\Filament\\Resources')
             ->discoverPages(in: app_path('Filament/Pages'), for: 'App\\Filament\\Pages')
+            ->discoverClusters(in: app_path('Filament/Clusters'), for: 'App\\Filament\\Clusters')
             ->pages([
                 CustomDashboard::class,
             ])
@@ -196,8 +197,8 @@ class AdminPanelProvider extends PanelProvider
                                 ->icon('heroicon-s-shield-check')
                                 ->items([
                                     ...(config('auth.auto_login') ? [] : UserResource::getNavigationItems()),
-                                    ...(($settings['push_relay_enabled'] || $settings['device_pairing_enabled']) ? TvDeviceResource::getNavigationItems() : []),
-                                    ...Preferences::getNavigationItems(),
+                                    ...(($settings['push_relay_enabled'] || $settings['device_pairing_enabled']) ? DevicesCluster::getNavigationItems() : []),
+                                    ...SettingsCluster::getNavigationItems(),
                                 ]),
                         ] : []),
                         NavigationGroup::make(fn () => __('Playlist'))
@@ -206,7 +207,7 @@ class AdminPanelProvider extends PanelProvider
                                 ...PlaylistResource::getNavigationItems(),
                                 ...CustomPlaylistResource::getNavigationItems(),
                                 ...MergedPlaylistResource::getNavigationItems(),
-                                ...PlaylistAliasResource::getNavigationItems(),
+                                ...PlaylistAliasesCluster::getNavigationItems(),
                                 ...PlaylistViewerResource::getNavigationItems(),
                                 ...PlaylistAuthResource::getNavigationItems(),
                                 ...StreamFileSettingResource::getNavigationItems(),
@@ -368,6 +369,7 @@ class AdminPanelProvider extends PanelProvider
                 'live/*/*/*/*',
                 'movie/*/*/*',
                 'series/*/*/*/*',
+                'dvr/*/*/*',
             ]);
         if ($settings['navigation_position'] === 'top') {
             $adminPanel->topNavigation();
@@ -534,7 +536,7 @@ You can pin specific content in a network playlist to a recurring weekly timeslo
 4. To remove a pin, call NetworkContentPinTool with only the network_content_id (omit day and time).
 
 ## Tools Guidance
-If the user asks for something you cannot do, call Get Available Tools to see which tools are currently enabled, identify the missing capability, and tell the user the exact tool to enable in Preferences → AI Copilot → Global Tools (for example: "I do not have the TV schedule tool enabled. Enable DVR: Schedule in Preferences → AI Copilot → Global Tools and try again.").
+If the user asks for something you cannot do, call Get Available Tools to see which tools are currently enabled, identify the missing capability, and tell the user the exact tool to enable in Settings > AI Copilot > Global Tools (for example: "I do not have the TV schedule tool enabled. Enable DVR: Schedule in Settings > AI Copilot > Global Tools and try again.").
 PROMPT;
     }
 

@@ -6,6 +6,7 @@ use App\Facades\LogoFacade;
 use App\Filament\Actions\AssetPickerAction;
 use App\Filament\Actions\BulkModalActionGroup;
 use App\Filament\Actions\RegexTesterAction;
+use App\Filament\Clusters\Settings\Pages\ManageSyncSettings;
 use App\Filament\Concerns\HasCopilotSupport;
 use App\Filament\Resources\Series\Pages\CreateSeries;
 use App\Filament\Resources\Series\Pages\EditSeries;
@@ -1179,7 +1180,7 @@ class SeriesResource extends Resource implements CopilotResource
                                                 ->icon('heroicon-o-cog-6-tooth')
                                                 ->iconPosition('after')
                                                 ->size('sm')
-                                                ->url('/preferences?tab=sync-options%3A%3Adata%3A%3Atab')
+                                                ->url(ManageSyncSettings::getUrl())
                                                 ->openUrlInNewTab(false)
                                         )
                                         ->helperText(__('Select a Stream File Setting profile to override global/category settings for this series. Leave empty to use category or global settings.')),

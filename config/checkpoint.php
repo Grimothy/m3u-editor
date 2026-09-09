@@ -474,6 +474,9 @@ return [
         '9a065d722be9', // QueueMonitor
 
         '0113919ad8de', // EpgMapCandidate
+
+        '885eae8be59c', // Bouquet
+        'a1a5cad70005', // BouquetPlaylistAlias
     ],
 
     /*
