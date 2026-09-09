@@ -116,7 +116,53 @@ class DvrRecorderService
         // circuit-breaker drops (provider kills one connection when a second opens).
         $channel = $recording->channel;
         if ($channel) {
-            $streamUrl = $channel->url_custom ?? $channel->url ?? $recording->stream_url;
+            $rawUrl = $channel->url_custom ?? $channel->url ?? $recording->stream_url;
+
+            // When the channel's source playlist pools provider profiles, resolve the
+            // URL through the proxy so a provider profile is selected and its capacity
+            // reserved - a DVR recording should draw from the pool exactly as a live
+            // viewer does. Fall back to the raw channel URL if resolution fails so a
+            // recording is never lost to a transient proxy/provider error.
+            $sourcePlaylist = $channel->playlist;
+            if ($sourcePlaylist instanceof Playlist && $sourcePlaylist->profiles_enabled) {
+                try {
+                    $streamUrl = $this->proxy->getChannelUrl(
+                        $sourcePlaylist,
+                        $channel,
+                        null,
+                        null,
+                        $recording->user?->name,
+                    );
+                    if (empty($streamUrl)) {
+                        $streamUrl = $rawUrl;
+                    }
+                } catch (\Throwable $e) {
+                    // UNRESOLVED - behavior still being decided.
+                    //
+                    // getChannelUrl() aborts (503) when every provider profile is at
+                    // capacity. Right now we swallow that and fall back to the raw
+                    // primary-account URL so the recording is never lost, relying on the
+                    // fact that most providers boot an older stream when a new one starts,
+                    // so DVR effectively wins.
+                    //
+                    // The counter-argument: the whole point of pooled profiles is to
+                    // manage the connection budget explicitly and reject at the limit.
+                    // Silently exceeding it here undermines that. The alternative is to
+                    // rethrow (or only catch genuinely transient errors) and let a
+                    // capacity-blocked recording fail loudly.
+                    //
+                    // TODO: decide between "DVR always wins (current)" vs "respect the
+                    // pool limit and fail the recording". Revisit once real-world pooled
+                    // DVR usage tells us which matters more.
+                    Log::warning('DVR: pooled-provider URL resolution failed, using raw channel URL', [
+                        'recording_id' => $recording->id,
+                        'exception' => $e->getMessage(),
+                    ]);
+                    $streamUrl = $rawUrl;
+                }
+            } else {
+                $streamUrl = $rawUrl;
+            }
         } else {
             $streamUrl = $recording->stream_url;
         }

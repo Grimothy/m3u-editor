@@ -88,6 +88,132 @@ test('it leaves the credential swap path untouched for direct-to-provider profil
         ->toBe('http://secondary-provider.test/live/secondaryuser/secondarypass/123.ts');
 });
 
+test('it resolves via exact name match when source_id lookup fails (2-step setup)', function () {
+    $poolPlaylist = Playlist::factory()->create([
+        'xtream_config' => [
+            'url' => 'http://primary-provider.test',
+            'username' => 'pooluser',
+            'password' => 'poolpass',
+        ],
+    ]);
+
+    $targetPlaylist = Playlist::factory()->create();
+
+    // Xtream-imported source: numeric source_id.
+    $sourceChannel = Channel::factory()->create([
+        'playlist_id' => $poolPlaylist->id,
+        'source_id' => '1918533',
+        'name' => 'TSN 1',
+    ]);
+
+    // M3U-imported target: hash-based source_id that will never match, same name.
+    $targetChannel = Channel::factory()->create([
+        'playlist_id' => $targetPlaylist->id,
+        'source_id' => 'a1b2c3d4e5',
+        'name' => 'TSN 1',
+        'enabled' => true,
+        'url' => 'http://real-upstream-provider.test/live/realuser/realpass/999.ts',
+    ]);
+
+    $profile = PlaylistProfile::factory()->create([
+        'playlist_id' => $poolPlaylist->id,
+        'url' => url('/'),
+        'password' => $targetPlaylist->uuid,
+    ]);
+
+    expect($profile->transformChannelUrl($sourceChannel))->toBe($targetChannel->url);
+});
+
+test('it does not name-match when multiple target channels share the name and groups differ', function () {
+    $poolPlaylist = Playlist::factory()->create([
+        'xtream_config' => [
+            'url' => 'http://primary-provider.test',
+            'username' => 'pooluser',
+            'password' => 'poolpass',
+        ],
+    ]);
+
+    $targetPlaylist = Playlist::factory()->create();
+
+    $sourceChannel = Channel::factory()->create([
+        'playlist_id' => $poolPlaylist->id,
+        'source_id' => '1918533',
+        'name' => 'AMC',
+        'group' => 'USA',
+        'url' => 'http://primary-provider.test/live/pooluser/poolpass/123.ts',
+    ]);
+
+    Channel::factory()->create([
+        'playlist_id' => $targetPlaylist->id,
+        'source_id' => 'hash-1',
+        'name' => 'AMC',
+        'group' => 'Movies',
+        'enabled' => true,
+    ]);
+    Channel::factory()->create([
+        'playlist_id' => $targetPlaylist->id,
+        'source_id' => 'hash-2',
+        'name' => 'AMC',
+        'group' => 'Entertainment',
+        'enabled' => true,
+    ]);
+
+    $profile = PlaylistProfile::factory()->create([
+        'playlist_id' => $poolPlaylist->id,
+        'url' => url('/'),
+        'username' => 'fallbackuser',
+        'password' => $targetPlaylist->uuid,
+    ]);
+
+    // Ambiguous, no group tie-break - falls through to the plain string swap.
+    expect($profile->transformChannelUrl($sourceChannel))
+        ->toBe(rtrim(url('/'), '/').'/live/fallbackuser/'.$targetPlaylist->uuid.'/123.ts');
+});
+
+test('it name-matches with the group string as a tie-breaker when the name is not unique', function () {
+    $poolPlaylist = Playlist::factory()->create([
+        'xtream_config' => [
+            'url' => 'http://primary-provider.test',
+            'username' => 'pooluser',
+            'password' => 'poolpass',
+        ],
+    ]);
+
+    $targetPlaylist = Playlist::factory()->create();
+
+    $sourceChannel = Channel::factory()->create([
+        'playlist_id' => $poolPlaylist->id,
+        'source_id' => '1918533',
+        'name' => 'AMC',
+        'group' => 'USA',
+    ]);
+
+    $wrongGroup = Channel::factory()->create([
+        'playlist_id' => $targetPlaylist->id,
+        'source_id' => 'hash-1',
+        'name' => 'AMC',
+        'group' => 'Canada',
+        'enabled' => true,
+        'url' => 'http://real-upstream-provider.test/live/realuser/realpass/111.ts',
+    ]);
+    $rightGroup = Channel::factory()->create([
+        'playlist_id' => $targetPlaylist->id,
+        'source_id' => 'hash-2',
+        'name' => 'AMC',
+        'group' => 'USA',
+        'enabled' => true,
+        'url' => 'http://real-upstream-provider.test/live/realuser/realpass/222.ts',
+    ]);
+
+    $profile = PlaylistProfile::factory()->create([
+        'playlist_id' => $poolPlaylist->id,
+        'url' => url('/'),
+        'password' => $targetPlaylist->uuid,
+    ]);
+
+    expect($profile->transformChannelUrl($sourceChannel))->toBe($rightGroup->url);
+});
+
 test('it falls back to the plain credential swap when an internal profile has no matching target channel', function () {
     $poolPlaylist = Playlist::factory()->create([
         'xtream_config' => [
