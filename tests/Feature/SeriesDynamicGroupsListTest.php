@@ -325,25 +325,3 @@ it('cache_now fires a warning notification when dynamic-group caching is disable
     Bus::assertNotDispatched(DownloadCachedContentFile::class);
     $tester->assertNotified('Dynamic Group Caching is disabled');
 });
-
-it('shows a blue Cached checkmark for series-type groups with any cached content file', function () {
-    $groupCached = DynamicGroup::create([
-        'playlist_id' => $this->playlist->id, 'user_id' => $this->user->id,
-        'type' => 'series', 'source' => 'trending', 'name' => 'Has Cache',
-    ]);
-    $groupEmpty = DynamicGroup::create([
-        'playlist_id' => $this->playlist->id, 'user_id' => $this->user->id,
-        'type' => 'series', 'source' => 'popular', 'name' => 'No Cache',
-    ]);
-
-    $file = CachedContentFile::factory()->completed()->create([
-        'content_type' => 'episode', 'tmdb_id' => '1399',
-        'season_number' => 1, 'episode_number' => 1,
-    ]);
-    $file->dynamicGroups()->attach($groupCached);
-
-    Livewire::test(ListSeriesDynamicGroups::class)
-        ->loadTable()
-        ->assertTableColumnStateSet('has_cache', true, $groupCached)
-        ->assertTableColumnStateSet('has_cache', false, $groupEmpty);
-});

@@ -6,7 +6,9 @@ use App\Filament\Resources\DynamicGroups\Widgets\DynamicGroupCacheActivityWidget
 use App\Filament\Resources\SeriesDynamicGroups\Widgets\SeriesDynamicGroupCacheActivityWidget;
 use App\Filament\Resources\VodDynamicGroups\Widgets\VodDynamicGroupCacheActivityWidget;
 use App\Filament\Resources\VodGroups\Pages\ListVodGroups;
+use App\Jobs\DownloadCachedContentFile;
 use App\Models\CachedContentFile;
+use App\Models\Channel;
 use App\Models\DynamicGroup;
 use App\Models\Playlist;
 use App\Models\User;
@@ -784,4 +786,199 @@ it('the widget\'s table() query excludes rows from other playlists when activePl
         ->getTable()
         ->getRecords();
     expect($rowsB->pluck('id')->all())->toContain($fileB->id);
+});
+
+it('the per-row Retry action is visible only on Failed rows and re-dispatches DownloadCachedContentFile bypassing the cooldown', function () {
+    // Retry: Failed-only visibility, clears failure_count + last_failed_at,
+    // then dispatches the job. The worker handles the atomic
+    // Failed->Downloading reclaim.
+    Bus::fake();
+
+    $user = User::factory()->create();
+    $playlist = Playlist::factory()->for($user)->create([
+        'enable_proxy' => true, 'available_streams' => 0,
+    ]);
+    $group = DynamicGroup::create([
+        'playlist_id' => $playlist->id, 'user_id' => $user->id,
+        'type' => 'vod', 'source' => 'trending', 'name' => 'Group',
+    ]);
+    $channel = Channel::factory()->for($playlist)->create([
+        'is_vod' => true, 'tmdb_id' => 800, 'url' => 'http://example.com/movie.mp4',
+    ]);
+
+    $file = CachedContentFile::factory()->failed()->create([
+        'content_type' => 'movie',
+        'tmdb_id' => '800',
+        'failure_count' => 2,
+        'last_failed_at' => now()->subMinutes(2),
+        'last_error_message' => 'old error',
+    ]);
+    $file->dynamicGroups()->attach($group->id);
+
+    Livewire::test(VodDynamicGroupCacheActivityWidget::class)
+        ->assertOk()
+        ->loadTable()
+        ->assertTableActionVisible('retry', $file)
+        ->assertTableActionHidden('retry', CachedContentFile::factory()->completed()->create([
+            'content_type' => 'movie', 'tmdb_id' => '801',
+        ]))
+        ->callTableAction('retry', $file);
+
+    Bus::assertDispatchedTimes(DownloadCachedContentFile::class, 1);
+    $file->refresh();
+    expect($file->failure_count)->toBe(0)
+        ->and($file->last_failed_at)->toBeNull()
+        ->and($file->last_error_message)->toBeNull();
+});
+
+it('the per-row Retry action surfaces a danger notification when no source URL can be resolved', function () {
+    // Group has no matching Channel with the file's tmdb_id in the playlist
+    // -> resolveMovieUrl returns null -> operator sees "Could not retry".
+    Bus::fake();
+
+    $user = User::factory()->create();
+    $playlist = Playlist::factory()->for($user)->create([
+        'enable_proxy' => true, 'available_streams' => 0,
+    ]);
+    $group = DynamicGroup::create([
+        'playlist_id' => $playlist->id, 'user_id' => $user->id,
+        'type' => 'vod', 'source' => 'trending', 'name' => 'Group',
+    ]);
+
+    $file = CachedContentFile::factory()->failed()->create([
+        'content_type' => 'movie', 'tmdb_id' => '999',
+    ]);
+    $file->dynamicGroups()->attach($group->id);
+
+    Livewire::test(VodDynamicGroupCacheActivityWidget::class)
+        ->assertOk()
+        ->loadTable()
+        ->callTableAction('retry', $file)
+        ->assertNotified('Could not retry');
+
+    Bus::assertNotDispatched(DownloadCachedContentFile::class);
+});
+
+it('the per-row Cancel action is visible only on Pending/Downloading rows and removes the row + storage file', function () {
+    // Cancel: in-flight-only visibility, same mechanical effect as
+    // deleteCache (delete row + partial storage).
+    Storage::fake('local');
+    config()->set('filesystems.default', 'local');
+
+    $pending = CachedContentFile::factory()->create(['status' => CachedContentFileStatus::Pending,
+        'content_type' => 'movie', 'tmdb_id' => '810',
+        'file_path' => 'cache/movie:810::::.mp4',
+    ]);
+    Storage::disk('local')->put('cache/movie:810::::.mp4', 'partial');
+    $completed = CachedContentFile::factory()->completed()->create([
+        'content_type' => 'movie', 'tmdb_id' => '811',
+    ]);
+
+    Livewire::test(VodDynamicGroupCacheActivityWidget::class)
+        ->assertOk()
+        ->loadTable()
+        ->assertTableActionVisible('cancel', $pending)
+        ->assertTableActionHidden('cancel', $completed)
+        ->callTableAction('cancel', $pending);
+
+    expect(CachedContentFile::find($pending->id))->toBeNull()
+        ->and(Storage::disk('local')->exists('cache/movie:810::::.mp4'))->toBeFalse();
+});
+
+it('Bulk Delete removes the storage file and the row for every selected CachedContentFile', function () {
+    Storage::fake('local');
+    config()->set('filesystems.default', 'local');
+
+    $a = CachedContentFile::factory()->completed()->create([
+        'content_type' => 'movie', 'tmdb_id' => '820',
+        'file_path' => 'cache/movie:820::::.mp4',
+    ]);
+    $b = CachedContentFile::factory()->failed()->create([
+        'content_type' => 'movie', 'tmdb_id' => '821',
+        'file_path' => null,
+    ]);
+    Storage::disk('local')->put('cache/movie:820::::.mp4', 'data');
+
+    Livewire::test(VodDynamicGroupCacheActivityWidget::class)
+        ->assertOk()
+        ->loadTable()
+        ->callTableBulkAction('bulkDelete', [$a, $b]);
+
+    expect(CachedContentFile::find($a->id))->toBeNull()
+        ->and(CachedContentFile::find($b->id))->toBeNull()
+        ->and(Storage::disk('local')->exists('cache/movie:820::::.mp4'))->toBeFalse();
+});
+
+it('Bulk Cancel is hidden when no selected row is in-flight, and only acts on the in-flight rows', function () {
+    // Visibility: bulkCancel hides when nothing in the selection is
+    // Pending/Downloading. Action: only touches those statuses.
+    Storage::fake('local');
+    config()->set('filesystems.default', 'local');
+
+    $pending = CachedContentFile::factory()->create(['status' => CachedContentFileStatus::Pending,
+        'content_type' => 'movie', 'tmdb_id' => '830',
+        'file_path' => 'cache/movie:830::::.mp4',
+    ]);
+    Storage::disk('local')->put('cache/movie:830::::.mp4', 'partial');
+    $completed = CachedContentFile::factory()->completed()->create([
+        'content_type' => 'movie', 'tmdb_id' => '831',
+        'file_path' => 'cache/movie:831::::.mp4',
+    ]);
+    Storage::disk('local')->put('cache/movie:831::::.mp4', 'data');
+
+    Livewire::test(VodDynamicGroupCacheActivityWidget::class)
+        ->assertOk()
+        ->loadTable()
+        // Only completed selected -> cancel action hidden
+        // bulkCancel is always-visible; only acts on in-flight rows.
+        ->assertTableBulkActionVisible('bulkCancel')
+        ->callTableBulkAction('bulkCancel', [$pending, $completed]);
+
+    expect(CachedContentFile::find($pending->id))->toBeNull()
+        ->and(Storage::disk('local')->exists('cache/movie:830::::.mp4'))->toBeFalse()
+        ->and(CachedContentFile::find($completed->id))->not->toBeNull()
+        ->and(Storage::disk('local')->exists('cache/movie:831::::.mp4'))->toBeTrue();
+});
+
+it('Bulk Retry dispatches one DownloadCachedContentFile job per Failed row, skipping non-Failed', function () {
+    // Visibility: hidden when no Failed in selection. Action: dispatches
+    // exactly once per Failed row.
+    Bus::fake();
+
+    $user = User::factory()->create();
+    $playlist = Playlist::factory()->for($user)->create([
+        'enable_proxy' => true, 'available_streams' => 0,
+    ]);
+    $group = DynamicGroup::create([
+        'playlist_id' => $playlist->id, 'user_id' => $user->id,
+        'type' => 'vod', 'source' => 'trending', 'name' => 'Group',
+    ]);
+    Channel::factory()->for($playlist)->create([
+        'is_vod' => true, 'tmdb_id' => 840, 'url' => 'http://example.com/m.mp4',
+    ]);
+    Channel::factory()->for($playlist)->create([
+        'is_vod' => true, 'tmdb_id' => 841, 'url' => 'http://example.com/m2.mp4',
+    ]);
+
+    $failed1 = CachedContentFile::factory()->failed()->create([
+        'content_type' => 'movie', 'tmdb_id' => '840',
+    ]);
+    $failed2 = CachedContentFile::factory()->failed()->create([
+        'content_type' => 'movie', 'tmdb_id' => '841',
+    ]);
+    $completed = CachedContentFile::factory()->completed()->create([
+        'content_type' => 'movie', 'tmdb_id' => '842',
+    ]);
+    foreach ([$failed1, $failed2, $completed] as $f) {
+        $f->dynamicGroups()->attach($group->id);
+    }
+
+    Livewire::test(VodDynamicGroupCacheActivityWidget::class)
+        ->assertOk()
+        ->loadTable()
+        // bulkRetry is always-visible; only acts on Failed rows.
+        ->assertTableBulkActionVisible('bulkRetry')
+        ->callTableBulkAction('bulkRetry', [$failed1, $failed2, $completed]);
+
+    Bus::assertDispatchedTimes(DownloadCachedContentFile::class, 2);
 });

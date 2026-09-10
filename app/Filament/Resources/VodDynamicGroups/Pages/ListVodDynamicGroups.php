@@ -178,7 +178,7 @@ class ListVodDynamicGroups extends ListRecords
             // separate groupBy('playlist_id') query against the
             // resource's getEloquentQuery() and that combination blows
             // up Postgres (subquery columns must be in GROUP BY).
-            ->modifyQueryUsing(fn (Builder $query) => $query->withCount('channels')->withExists('cachedContentFiles'))
+            ->modifyQueryUsing(fn (Builder $query) => $query->withCount('channels'))
             ->recordUrl(fn (DynamicGroup $record): string => DynamicGroupResource::getUrl('view', ['record' => $record]))
             ->columns([
                 TextColumn::make('playlist.name')
@@ -188,18 +188,6 @@ class ListVodDynamicGroups extends ListRecords
                 TextColumn::make('name')
                     ->searchable()
                     ->sortable(),
-                // Blue 'this group has cached content' badge, sized
-                // to sit inline with the row content. Lives next to
-                // the Name column so it reads as a status indicator
-                // attached to the dynamic group's content.
-                IconColumn::make('has_cache')
-                    ->label(__('Cached'))
-                    ->state(fn (DynamicGroup $record): bool => (bool) $record->cached_content_files_exists)
-                    ->trueIcon('heroicon-o-check-circle')
-                    ->falseIcon('heroicon-o-minus')
-                    ->trueColor('info')
-                    ->falseColor('gray')
-                    ->width('40px'),
                 TextColumn::make('source')
                     ->formatStateUsing(fn (DynamicGroup $record): string => DynamicGroupResource::sourceLabelFor($record->type)[$record->source] ?? $record->source)
                     ->badge(),
@@ -208,13 +196,9 @@ class ListVodDynamicGroups extends ListRecords
                 TextColumn::make('channels_count')
                     ->label(__('Items'))
                     ->numeric(),
-                // Binary "is anything in this group cached?" indicator.
-                // Positioned next to the fraction column for the
-                // natural reading order: blue check = "yes, some
-                // content is cached", fraction column = "how much".
-                // `withExists('cachedContentFiles')` on the table
-                // query above keeps this O(1) per row instead of
-                // an N+1.
+                // Group-level "Cached / Total" fraction. Per-movie
+                // Cached indicators live on ChannelsRelationManager
+                // inside ViewDynamicGroup (the movie grid), not here.
                 TextColumn::make('cache_status')
                     ->label(__('Cache progress'))
                     // "Cached / Total" for vod-type groups that have

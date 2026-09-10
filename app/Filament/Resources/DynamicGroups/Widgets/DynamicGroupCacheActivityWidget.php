@@ -3,14 +3,25 @@
 namespace App\Filament\Resources\DynamicGroups\Widgets;
 
 use App\Enums\CachedContentFileStatus;
+use App\Jobs\DownloadCachedContentFile;
 use App\Livewire\ArrQueueMonitor;
 use App\Models\CachedContentFile;
+use App\Models\Channel;
+use App\Models\Episode;
+use App\Models\Playlist;
+use App\Models\Series;
+use App\Services\PlaylistUrlService;
 use App\Settings\GeneralSettings;
 use Filament\Actions\Action;
+use Filament\Actions\ActionGroup;
+use Filament\Actions\BulkAction;
+use Filament\Actions\BulkActionGroup;
+use Filament\Notifications\Notification;
 use Filament\Tables\Columns\TextColumn;
 use Filament\Tables\Enums\RecordActionsPosition;
 use Filament\Tables\Table;
 use Filament\Widgets\TableWidget as BaseWidget;
+use Illuminate\Support\Collection;
 use Illuminate\Support\Facades\Log;
 use Illuminate\Support\Facades\Storage;
 
@@ -163,67 +174,204 @@ abstract class DynamicGroupCacheActivityWidget extends BaseWidget
                     ->sortable(),
             ])
             ->recordActions([
-                Action::make('viewError')
-                    ->label(__('View error'))
-                    ->icon('heroicon-o-exclamation-triangle')
-                    ->color('warning')
-                    ->button()
-                    ->size('sm')
-                    ->hiddenLabel()
-                    ->tooltip(__('Why did this fail?'))
-                    ->visible(fn (CachedContentFile $record): bool => $record->status === CachedContentFileStatus::Failed)
-                    ->modalHeading(__('Download failure'))
-                    ->modalContent(function (CachedContentFile $record) {
-                        $message = $record->last_error_message ?? 'No error message recorded.';
-                        $lastFailedAt = $record->last_failed_at?->toDateTimeString() ?? 'never';
-                        $failures = (int) ($record->failure_count ?? 0);
+                // Per-row Actions menu (kebab trigger -> dropdown of all
+                // applicable actions for this row's status). Matches the
+                // convention used by GroupResource, VodGroupResource, etc.
+                // Actions stay individually gated by ->visible() so a row
+                // shows only the options that make sense for its status.
+                ActionGroup::make([
+                    Action::make('viewError')
+                        ->label(__('View error'))
+                        ->icon('heroicon-o-exclamation-triangle')
+                        ->visible(fn (CachedContentFile $record): bool => $record->status === CachedContentFileStatus::Failed)
+                        ->modalHeading(__('Download failure'))
+                        ->modalContent(function (CachedContentFile $record) {
+                            $message = $record->last_error_message ?? 'No error message recorded.';
+                            $lastFailedAt = $record->last_failed_at?->toDateTimeString() ?? 'never';
+                            $failures = (int) ($record->failure_count ?? 0);
 
-                        return view('filament.widgets.partials.download-error-modal', [
-                            'message' => $message,
-                            'lastFailedAt' => $lastFailedAt,
-                            'failures' => $failures,
-                        ]);
-                    })
-                    ->modalSubmitAction(false)
-                    ->modalCancelActionLabel(__('Close')),
+                            return view('filament.widgets.partials.download-error-modal', [
+                                'message' => $message,
+                                'lastFailedAt' => $lastFailedAt,
+                                'failures' => $failures,
+                            ]);
+                        })
+                        ->modalSubmitAction(false)
+                        ->modalCancelActionLabel(__('Close')),
 
-                Action::make('deleteCache')
-                    ->icon('heroicon-o-trash')
-                    ->color('danger')
-                    ->button()
-                    ->size('sm')
-                    ->hiddenLabel()
-                    ->tooltip(__('Delete cache'))
-                    ->requiresConfirmation()
-                    ->modalHeading(__('Delete this cached file?'))
-                    ->modalDescription(function (CachedContentFile $record): string {
-                        $otherGroups = max(0, $record->dynamicGroups()->count() - 1);
-                        $sharedWarning = $otherGroups > 0
-                            ? sprintf(
-                                ' This file is also cached for %d other %s — deleting removes it from Storage entirely and those groups will fall back to the live source until a new download completes.',
-                                $otherGroups,
-                                $otherGroups === 1 ? 'group' : 'groups',
-                            )
-                            : '';
+                    // Failed-only: re-dispatch DownloadCachedContentFile with
+                    // the file's stored content fingerprint. Bypasses the
+                    // dispatcher's failure-cooldown gate by clearing
+                    // failure_count + last_failed_at before dispatching -
+                    // operator explicitly asked to retry now, so the cooldown
+                    // (designed for the cron path) is overridden. The worker's
+                    // atomic UPDATE on status=Failed->Downloading still
+                    // serializes concurrent retries.
+                    Action::make('retry')
+                        ->label(__('Retry download'))
+                        ->icon('heroicon-o-arrow-path')
+                        ->color('info')
+                        ->visible(fn (CachedContentFile $record): bool => $record->status === CachedContentFileStatus::Failed)
+                        ->requiresConfirmation()
+                        ->modalHeading(__('Retry this download?'))
+                        ->modalDescription(__('Re-dispatch the DownloadCachedContentFile job for this row, bypassing the failure cooldown. The worker will reclaim the row from Failed->Downloading atomically.'))
+                        ->modalSubmitActionLabel(__('Retry'))
+                        ->action(function (CachedContentFile $record): void {
+                            if (! self::retryCachedFile($record)) {
+                                Notification::make()
+                                    ->danger()
+                                    ->title(__('Could not retry'))
+                                    ->body(__('No Dynamic Group / playlist / source URL could be resolved for this row - the underlying channel or episode may have been removed.'))
+                                    ->send();
 
-                        return __('This removes the file from Storage and deletes the cached_content_files row. Playback will fall back to the live source.').$sharedWarning;
-                    })
-                    ->modalSubmitActionLabel(__('Delete'))
-                    ->before(function (CachedContentFile $record): void {
-                        if (! empty($record->file_path)) {
-                            try {
-                                Storage::disk($record->resolveStorageDisk())->delete($record->file_path);
-                            } catch (\Throwable $e) {
-                                Log::warning("DynamicGroupCacheActivityWidget: failed to delete storage file {$record->file_path} for cache entry {$record->id}: {$e->getMessage()}");
+                                return;
                             }
-                        }
-                    })
-                    ->action(function (CachedContentFile $record): void {
-                        // Standard $record->delete() cascades the pivot FKs and is
-                        // enough on its own — the Storage file is gone by ->before().
-                        $record->delete();
-                    }),
+
+                            Notification::make()
+                                ->success()
+                                ->title(__('Retry queued'))
+                                ->body(__('Track progress in this widget.'))
+                                ->send();
+                        }),
+
+                    // Pending/Downloading-only: stop tracking this in-flight
+                    // row. Same mechanical effect as deleteCache (row +
+                    // partial storage go away) but gated to in-flight states -
+                    // operator wouldn't cancel a Completed download, they'd
+                    // delete it. Worker, if still running, continues
+                    // downloading to an orphaned file that's cleaned up by
+                    // the orphan sweep command.
+                    Action::make('cancel')
+                        ->label(__('Cancel download'))
+                        ->icon('heroicon-o-x-circle')
+                        ->color('warning')
+                        ->visible(fn (CachedContentFile $record): bool => in_array($record->status, [
+                            CachedContentFileStatus::Pending,
+                            CachedContentFileStatus::Downloading,
+                        ], true))
+                        ->requiresConfirmation()
+                        ->modalHeading(__('Cancel this in-flight download?'))
+                        ->modalDescription(__('Removes the tracking row and any partial storage file. The worker may still finish downloading to disk (becomes an orphan, swept by the cleanup command).'))
+                        ->modalSubmitActionLabel(__('Cancel download'))
+                        ->action(function (CachedContentFile $record): void {
+                            self::deleteCachedFile($record);
+                        }),
+
+                    Action::make('deleteCache')
+                        ->label(__('Delete cache'))
+                        ->icon('heroicon-o-trash')
+                        ->color('danger')
+                        ->requiresConfirmation()
+                        ->modalHeading(__('Delete this cached file?'))
+                        ->modalDescription(function (CachedContentFile $record): string {
+                            $otherGroups = max(0, $record->dynamicGroups()->count() - 1);
+                            $sharedWarning = $otherGroups > 0
+                                ? sprintf(
+                                    ' This file is also cached for %d other %s - deleting removes it from Storage entirely and those groups will fall back to the live source until a new download completes.',
+                                    $otherGroups,
+                                    $otherGroups === 1 ? 'group' : 'groups',
+                                )
+                                : '';
+
+                            return __('This removes the file from Storage and deletes the cached_content_files row. Playback will fall back to the live source.').$sharedWarning;
+                        })
+                        ->modalSubmitActionLabel(__('Delete'))
+                        ->action(function (CachedContentFile $record): void {
+                            // Standard $record->delete() cascades the pivot FKs.
+                            self::deleteCachedFile($record);
+                        }),
+                ]),
             ], RecordActionsPosition::BeforeCells)
+            ->toolbarActions([
+                // Bulk variants of the row-level delete / cancel / retry actions.
+                // Visibility is gated on at least one selected row being in a
+                // state where the action makes sense, so the operator never
+                // sees "Cancel selected" when nothing is in-flight.
+                BulkActionGroup::make([
+                    BulkAction::make('bulkRetry')
+                        ->label(__('Retry selected'))
+                        ->icon('heroicon-o-arrow-path')
+                        ->color('info')
+                        ->requiresConfirmation()
+                        ->modalHeading(__('Retry selected downloads?'))
+                        ->modalDescription(__('Re-dispatch the DownloadCachedContentFile job for every Failed row in the selection, bypassing the failure cooldown. Pending / Downloading / Completed rows are skipped.'))
+                        ->modalSubmitActionLabel(__('Retry selected'))
+                        ->deselectRecordsAfterCompletion()
+                        ->action(function (Collection $records): void {
+                            $retried = 0;
+                            $skipped = 0;
+                            foreach ($records as $record) {
+                                if ($record->status !== CachedContentFileStatus::Failed) {
+                                    $skipped++;
+
+                                    continue;
+                                }
+                                if (self::retryCachedFile($record)) {
+                                    $retried++;
+                                } else {
+                                    $skipped++;
+                                }
+                            }
+                            Notification::make()
+                                ->success()
+                                ->title($retried === 1 ? __('Retry queued for 1 row') : __('Retry queued for :count rows', ['count' => $retried]))
+                                ->body($skipped > 0 ? __(':skipped row(s) skipped (not Failed, or no source URL resolvable).', ['skipped' => $skipped]) : null)
+                                ->send();
+                        }),
+
+                    BulkAction::make('bulkCancel')
+                        ->label(__('Cancel selected'))
+                        ->icon('heroicon-o-x-circle')
+                        ->color('warning')
+                        ->requiresConfirmation()
+                        ->modalHeading(__('Cancel selected in-flight downloads?'))
+                        ->modalDescription(__('Removes the tracking row and any partial storage file for every Pending / Downloading row in the selection. Failed / Completed rows are skipped.'))
+                        ->modalSubmitActionLabel(__('Cancel selected'))
+                        ->deselectRecordsAfterCompletion()
+                        ->action(function (Collection $records): void {
+                            $cancelled = 0;
+                            $skipped = 0;
+                            foreach ($records as $record) {
+                                if (! in_array($record->status, [
+                                    CachedContentFileStatus::Pending,
+                                    CachedContentFileStatus::Downloading,
+                                ], true)) {
+                                    $skipped++;
+
+                                    continue;
+                                }
+                                self::deleteCachedFile($record);
+                                $cancelled++;
+                            }
+                            Notification::make()
+                                ->success()
+                                ->title($cancelled === 1 ? __('Cancelled 1 download') : __('Cancelled :count downloads', ['count' => $cancelled]))
+                                ->body($skipped > 0 ? __(':skipped row(s) skipped (not in-flight).', ['skipped' => $skipped]) : null)
+                                ->send();
+                        }),
+
+                    BulkAction::make('bulkDelete')
+                        ->label(__('Delete selected'))
+                        ->icon('heroicon-o-trash')
+                        ->color('danger')
+                        ->requiresConfirmation()
+                        ->modalHeading(__('Delete selected cached files?'))
+                        ->modalDescription(__('Removes the row + storage file for every selected row. Shared rows will fall back to the live source for any other Dynamic Groups that reference them.'))
+                        ->modalSubmitActionLabel(__('Delete selected'))
+                        ->deselectRecordsAfterCompletion()
+                        ->action(function (Collection $records): void {
+                            $count = 0;
+                            foreach ($records as $record) {
+                                self::deleteCachedFile($record);
+                                $count++;
+                            }
+                            Notification::make()
+                                ->success()
+                                ->title($count === 1 ? __('Deleted 1 cached file') : __('Deleted :count cached files', ['count' => $count]))
+                                ->send();
+                        }),
+                ]),
+            ])
             ->emptyStateHeading(__('No cache activity yet'))
             ->emptyStateDescription(__('Cached content downloads will appear here once the scheduler runs.'))
             ->emptyStateIcon('heroicon-o-clock')
@@ -451,5 +599,131 @@ abstract class DynamicGroupCacheActivityWidget extends BaseWidget
         $h = intdiv($seconds % 86400, 3600);
 
         return $h > 0 ? "{$d}d {$h}h" : "{$d}d";
+    }
+
+    /**
+     * Shared delete implementation for both per-row deleteCache / cancel
+     * actions and the bulk variants. Removes the storage file (when present)
+     * then deletes the row - the FK ON DELETE CASCADE on the
+     * cached_content_file_dynamic_groups pivot handles shared memberships.
+     */
+    public static function deleteCachedFile(CachedContentFile $record): void
+    {
+        if (! empty($record->file_path)) {
+            try {
+                Storage::disk($record->resolveStorageDisk())->delete($record->file_path);
+            } catch (\Throwable $e) {
+                Log::warning("DynamicGroupCacheActivityWidget: failed to delete storage file {$record->file_path} for cache entry {$record->id}: {$e->getMessage()}");
+            }
+        }
+        $record->delete();
+    }
+
+    /**
+     * Re-dispatch DownloadCachedContentFile for a Failed row, bypassing the
+     * failure cooldown. Resolves the source URL via any of the row's
+     * DynamicGroup memberships -> owning playlist -> underlying Channel /
+     * Episode lookup. Clears failure bookkeeping so the worker's atomic
+     * Failed->Downloading UPDATE always wins the reclaim race.
+     *
+     * Returns false if no usable group / playlist / source URL can be
+     * found (e.g. the underlying channel was removed since the row was
+     * created). The caller surfaces this as a notification.
+     */
+    public static function retryCachedFile(CachedContentFile $record): bool
+    {
+        $group = $record->dynamicGroups()->first();
+        if (! $group) {
+            return false;
+        }
+        $playlist = $group->playlist;
+        if (! $playlist) {
+            return false;
+        }
+
+        $url = match ($record->content_type) {
+            'movie' => self::resolveMovieUrl($playlist, $record),
+            'episode' => self::resolveEpisodeUrl($playlist, $record),
+            default => null,
+        };
+        if (! $url) {
+            return false;
+        }
+
+        // Bypass the dispatcher's failure-cooldown gate: the worker handles
+        // status=Failed -> Downloading via atomic UPDATE with affected-row-
+        // count as the race guard, so concurrent retries are safe.
+        $record->update([
+            'status' => CachedContentFileStatus::Failed,
+            'failure_count' => 0,
+            'last_failed_at' => null,
+            'last_error_message' => null,
+            'bytes_downloaded' => 0,
+            'bytes_expected' => null,
+            'bytes_per_second' => null,
+            'last_progress_at' => null,
+            'file_path' => null,
+        ]);
+        if (! empty($record->getOriginal('file_path'))) {
+            try {
+                Storage::disk($record->resolveStorageDisk())->delete($record->getOriginal('file_path'));
+            } catch (\Throwable $e) {
+                Log::warning("DynamicGroupCacheActivityWidget: failed to delete storage file on retry for cache entry {$record->id}: {$e->getMessage()}");
+            }
+        }
+
+        DownloadCachedContentFile::dispatch(
+            $group,
+            $record->content_type,
+            $record->tmdb_id,
+            $record->tvdb_id,
+            $record->season_number,
+            $record->episode_number,
+            $record->quality,
+            $url,
+        )->onQueue('dynamic-group-cache');
+
+        return true;
+    }
+
+    private static function resolveMovieUrl(Playlist $playlist, CachedContentFile $record): ?string
+    {
+        if (empty($record->tmdb_id)) {
+            return null;
+        }
+        $channel = Channel::query()
+            ->where('playlist_id', $playlist->id)
+            ->where('is_vod', true)
+            ->where('tmdb_id', $record->tmdb_id)
+            ->first();
+        if (! $channel) {
+            return null;
+        }
+
+        return PlaylistUrlService::getChannelUrl($channel, $playlist) ?: null;
+    }
+
+    private static function resolveEpisodeUrl(Playlist $playlist, CachedContentFile $record): ?string
+    {
+        if (empty($record->tmdb_id)) {
+            return null;
+        }
+        $series = Series::query()
+            ->where('playlist_id', $playlist->id)
+            ->where('tmdb_id', $record->tmdb_id)
+            ->first();
+        if (! $series) {
+            return null;
+        }
+        $episode = Episode::query()
+            ->where('series_id', $series->id)
+            ->where('season', $record->season_number)
+            ->where('episode_number', $record->episode_number)
+            ->first();
+        if (! $episode) {
+            return null;
+        }
+
+        return PlaylistUrlService::getEpisodeUrl($episode, $playlist) ?: null;
     }
 }

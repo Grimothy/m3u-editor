@@ -168,7 +168,7 @@ class ListSeriesDynamicGroups extends ListRecords
             // separate groupBy('playlist_id') query against the
             // resource's getEloquentQuery() and that combination blows
             // up Postgres (subquery columns must be in GROUP BY).
-            ->modifyQueryUsing(fn (Builder $query) => $query->withCount('series')->withExists('cachedContentFiles'))
+            ->modifyQueryUsing(fn (Builder $query) => $query->withCount('series'))
             ->recordUrl(fn (DynamicGroup $record): string => DynamicGroupResource::getUrl('view', ['record' => $record]))
             ->columns([
                 TextColumn::make('playlist.name')
@@ -178,18 +178,6 @@ class ListSeriesDynamicGroups extends ListRecords
                 TextColumn::make('name')
                     ->searchable()
                     ->sortable(),
-                // Blue 'this group has cached content' badge, sized
-                // to sit inline with the row content. Lives next to
-                // the Name column so it reads as a status indicator
-                // attached to the dynamic group's content.
-                IconColumn::make('has_cache')
-                    ->label(__('Cached'))
-                    ->state(fn (DynamicGroup $record): bool => (bool) $record->cached_content_files_exists)
-                    ->trueIcon('heroicon-o-check-circle')
-                    ->falseIcon('heroicon-o-minus')
-                    ->trueColor('info')
-                    ->falseColor('gray')
-                    ->width('40px'),
                 TextColumn::make('source')
                     ->formatStateUsing(fn (DynamicGroup $record): string => DynamicGroupResource::sourceLabelFor($record->type)[$record->source] ?? $record->source)
                     ->badge(),
@@ -198,8 +186,10 @@ class ListSeriesDynamicGroups extends ListRecords
                 TextColumn::make('series_count')
                     ->label(__('Items'))
                     ->numeric(),
-                // Binary "is anything in this group cached?" indicator.
-                // See VOD-side page for the full rationale.
+                // Group-level "Cached / Total" fraction. See
+                // VOD-side page for the full rationale. Per-episode
+                // Cached indicators would live on the Series relation
+                // manager if/when that surface needs them.
                 TextColumn::make('cache_status')
                     ->label(__('Cache progress'))
                     // Series-type mirror of the VOD widget's "Cached / Total"

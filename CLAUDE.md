@@ -442,6 +442,23 @@ Before opening or finalizing a pull request in `m3u-editor`, both of the followi
 - `filament-first` (`.claude/skills/filament-first/`) — Filament-first UI rules for Blade views. This used to live under `laravel-best-practices/rules/filament-first.md`, but that directory is fully vendor-templated by Laravel Boost and gets overwritten on `php artisan boost:update`. Any new project-specific conventions should go in their own top-level skill directory under `.claude/skills/`, not inside `laravel-best-practices/`, for the same reason.
 - `pr-review-standards` (`.claude/skills/pr-review-standards/`, also runnable as `/pr-review [PR number | base-branch]`) — project-specific PR review gates, applied alongside `/code-review`: memory-efficient queries (`->cursor()`/generators over unbounded `->all()`/`->get()`), avoiding unnecessary complexity (no raw `DB::statement()` over the query builder, no new function where extending an existing one works, no duplicated logic where a shared Service/Filament Action exists — including stragglers a PR's own new helper should have replaced but didn't), framework-first UI (defers to `filament-first`, except explicitly-approved custom surfaces like the EPG Viewer and in-app player), no regressions (existing behavioral defaults anywhere in the app are opt-in to change, not silently altered — the `Process*` M3U/EPG import job chains and `Sync*` jobs get the most scrutiny as the flagship feature, but every feature area is in scope), and migration/schema safety (Postgres DDL like `CREATE INDEX` without `CONCURRENTLY` locking tables those job chains write to continuously).
 
+## UI Implementation (project-specific, not covered by Boost)
+
+When implementing UI (Filament action groups, buttons, columns, modals, badges, anything visual), **match the established style of neighboring code first** — don't invent new styling. Inconsistent styling creates visual drift the user notices.
+
+Procedure:
+
+1. **Look at siblings.** Before writing an action / button / column, open the same widget, resource, relation manager, or one of its nearest neighbours (e.g. `GroupResource`, `VodGroupResource`, `ArrIntegrationsWidget` — whichever is the closest analogue). Copy the same `->button()->hiddenLabel()->size('sm')`, the same default `ActionGroup` trigger, the same color conventions.
+2. **Don't add styling that's missing elsewhere.** If existing code uses `ActionGroup::make([...])` with no `->icon()` / `->iconButton()` / `->size()` / `->tooltip()` on the group itself, that's the project's chosen look. Adding extra calls (e.g. `->icon('heroicon-m-ellipsis-vertical')->iconButton()->size('sm')->tooltip(__('Actions'))`) introduces a one-off that doesn't match the rest of the codebase.
+3. **Per-action color conventions** in this codebase:
+   - `info` (blue) — retry / cache / cloud actions (the **Cache Now** button is the canonical `info` example; anything cache-related matches it).
+   - `warning` (amber) — cancel / dangerous-but-reversible.
+   - `danger` (red) — delete / destructive.
+   - `success` (green) — confirm / complete.
+4. **Default Filament behaviour is the baseline.** Only override it when the existing code in the same surface already does. If the project relies on Filament defaults for `ActionGroup` styling, table action positioning, modal sizing, etc., do the same.
+5. **Consult `filament-first`** (`.claude/skills/filament-first/`) for the broader UI conventions (badges, icons, buttons, dropdowns, modals, slide-overs, form inputs).
+
+
 ## Repo Architecture (project-specific, not covered by Boost)
 
 - Filament admin panel plus a separate guest panel (`app/Filament/GuestPanel/`) with its own Resources/Pages/Widgets. Admin-panel query scoping does not automatically protect guest-panel routes.

@@ -11,6 +11,7 @@ use App\Filament\Resources\SeriesDynamicGroups\SeriesDynamicGroupResource;
 use App\Filament\Resources\VodDynamicGroups\VodDynamicGroupResource;
 use App\Filament\Resources\VodGroups\VodGroupResource;
 use App\Jobs\DownloadCachedContentFile;
+use App\Models\CachedContentFile;
 use App\Models\Channel;
 use App\Models\DynamicGroup;
 use App\Models\DynamicGroupItemSnapshot;
@@ -241,6 +242,49 @@ it('lists the real synced dynamic_group_items members on the Movies relation man
         ->loadTable()
         ->assertCanSeeTableRecords([$attached])
         ->assertCanNotSeeTableRecords([$notAttached]);
+});
+
+it('the Movies relation manager shows a blue Cached check per row when a completed CachedContentFile exists for that channel', function () {
+    // Per-movie 'is THIS movie cached?' indicator lives on the
+    // ChannelsRelationManager (the movie grid in ViewDynamicGroup),
+    // not on the VOD Dynamic Groups listing. Blue check = completed
+    // CachedContentFile at this channel's tmdb_id + group's rule
+    // quality.
+    $this->playlist->update([
+        'dynamic_groups_config' => [
+            ['name' => 'Trending Now', 'cache_enabled' => true],
+        ],
+    ]);
+
+    $group = DynamicGroup::create([
+        'playlist_id' => $this->playlist->id,
+        'user_id' => $this->user->id,
+        'type' => 'vod', 'source' => 'trending', 'name' => 'Trending Now',
+    ]);
+
+    $cached = Channel::factory()->for($this->user)->for($this->playlist)->create([
+        'is_vod' => true, 'title' => 'Cached Movie', 'tmdb_id' => 550,
+    ]);
+    $uncached = Channel::factory()->for($this->user)->for($this->playlist)->create([
+        'is_vod' => true, 'title' => 'Not Cached Movie', 'tmdb_id' => 551,
+    ]);
+    DB::table('dynamic_group_items')->insert([
+        ['dynamic_group_id' => $group->id, 'item_type' => Channel::class, 'item_id' => $cached->id],
+        ['dynamic_group_id' => $group->id, 'item_type' => Channel::class, 'item_id' => $uncached->id],
+    ]);
+
+    CachedContentFile::factory()->completed()->create([
+        'content_type' => 'movie', 'tmdb_id' => '550', 'quality' => null,
+    ]);
+
+    Livewire::test(ChannelsRelationManager::class, [
+        'ownerRecord' => $group,
+        'pageClass' => ViewDynamicGroup::class,
+    ])
+        ->assertOk()
+        ->loadTable()
+        ->assertTableColumnStateSet('is_cached', true, $cached)
+        ->assertTableColumnStateSet('is_cached', false, $uncached);
 });
 
 it('lists the real synced dynamic_group_items members on the Series relation manager table', function () {
