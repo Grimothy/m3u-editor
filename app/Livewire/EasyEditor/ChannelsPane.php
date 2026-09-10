@@ -77,6 +77,25 @@ class ChannelsPane extends Component implements HasActions, HasForms, HasTable
     }
 
     /**
+     * The parent remounts this component (keyed by group id) on every group
+     * switch, so normally this listener never has work to do. It's a safety net:
+     * if a remount is ever skipped, re-scope to the new group here instead of
+     * leaving the list frozen on the old one. #[Locked] only blocks client-side
+     * writes, not this server-side handler.
+     */
+    #[On('easy-editor-group-selected')]
+    public function onGroupSelected(?int $groupId = null): void
+    {
+        if ($groupId === $this->selectedGroupId) {
+            return;
+        }
+
+        $this->selectedGroupId = $groupId;
+        $this->paginators[self::QUERY_STRING_IDENTIFIER.'Page'] = 1;
+        $this->resetTable();
+    }
+
+    /**
      * Keep this table's pagination out of the page URL. Two embedded tables on
      * one page would otherwise both bind to the same `page` param and collide,
      * and a stale `?page=2` would survive a playlist / content-type switch and

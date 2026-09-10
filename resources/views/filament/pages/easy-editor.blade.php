@@ -10,8 +10,18 @@
                     @livewire('easy-editor.groups-pane', ['playlistId' => $playlistId, 'contentType' => $contentType, 'selectedGroupId' => $selectedGroupId], 'easy-editor-groups-'.$paneKey)
                 </div>
 
-                {{-- Right pane: channels for the selected group --}}
-                <div class="w-full min-w-0 flex-1">
+                {{-- Right pane: channels for the selected group.
+
+                     The wrapper's wire:key changes with the selected group so
+                     morphdom discards and rebuilds this whole subtree on every
+                     switch. Without it, a dynamically-keyed child @livewire sat
+                     next to a non-Livewire @else branch gets patched in place and
+                     leaves a stale wire:id registered after a swap or two, so
+                     later selections stop remounting the pane (list "freezes"). --}}
+                <div
+                    class="w-full min-w-0 flex-1"
+                    wire:key="easy-editor-channels-slot-{{ $paneKey }}-{{ $selectedGroupId ?? 'none' }}"
+                >
                     @if ($selectedGroupId)
                         @livewire('easy-editor.channels-pane', ['playlistId' => $playlistId, 'contentType' => $contentType, 'selectedGroupId' => $selectedGroupId], 'easy-editor-channels-'.$paneKey.'-'.$selectedGroupId)
                     @else

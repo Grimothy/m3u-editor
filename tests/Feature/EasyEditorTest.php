@@ -75,6 +75,21 @@ it('shows only the selected group\'s live channels', function () {
         ->assertCanNotSeeTableRecords([$this->channelB, $this->vodChannel]);
 });
 
+it('re-scopes the channels pane when the selected group changes without a remount', function () {
+    // The parent normally remounts this component per group, but if a remount is
+    // ever skipped the pane must still follow the selection instead of freezing.
+    Livewire::test(ChannelsPane::class, [
+        'playlistId' => $this->playlist->id,
+        'contentType' => 'live',
+        'selectedGroupId' => $this->groupA->id,
+    ])
+        ->assertCanSeeTableRecords([$this->channelA])
+        ->dispatch('easy-editor-group-selected', groupId: $this->groupB->id)
+        ->assertSet('selectedGroupId', $this->groupB->id)
+        ->assertCanSeeTableRecords([$this->channelB])
+        ->assertCanNotSeeTableRecords([$this->channelA]);
+});
+
 it('shows only the selected group\'s vod channels when content type is vod', function () {
     Livewire::test(ChannelsPane::class, [
         'playlistId' => $this->playlist->id,
