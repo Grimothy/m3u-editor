@@ -18,6 +18,7 @@ use Illuminate\Http\Client\ConnectionException;
 use Illuminate\Http\Client\RequestException;
 use Illuminate\Queue\InteractsWithQueue;
 use Illuminate\Support\Carbon;
+use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Facades\Http;
 use Illuminate\Support\Facades\Log;
 use Illuminate\Support\Facades\Storage;
@@ -111,8 +112,15 @@ class DownloadCachedContentFile implements ShouldQueue
         //                                  is plausibly still on it)
         // The affected-row-count on the reclaim UPDATE acts as a race guard so two
         // workers reclaiming the same row simultaneously don't both proceed.
+        // Wrapped in DB::transaction so a unique-constraint failure only rolls
+        // back the inner savepoint and leaves the outer transaction (RefreshDatabase's
+        // per-test wrapper, or the queue worker's outer txn) in a valid state for
+        // the catch's SELECT below. Postgres aborts the surrounding transaction on
+        // ANY failed statement (SQLSTATE 25P02), so this nesting is required there.
+        // SQLite is lenient about post-failure statements, which is why the same
+        // code passes under sqlite_testing locally.
         try {
-            $file = CachedContentFile::create([
+            $file = DB::transaction(fn () => CachedContentFile::create([
                 'content_type' => $this->contentType,
                 'tmdb_id' => $this->tmdbId,
                 'tvdb_id' => $this->tvdbId,
@@ -121,7 +129,7 @@ class DownloadCachedContentFile implements ShouldQueue
                 'quality' => $this->quality,
                 'content_fingerprint' => $fingerprint,
                 'status' => CachedContentFileStatus::Downloading,
-            ]);
+            ]));
         } catch (QueryException $e) {
             $existing = CachedContentFile::where('content_fingerprint', $fingerprint)->first();
             if (! $existing) {
