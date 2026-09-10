@@ -1,6 +1,6 @@
 <?php
 
-namespace App\Filament\Resources\VodGroups\Widgets;
+namespace App\Filament\Resources\DynamicGroups\Widgets;
 
 use App\Enums\CachedContentFileStatus;
 use App\Livewire\ArrQueueMonitor;
@@ -15,35 +15,71 @@ use Illuminate\Support\Facades\Log;
 use Illuminate\Support\Facades\Storage;
 
 /**
- * Footer widget on `ListVodGroups` AND `ListCategories` (registered from
- * the Categories side via this same FQN — see `ListCategories::getFooterWidgets()`)
- * showing the most recent `CachedContentFile` rows across all dynamic-group
- * caching activity: status transitions (Pending/Downloading/Completed/Failed)
- * plus byte-level download progress for in-flight rows.
+ * Abstract base for the per-type Dynamic Group cache activity widgets.
  *
- * The view is deliberately shared between VOD and Series pages because
- * `CachedContentFile` rows aren't inherently VOD or series until you
- * inspect `content_type` — a single "what's happening across all
- * Dynamic Group caching" view is more useful than splitting it.
+ * The two thin subclasses — `VodDynamicGroups\Widgets\VodDynamicGroupCacheActivityWidget`
+ * (`content_type = 'movie'`) and `SeriesDynamicGroups\Widgets\SeriesDynamicGroupCacheActivityWidget`
+ * (`content_type = 'episode'`) — are registered as footer widgets on
+ * `ListVodDynamicGroups` and `ListSeriesDynamicGroups` respectively. Each
+ * shows the most recent CachedContentFile rows for its own type plus
+ * byte-level download progress for in-flight rows.
  *
- * Polling (`->poll('5s')`) is now justified by the live progress column:
- * the 1-MiB-throttled DB writes from `DownloadCachedContentFile::reportDownloadProgress()`
- * are otherwise invisible without a refresh. With at most
- * `dynamic_group_cache_max_concurrent_downloads` (default 2) active
- * downloads, the polling cost is trivial.
+ * Why split by type now (after running for a while as a single widget):
+ * after the "Dynamic Groups" sidebar refactor, the VOD Dynamic Groups
+ * and Series Dynamic Groups are two distinct pages. The previous "one
+ * widget for both types" pattern made sense when the activity was a
+ * footer at the bottom of the unrelated VOD Groups / Categories pages
+ * (it had no other home); now that the cache activity has a per-type
+ * home, splitting keeps each page's view focused on its own downloads.
  *
- * The `getContentLabel()` helper prefers the resolved TMDB title
- * ("Wicked", "Breaking Bad — I.F.T.") populated by
- * DownloadCachedContentFile::resolveAndStoreTitle() at row-create time.
- * Falls back to the legacy "type: tmdb N S##E##" shape for rows that
- * pre-date the title column or whose TMDB lookup failed.
+ * Polling (`->poll('5s')`) is justified by the live progress column —
+ * the 1-MiB-throttled DB writes from
+ * `DownloadCachedContentFile::reportDownloadProgress()` are otherwise
+ * invisible without a refresh.
  *
- * The `getProgressLabel()` helper formats the progress cell. Reuses
- * `ArrQueueMonitor::formatBytes()` so the unit display matches the
- * existing Arr-download widget in this project.
+ * All the per-record formatters (`getContentLabel`,
+ * `getProgressLabel`, `getProgressAttributes`, `getEtaLabel`) are type
+ * agnostic — they read fields off the CachedContentFile row directly
+ * — so they live on the base and are inherited unchanged.
+ *
+ * Subclasses only need to set the `contentType` static property. The
+ * base automatically narrows `canView()` and the table query to that
+ * type.
  */
-class DynamicGroupCacheActivityWidget extends BaseWidget
+abstract class DynamicGroupCacheActivityWidget extends BaseWidget
 {
+    /**
+     * The `cached_content_files.content_type` value this widget
+     * scopes to. Subclasses MUST set this — the base query and
+     * `canView()` both narrow on it. Valid values today are 'movie'
+     * (vod-type dynamic groups) and 'episode' (series-type dynamic
+     * groups). Declared on the abstract base so PHP allows
+     * `static::$contentType` late-static-binding access from the
+     * concrete subclass.
+     */
+    protected static ?string $contentType = null;
+
+    /**
+     * When set (and not "all"), narrows the table query to cache
+     * rows that belong to a DynamicGroup in the given playlist.
+     * Forwarded from the parent page's `activePlaylistTab` so the
+     * per-playlist sub-tabs on the Dynamic Groups page scope both
+     * the table view AND this widget. Set via the widget's public
+     * property by the Livewire parent before render (see
+     * ListVodDynamicGroups::content() / ListSeriesDynamicGroups::content()).
+     */
+    public ?string $activePlaylistId = null;
+
+    /**
+     * Custom Blade view that wraps the table in a <x-filament::section>
+     * — gives the cache activity its own icon + heading + collapsed
+     * state, so it reads as a discrete "clustered section" on the
+     * Dynamic Groups listing page rather than just a stacked footer
+     * widget. View file lives at
+     * resources/views/filament/widgets/dynamic-group-cache-activity-widget.blade.php.
+     */
+    protected string $view = 'filament.widgets.dynamic-group-cache-activity-widget';
+
     protected static bool $isLazy = false;
 
     protected static ?string $heading = null;
@@ -58,16 +94,40 @@ class DynamicGroupCacheActivityWidget extends BaseWidget
     public static function canView(): bool
     {
         $settings = app(GeneralSettings::class);
+        if (! $settings->enable_dynamic_group_cache) {
+            return false;
+        }
 
-        return (bool) $settings->enable_dynamic_group_cache
-            && CachedContentFile::query()->exists();
+        // Narrow by this widget's content_type so an admin visiting
+        // either Dynamic Groups page never sees a confusing empty
+        // state caused by only the OTHER type having any rows yet.
+        // The per-playlist narrowing happens inside table() — it
+        // doesn't affect canView() because the page-level
+        // getTabsContentComponent() is always rendered (the widget
+        // is just hidden when there's nothing for the active scope).
+        return CachedContentFile::query()
+            ->where('content_type', static::$contentType)
+            ->exists();
     }
 
     public function table(Table $table): Table
     {
         return $table
             ->query(
+                // Narrow to this widget's content_type so the VOD page
+                // doesn't show episode rows and vice versa. When
+                // activePlaylistId is set, also filter through the
+                // pivot to that playlist's dynamic groups. Limit 10
+                // matches the old shared widget so the on-screen
+                // density doesn't change.
                 CachedContentFile::query()
+                    ->where('content_type', static::$contentType)
+                    ->when(
+                        $this->activePlaylistId && $this->activePlaylistId !== 'all',
+                        fn ($q) => $q->whereHas('dynamicGroups', function ($dq) {
+                            $dq->where('dynamic_groups.playlist_id', (int) $this->activePlaylistId);
+                        }),
+                    )
                     ->orderByDesc('updated_at')
                     ->limit(10),
             )
@@ -170,9 +230,55 @@ class DynamicGroupCacheActivityWidget extends BaseWidget
             ->paginated(false);
     }
 
+    /**
+     * Section heading rendered above the table. Shared between the
+     * VOD and Series subclasses today — the per-type scope is
+     * already conveyed by the parent page (VOD Channels vs Series).
+     * If the per-type surface ever needs to disambiguate further
+     * (e.g. "VOD Dynamic Group Cache Activity"), this is the seam.
+     */
     public function getSectionHeading(): string
     {
         return __('Dynamic Group Cache Activity');
+    }
+
+    /**
+     * Icon shown in the section header. Per-type so the VOD and
+     * Series pages get a slightly different visual — film for VOD,
+     * play for Series. The maintainer's "clustered sections"
+     * preference leans on each section having its own iconography.
+     */
+    public function getSectionIcon(): string
+    {
+        return static::$contentType === 'movie'
+            ? 'heroicon-o-film'
+            : 'heroicon-o-play';
+    }
+
+    /**
+     * Body text shown under the heading + used as the ?-tooltip
+     * label. Per-type so the VOD and Series explanations don't lie
+     * about what the rows represent.
+     */
+    public function getSectionDescription(): string
+    {
+        return static::$contentType === 'movie'
+            ? __('Live download progress for VOD Dynamic Group cache downloads — Pending, Downloading, Completed, and Failed rows across all your playlists.')
+            : __('Live download progress for Series Dynamic Group cache downloads (one row per episode) — Pending, Downloading, Completed, and Failed rows across all your playlists.');
+    }
+
+    /**
+     * Drives the section's default collapsed state. Auto-collapses
+     * when there are no rows for THIS widget's content_type — same
+     * scope as canView() so an empty VOD page can't get a confusing
+     * "expanded but empty" section just because the Series side has
+     * downloads in flight.
+     */
+    public function hasCacheActivity(): bool
+    {
+        return CachedContentFile::query()
+            ->where('content_type', static::$contentType)
+            ->exists();
     }
 
     /**

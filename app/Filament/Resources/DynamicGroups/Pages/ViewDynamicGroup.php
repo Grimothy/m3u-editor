@@ -2,9 +2,9 @@
 
 namespace App\Filament\Resources\DynamicGroups\Pages;
 
-use App\Filament\Resources\Categories\CategoryResource;
 use App\Filament\Resources\DynamicGroups\DynamicGroupResource;
-use App\Filament\Resources\VodGroups\VodGroupResource;
+use App\Filament\Resources\SeriesDynamicGroups\SeriesDynamicGroupResource;
+use App\Filament\Resources\VodDynamicGroups\VodDynamicGroupResource;
 use App\Models\DynamicGroup;
 use App\Services\DynamicGroupCacheDispatchService;
 use App\Settings\GeneralSettings;
@@ -24,12 +24,12 @@ use Filament\Resources\Pages\ViewRecord;
  * anyone drilled in from. We override the real hook to chain through the
  * type-appropriate parent resource instead:
  *
- *     Groups → Dynamic → {Group Name}        (vod-type)
- *     Categories → Dynamic → {Group Name}    (series-type)
+ *     Dynamic Groups → Dynamic → {Group Name}   (both types)
  *
- * matching this app's existing "Groups"/"Categories" vocabulary split
- * (VodGroupResource vs CategoryResource) instead of the type-mixed
- * "Dynamic Groups" wording that reads correctly for VOD but not Series.
+ * The root segment now points at the per-type Dynamic Groups index
+ * (VodDynamicGroupResource for vod, SeriesDynamicGroupResource for
+ * series) — not at the older VOD Groups / Categories pages, which
+ * are unrelated surfaces for managing regular group/category rules.
  *
  * Only the membership relation managers stay strictly read-only. Deleting
  * the DynamicGroup row itself is allowed — see `DeleteAction` below.
@@ -111,7 +111,7 @@ class ViewDynamicGroup extends ViewRecord
                 }),
 
             Action::make('back_to_index')
-                ->label(fn (): string => $this->isVodRecord($this->getRecord()) ? __('Back to Groups') : __('Back to Categories'))
+                ->label(__('Back to Dynamic Groups'))
                 ->url(fn (): string => $this->rootIndexUrl($this->getRecord()))
                 ->icon('heroicon-o-arrow-left')
                 ->color('gray'),
@@ -130,24 +130,29 @@ class ViewDynamicGroup extends ViewRecord
     }
 
     /**
-     * The Groups/Categories index URL for this record's type - the natural
-     * parent list for a per-playlist VOD Group or Series Category row.
+     * The Dynamic Groups index URL for this record's type. The user
+     * drill-in comes from the per-type Dynamic Groups listing
+     * (VodDynamicGroupResource / SeriesDynamicGroupResource), so
+     * the back button and breadcrumb root both point there — not at
+     * the older VOD Groups / Categories pages, which are unrelated
+     * surfaces for managing regular group/category rules.
      */
     protected function rootIndexUrl(DynamicGroup $record): string
     {
         return $this->isVodRecord($record)
-            ? VodGroupResource::getUrl('index')
-            : CategoryResource::getUrl('index');
+            ? VodDynamicGroupResource::getUrl('index')
+            : SeriesDynamicGroupResource::getUrl('index');
     }
 
     /**
-     * Breadcrumb label for the root segment - "Groups" or "Categories"
-     * matching this app's existing VodGroupResource/CategoryResource
-     * vocabulary split, instead of the type-mixed "Dynamic Groups".
+     * Breadcrumb label for the root segment. Both per-type
+     * Dynamic Groups pages live under the same label since the
+     * back button is type-agnostic — the user is back at the
+     * Dynamic Groups list (whichever type they came from).
      */
     protected function rootLabel(DynamicGroup $record): string
     {
-        return $this->isVodRecord($record) ? __('Groups') : __('Categories');
+        return __('Dynamic Groups');
     }
 
     protected function isVodRecord(DynamicGroup $record): bool

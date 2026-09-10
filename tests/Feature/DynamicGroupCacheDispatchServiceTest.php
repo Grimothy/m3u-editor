@@ -368,7 +368,9 @@ it('shouldSkip returns false for Pending and Downloading rows', function () {
 });
 
 it('resolveRuleForGroup is publicly callable (Phase 4 visibility widening)', function () {
-    // The Phase 4 "Cached / Total" column on both DynamicGroupsWidget files
+    // The Phase 4 "Cached / Total" column on both legacy DynamicGroupsWidget
+    // files and on the per-type VodDynamicGroupsListTest /
+    // SeriesDynamicGroupsListTest listing pages.
     // and the "Select Content" picker both call this from outside the service.
     // A pure visibility change (`private` -> `public`) should not affect
     // behavior — assert it still resolves the same way.
