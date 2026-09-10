@@ -6,6 +6,7 @@ use Illuminate\Database\Eloquent\Builder;
 use Illuminate\Database\Eloquent\Factories\HasFactory;
 use Illuminate\Database\Eloquent\Model;
 use Illuminate\Database\Eloquent\Relations\BelongsTo;
+use Illuminate\Database\Eloquent\Relations\BelongsToMany;
 use Illuminate\Database\Eloquent\Relations\MorphToMany;
 
 /**
@@ -75,6 +76,14 @@ class DynamicGroup extends Model
     public function series(): MorphToMany
     {
         return $this->morphedByMany(Series::class, 'item', 'dynamic_group_items');
+    }
+
+    /**
+     * Cached content files referenced by this dynamic group.
+     */
+    public function cachedContentFiles(): BelongsToMany
+    {
+        return $this->belongsToMany(CachedContentFile::class, 'cached_content_file_dynamic_groups');
     }
 
     /**

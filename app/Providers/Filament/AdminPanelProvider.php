@@ -42,9 +42,11 @@ use App\Filament\Resources\Plugins\PluginResource;
 use App\Filament\Resources\PostProcesses\PostProcessResource;
 use App\Filament\Resources\QueueMonitor\QueueMonitorResource;
 use App\Filament\Resources\Series\SeriesResource;
+use App\Filament\Resources\SeriesDynamicGroups\SeriesDynamicGroupResource;
 use App\Filament\Resources\StreamFileSettings\StreamFileSettingResource;
 use App\Filament\Resources\StreamProfiles\StreamProfileResource;
 use App\Filament\Resources\Users\UserResource;
+use App\Filament\Resources\VodDynamicGroups\VodDynamicGroupResource;
 use App\Filament\Resources\VodGroups\VodGroupResource;
 use App\Filament\Resources\Vods\VodResource;
 use App\Filament\Widgets\ActiveStreamsWidget;
@@ -240,12 +242,14 @@ class AdminPanelProvider extends PanelProvider
                             ->items([
                                 ...VodGroupResource::getNavigationItems(),
                                 ...VodResource::getNavigationItems(),
+                                ...VodDynamicGroupResource::getNavigationItems(),
                             ]),
                         NavigationGroup::make(fn () => __('Series'))
                             ->icon('heroicon-m-play')
                             ->items([
                                 ...CategoryResource::getNavigationItems(),
                                 ...SeriesResource::getNavigationItems(),
+                                ...SeriesDynamicGroupResource::getNavigationItems(),
                             ]),
                         NavigationGroup::make(fn () => __('EPG'))
                             ->icon('heroicon-m-calendar-days')

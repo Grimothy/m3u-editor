@@ -315,6 +315,21 @@ class GeneralSettings extends Settings
     // features depend on the enhanced Xtream API output.
     public ?bool $device_pairing_enabled = true;
 
+    // Dynamic Group Cache settings
+    public ?bool $enable_dynamic_group_cache = null;
+
+    public ?string $dynamic_group_cache_location = null;
+
+    public ?bool $dynamic_group_cache_lazy_load = null;
+
+    public ?string $dynamic_group_cache_schedule = null;
+
+    public ?int $dynamic_group_cache_max_concurrent_downloads = null;
+
+    public ?int $dynamic_group_cache_retry_cooldown_minutes = null;
+
+    public ?int $dynamic_group_cache_failure_cooldown_hours = null;
+
     public static function group(): string
     {
         return 'general';
