@@ -4,16 +4,21 @@ namespace App\Filament\Resources\VodDynamicGroups\Pages;
 
 use App\Enums\CachedContentFileStatus;
 use App\Filament\Resources\DynamicGroups\DynamicGroupResource;
+use App\Filament\Resources\Playlists\PlaylistResource;
 use App\Filament\Resources\VodDynamicGroups\VodDynamicGroupResource;
 use App\Filament\Resources\VodDynamicGroups\Widgets\VodDynamicGroupCacheActivityWidget;
+use App\Jobs\SyncDynamicGroups;
 use App\Models\CachedContentFile;
 use App\Models\DynamicGroup;
 use App\Models\Playlist;
 use App\Services\DynamicGroupCacheDispatchService;
+use App\Services\TmdbService;
 use App\Settings\GeneralSettings;
 use Filament\Actions\Action;
 use Filament\Actions\BulkAction;
+use Filament\Actions\CreateAction;
 use Filament\Actions\DeleteAction;
+use Filament\Forms\Components\Select;
 use Filament\Notifications\Notification;
 use Filament\Resources\Pages\ListRecords;
 use Filament\Schemas\Components\EmbeddedTable;
@@ -28,6 +33,7 @@ use Filament\Tables\Enums\RecordActionsPosition;
 use Filament\Tables\Table;
 use Illuminate\Database\Eloquent\Builder;
 use Illuminate\Support\Collection;
+use RuntimeException;
 
 /**
  * VOD-only listing surface for DynamicGroup rows.
@@ -67,6 +73,97 @@ class ListVodDynamicGroups extends ListRecords
      * Default "all" = no playlist filter.
      */
     public ?string $activePlaylistTab = 'all';
+
+    /**
+     * Header action: a 'New VOD Dynamic Group' CreateAction that opens a
+     * slide-over modal with the same rule schema the Playlist form's
+     * `dynamic_groups_config` Repeater uses, plus a Playlist picker
+     * (prefilled with the active sub-tab when not on 'All'). On save the
+     * rule is appended to that playlist's dynamic_groups_config and the
+     * DynamicGroup row is materialized synchronously so the new group
+     * shows in the table immediately. Redirects to the shared
+     * DynamicGroupResource::view page.
+     */
+    protected function getHeaderActions(): array
+    {
+        return [
+            CreateAction::make()
+                ->label(__('New VOD Dynamic Group'))
+                ->icon('heroicon-o-plus')
+                ->slideOver()
+                ->modalHeading(__('New VOD Dynamic Group'))
+                ->modalSubmitActionLabel(__('Create'))
+                ->schema([
+                    Select::make('playlist_id')
+                        ->label(__('Playlist'))
+                        ->required()
+                        ->options(fn (): array => auth()->user()?->playlists()
+                            ->orderBy('name')
+                            ->pluck('name', 'id')
+                            ->all() ?? [])
+                        ->default(fn (): ?int => $this->activePlaylistTab !== 'all'
+                            ? (int) $this->activePlaylistTab
+                            : null)
+                        ->helperText(__('The Dynamic Group rule will be appended to this playlist\u0027s Dynamic Groups (TMDB) configuration.')),
+                ] + PlaylistResource::getDynamicGroupRuleSchema())
+                // Inject the implicit type and user_id INSIDE the using()
+                // closure rather than via Filament's mutateFormDataBeforeCreate
+                // hook (v5 dropped that method). The data array is passed
+                // through; the closure mutates it before the create call.
+                ->using(function (array $data, string $model): DynamicGroup {
+                    $data['type'] = 'vod';
+                    $data['user_id'] = auth()->id();
+                    $playlist = Playlist::findOrFail($data['playlist_id']);
+                    $rule = collect($data)
+                        ->only([
+                            'enabled', 'type', 'source', 'name', 'tmdb_params',
+                            'cache_enabled',
+                            'cache_content_selection', 'cache_location_override',
+                            'cache_prefer_quality_keyword', 'cache_avoid_duplicate_content',
+                        ])
+                        ->all();
+
+                    // Append to the playlist's dynamic_groups_config (preserve
+                    // existing rules, push new one at the end).
+                    $config = $playlist->dynamic_groups_config ?? [];
+                    $config[] = $rule;
+                    $playlist->update(['dynamic_groups_config' => $config]);
+
+                    // Materialize the DynamicGroup row + membership
+                    // synchronously so the new group shows in the table
+                    // immediately. Reuses the job's per-rule helper.
+                    $tmdb = app(TmdbService::class);
+                    $job = new SyncDynamicGroups($playlist->id);
+                    $group = $job->materializeRule(
+                        $playlist,
+                        $data['type'],
+                        $data['source'],
+                        $data['name'],
+                        $data['tmdb_params'] ?? [],
+                        count($config) - 1,
+                        $tmdb,
+                    );
+
+                    if ($group === null) {
+                        // TMDB returned no ids and no pre-existing row —
+                        // remove the rule we just appended so the config
+                        // doesn't carry an orphan.
+                        $playlist->update(['dynamic_groups_config' => array_values(array_slice($config, 0, -1))]);
+                        throw new RuntimeException(__('No TMDB matches for this rule and no pre-existing Dynamic Group. Rule was not saved.'));
+                    }
+
+                    return $group;
+                })
+                ->successNotification(
+                    Notification::make()
+                        ->success()
+                        ->title(__('Dynamic Group created'))
+                        ->body(__('The new group is now in the table. Cache Now can queue downloads for it.')),
+                )
+                ->successRedirectUrl(fn (DynamicGroup $record): string => DynamicGroupResource::getUrl('view', ['record' => $record]))
+                ->visible(fn (): bool => DynamicGroup::canCreate()),
+        ];
+    }
 
     /**
      * Top-level tabs: "Dynamic Groups" (the main table) and

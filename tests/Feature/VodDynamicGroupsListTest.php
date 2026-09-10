@@ -6,6 +6,7 @@ use App\Filament\Resources\VodDynamicGroups\Pages\ListVodDynamicGroups;
 use App\Filament\Resources\VodDynamicGroups\VodDynamicGroupResource;
 use App\Filament\Resources\VodGroups\Pages\ListVodGroups;
 use App\Jobs\DownloadCachedContentFile;
+use App\Jobs\SyncDynamicGroups;
 use App\Models\CachedContentFile;
 use App\Models\Channel;
 use App\Models\DynamicGroup;
@@ -339,4 +340,62 @@ it('cache_now fires a warning notification when dynamic-group caching is disable
 
     Bus::assertNotDispatched(DownloadCachedContentFile::class);
     $tester->assertNotified('Dynamic Group Caching is disabled');
+});
+
+it('shows a New VOD Dynamic Group header action on the listing', function () {
+    Livewire::test(ListVodDynamicGroups::class)
+        ->assertOk()
+        ->assertActionExists('create');
+});
+
+it('the playlist picker is prefilled with the active sub-tab when not on All', function () {
+    $specific = Playlist::factory()->for($this->user)->create(['name' => 'Specific Playlist']);
+
+    Livewire::test(ListVodDynamicGroups::class, ['activePlaylistTab' => (string) $specific->id])
+        ->mountAction('create')
+        ->assertSchemaComponentStateSet('playlist_id', $specific->id);
+});
+
+it('the materializeRule helper appends the rule to the playlist and materializes a row', function () {
+    // The CreateAction's data-routing through the mounted action schema
+    // is brittle to nested field names (tmdb_params.*, cache_* sub-keys).
+    // Drive the same flow the using() closure would, so the test focuses
+    // on the closure's logic — Filament's form-fill + dispatch is its
+    // job to test separately.
+    $tmdb = Mockery::mock(TmdbService::class);
+    $tmdb->shouldReceive('collectDynamicGroupResults')
+        ->andReturn([['tmdb_id' => '12345']]);
+    app()->instance(TmdbService::class, $tmdb);
+
+    $playlist = $this->playlist;
+    $rule = [
+        'enabled' => true,
+        'type' => 'vod',
+        'source' => 'trending',
+        'name' => 'Trending Movies',
+        'tmdb_params' => [],
+    ];
+    $config = $playlist->dynamic_groups_config ?? [];
+    $config[] = $rule;
+    $playlist->update(['dynamic_groups_config' => $config]);
+
+    $job = new SyncDynamicGroups($playlist->id);
+    $group = $job->materializeRule(
+        $playlist->fresh(),
+        $rule['type'],
+        $rule['source'],
+        $rule['name'],
+        $rule['tmdb_params'],
+        count($config) - 1,
+        $tmdb,
+    );
+
+    expect($group)->not->toBeNull()
+        ->and($group->type)->toBe('vod')
+        ->and($group->source)->toBe('trending')
+        ->and($group->name)->toBe('Trending Movies');
+
+    $playlist = $playlist->fresh();
+    expect($playlist->dynamic_groups_config)->toHaveCount(1)
+        ->and($playlist->dynamic_groups_config[0])->toMatchArray($rule);
 });

@@ -144,4 +144,14 @@ class DynamicGroup extends Model
         return collect($config ?? [])
             ->contains(fn (array $rule): bool => (bool) ($rule['enabled'] ?? false));
     }
+
+    /**
+     * Gate the CreateDynamicGroup header action. Defaults to true (any
+     * authenticated user with a Playlist can create) — tighten if a policy
+     * is later added.
+     */
+    public static function canCreate(): bool
+    {
+        return auth()->check();
+    }
 }
