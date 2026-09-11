@@ -6,7 +6,7 @@
  *
  * Before this fix, only ONE playlist's available_streams was ever enforced —
  * whichever of the wrapper (CustomPlaylist/MergedPlaylist) or its source
- * Playlist happened to be picked as authoritative — so the other one's
+ * Playlist happened to be picked as authoritative - so the other one's
  * configured limit was silently dropped. It also didn't count active DVR
  * recordings against the limit, and "stop oldest on limit" eviction had no
  * way to avoid stopping a recording-backed stream.
@@ -17,7 +17,7 @@
  *   2. The wrapper's own cap is enforced even when its source Playlist is
  *      unlimited.
  *   3. An active DVR recording counts toward the limit and is never evicted
- *      by "stop oldest on limit" — a live viewer stream is evicted instead.
+ *      by "stop oldest on limit" - a live viewer stream is evicted instead.
  */
 
 use App\Enums\DvrRecordingStatus;
@@ -61,14 +61,14 @@ test('the source playlist cap is enforced through an unlimited merged wrapper', 
     $channelA = Channel::factory()->for($source)->create(['enabled' => true, 'url' => 'http://example.com/a']);
     $channelB = Channel::factory()->for($source)->create(['enabled' => true, 'url' => 'http://example.com/b']);
 
-    // Channel A is already streaming through the wrapper — tagged with
+    // Channel A is already streaming through the wrapper - tagged with
     // source_playlist_uuid = the source playlist's uuid, not playlist_uuid.
     Http::fake([
         '*/streams/by-metadata*' => function ($request) use ($source, $channelA) {
             parse_str((string) parse_url($request->url(), PHP_URL_QUERY), $query);
             if (($query['field'] ?? null) === 'source_playlist_uuid' && ($query['value'] ?? null) === $source->uuid) {
                 return Http::response([
-                    'matching_streams' => [['stream_id' => 'live-a', 'metadata' => ['channel_id' => (string) $channelA->id]]],
+                    'matching_streams' => [['stream_id' => 'live-a', 'metadata' => ['type' => 'channel', 'channel_id' => (string) $channelA->id]]],
                     'total_matching' => 1,
                 ]);
             }
@@ -98,7 +98,7 @@ test('the wrapper playlist cap is enforced when its source playlist is unlimited
             parse_str((string) parse_url($request->url(), PHP_URL_QUERY), $query);
             if (($query['field'] ?? null) === 'playlist_uuid' && ($query['value'] ?? null) === $merged->uuid) {
                 return Http::response([
-                    'matching_streams' => [['stream_id' => 'live-a', 'metadata' => ['channel_id' => (string) $channelA->id]]],
+                    'matching_streams' => [['stream_id' => 'live-a', 'metadata' => ['type' => 'channel', 'channel_id' => (string) $channelA->id]]],
                     'total_matching' => 1,
                 ]);
             }
@@ -111,7 +111,7 @@ test('the wrapper playlist cap is enforced when its source playlist is unlimited
         ->toThrow(HttpException::class);
 });
 
-test('an active DVR recording counts toward capacity and is never evicted — a live viewer is evicted instead', function () {
+test('an active DVR recording counts toward capacity and is never evicted - a live viewer is evicted instead', function () {
     // Mock GeneralSettings so "stop oldest on limit" is enabled without DB persistence.
     $settings = Mockery::mock(GeneralSettings::class)->makePartial();
     $settings->proxy_stop_oldest_on_limit = true;
@@ -140,7 +140,7 @@ test('an active DVR recording counts toward capacity and is never evicted — a 
             parse_str((string) parse_url($request->url(), PHP_URL_QUERY), $query);
             if (($query['field'] ?? null) === 'playlist_uuid' && ($query['value'] ?? null) === $playlist->uuid) {
                 return Http::response([
-                    'matching_streams' => $deletedStreamId ? [] : [['stream_id' => 'live-a', 'metadata' => ['channel_id' => (string) $channelLive->id]]],
+                    'matching_streams' => $deletedStreamId ? [] : [['stream_id' => 'live-a', 'metadata' => ['type' => 'channel', 'channel_id' => (string) $channelLive->id]]],
                     'total_matching' => $deletedStreamId ? 0 : 1,
                 ]);
             }
@@ -165,15 +165,15 @@ test('an active DVR recording counts toward capacity and is never evicted — a 
                             'created_at' => now()->subMinutes(5)->toIso8601String(),
                             'is_active' => true,
                             'client_count' => 1,
-                            'metadata' => ['channel_id' => (string) $channelLive->id, 'playlist_uuid' => $playlist->uuid],
+                            'metadata' => ['type' => 'channel', 'channel_id' => (string) $channelLive->id, 'playlist_uuid' => $playlist->uuid],
                         ],
-                        // A recording-backed stream — must never be picked as an eviction candidate.
+                        // A recording-backed stream - must never be picked as an eviction candidate.
                         [
                             'stream_id' => 'recording-stream',
                             'created_at' => now()->subMinutes(30)->toIso8601String(),
                             'is_active' => true,
                             'client_count' => 1,
-                            'metadata' => ['channel_id' => (string) $channelRecording->id, 'playlist_uuid' => $playlist->uuid],
+                            'metadata' => ['type' => 'channel', 'channel_id' => (string) $channelRecording->id, 'playlist_uuid' => $playlist->uuid],
                         ],
                     ],
                     'total' => 2,
@@ -203,7 +203,7 @@ test('the source playlist cap is enforced through an unlimited merged wrapper fo
     $episodeA = Episode::factory()->for($this->user)->for($source)->for($series)->create(['url' => 'http://example.com/a.mkv']);
     $episodeB = Episode::factory()->for($this->user)->for($source)->for($series)->create(['url' => 'http://example.com/b.mkv']);
 
-    // Episode A is already streaming through the wrapper — tagged with
+    // Episode A is already streaming through the wrapper - tagged with
     // source_playlist_uuid = the source playlist's uuid, not playlist_uuid.
     Http::fake([
         '*/streams/by-metadata*' => function ($request) use ($source, $episodeA) {

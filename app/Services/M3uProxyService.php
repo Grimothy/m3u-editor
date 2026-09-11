@@ -437,6 +437,10 @@ class M3uProxyService
                 }
 
                 foreach ($response->json('matching_streams') ?? [] as $stream) {
+                    if (($stream['metadata']['type'] ?? null) !== 'channel') {
+                        continue;
+                    }
+
                     $channelId = $stream['metadata']['channel_id'] ?? $stream['metadata']['id'] ?? null;
                     if ($channelId !== null) {
                         $ids[(int) $channelId] = true;
@@ -1091,7 +1095,7 @@ class M3uProxyService
         $originalChannelId = $channel->id;
         $originalPlaylistUuid = $playlist->uuid;
 
-        // The channel's true source Playlist, if it has one — distinct from $playlist,
+        // The channel's true source Playlist, if it has one - distinct from $playlist,
         // which may be a CustomPlaylist/MergedPlaylist/PlaylistAlias wrapper. Tagged on
         // every stream (regardless of profiles_enabled) so DVR capacity accounting can
         // enforce a source-level limit (e.g. a tuner pool) even when the channel is only
@@ -1294,12 +1298,12 @@ class M3uProxyService
         // Check if the playlist(s) this request counts against have stream limits and are
         // at capacity. Only check capacity if we're about to create a NEW stream (no
         // existing pooled stream found). This check applies regardless of whether provider
-        // profiles are enabled — available_streams is the authoritative proxy-level limit.
+        // profiles are enabled - available_streams is the authoritative proxy-level limit.
         //
         // A wrapper playlist (CustomPlaylist/MergedPlaylist/PlaylistAlias) and the channel's
         // true source Playlist can each carry their own independent cap (e.g. a MergedPlaylist
         // limiting guest connections, wrapping an HDHomeRun-style source with a hard tuner
-        // limit) — both are enforced.
+        // limit) - both are enforced.
         $primaryUrl = null;
         $actualChannel = $channel;  // Track the actual channel being used (may differ from original if failover)
 
@@ -1338,6 +1342,7 @@ class M3uProxyService
                         // LIVE-VIEWER stream tied to this playlist (never a recording-backed
                         // one, and never the channel being requested) to make room.
                         $liveCandidates = collect($this->getActiveLiveStreams())
+                            ->filter(fn (array $s) => ($s['metadata']['type'] ?? null) === 'channel')
                             ->filter(fn (array $s) => ($s['metadata']['playlist_uuid'] ?? null) === $limitPlaylist->uuid
                                 || ($s['metadata']['source_playlist_uuid'] ?? null) === $limitPlaylist->uuid)
                             ->filter(fn (array $s) => (int) ($s['metadata']['channel_id'] ?? $s['metadata']['id'] ?? 0) !== (int) $id)
@@ -1718,7 +1723,7 @@ class M3uProxyService
         $originalEpisodeId = $id;
         $originalPlaylistUuid = $playlist->uuid;
 
-        // The episode's true source Playlist, if it has one — distinct from $playlist,
+        // The episode's true source Playlist, if it has one - distinct from $playlist,
         // which may be a CustomPlaylist/MergedPlaylist/PlaylistAlias wrapper. See
         // getChannelUrl() for why this is tagged/enforced independently of profiles_enabled.
         $sourcePlaylist = $episode->playlist instanceof Playlist ? $episode->playlist : null;
@@ -1748,7 +1753,7 @@ class M3uProxyService
 
         // Check if the playlist(s) this request counts against have stream limits and are
         // at capacity. A wrapper playlist (CustomPlaylist/MergedPlaylist/PlaylistAlias) and
-        // the episode's true source Playlist can each carry their own independent cap — see
+        // the episode's true source Playlist can each carry their own independent cap - see
         // getChannelUrl() for the equivalent live-channel logic this mirrors.
         $capacityLimitPlaylists = collect([$sourcePlaylist, $playlist])
             ->filter()

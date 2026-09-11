@@ -3880,7 +3880,7 @@ class XtreamApiController extends Controller
      *
      * For a CustomPlaylist/MergedPlaylist wrapper, capability is granted if
      * EITHER the wrapper's own DvrSetting is enabled OR any source Playlist
-     * behind it has DVR enabled — mirrors resolveDvrSettingIds() so a wrapper
+     * behind it has DVR enabled - mirrors resolveDvrSettingIds() so a wrapper
      * whose channels come from a DVR-enabled source isn't gated out before its
      * recordings are even looked up.
      */
@@ -3927,6 +3927,14 @@ class XtreamApiController extends Controller
         $sourcePlaylistIds = $playlist instanceof MergedPlaylist
             ? DB::table('merged_playlist_playlist')
                 ->where('merged_playlist_id', $playlist->id)
+                ->where(function ($query) {
+                    // Skip sources fully excluded from the merge (all content-type
+                    // toggles off) — their DVR settings shouldn't be reachable
+                    // through this wrapper either.
+                    $query->where('include_live', true)
+                        ->orWhere('include_vod', true)
+                        ->orWhere('include_series', true);
+                })
                 ->pluck('playlist_id')
             : $playlist->channels()
                 ->whereNotNull('channels.playlist_id')
@@ -3963,7 +3971,7 @@ class XtreamApiController extends Controller
             $channel = $playlist->channels()->where('channels.id', $channelId)->first();
             if ($channel?->playlist_id) {
                 $setting = DvrSetting::where('playlist_id', $channel->playlist_id)->first();
-                if ($setting) {
+                if ($setting?->enabled) {
                     return $setting;
                 }
             }
@@ -4163,7 +4171,12 @@ class XtreamApiController extends Controller
         $dvrSettings = DvrSetting::whereIn('id', $dvrSettingIds)->get();
 
         $usedBytes = (int) $dvrSettings->sum('storage_used_bytes');
-        $quotaBytes = $dvrSettings->sum(fn (DvrSetting $s) => $s->global_disk_quota_gb > 0 ? $s->global_disk_quota_gb * 1024 ** 3 : 0) ?: null;
+        // Any contributing setting with no quota (null/0 = unlimited) makes the
+        // aggregate unlimited too — summing would silently drop that source's
+        // unbounded quota down to 0 instead of propagating "unlimited".
+        $quotaBytes = $dvrSettings->contains(fn (DvrSetting $s) => ! ($s->global_disk_quota_gb > 0))
+            ? null
+            : $dvrSettings->sum(fn (DvrSetting $s) => $s->global_disk_quota_gb * 1024 ** 3);
         $recordingCount = DvrRecording::whereIn('dvr_setting_id', $dvrSettingIds)->count();
 
         return response()->json([
