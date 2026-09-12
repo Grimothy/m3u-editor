@@ -9,8 +9,13 @@ use App\Models\User;
 use App\Services\M3uProxyService;
 use App\Services\TmdbService;
 use App\Settings\GeneralSettings;
+use GuzzleHttp\Psr7\FnStream;
+use GuzzleHttp\Psr7\Response;
+use GuzzleHttp\Psr7\Utils;
 use Illuminate\Foundation\Testing\RefreshDatabase;
+use Illuminate\Support\Carbon;
 use Illuminate\Support\Facades\Bus;
+use Illuminate\Support\Facades\Cache;
 use Illuminate\Support\Facades\Http;
 use Illuminate\Support\Facades\Storage;
 
@@ -263,6 +268,102 @@ it('does not gate concurrency when Downloading count is below max', function () 
     expect(CachedContentFile::latest('id')->first()->file_path)->not->toBeNull();
 });
 
+it('gates concurrency and releases without creating a row when Downloading count meets max', function () {
+    Storage::fake('local');
+    config()->set('filesystems.default', 'local');
+
+    // max is 2 by default per settings migration
+    CachedContentFile::factory()->create(['status' => CachedContentFileStatus::Downloading]);
+    CachedContentFile::factory()->create(['status' => CachedContentFileStatus::Downloading]);
+
+    Http::fake(); // any outbound request would fail the test — gate must return before Step 6
+
+    (new DownloadCachedContentFile(
+        dynamicGroup: $this->group,
+        contentType: 'movie',
+        tmdbId: '550',
+        tvdbId: null,
+        seasonNumber: null,
+        episodeNumber: null,
+        quality: null,
+        sourceUrl: 'https://provider.example/movie.mp4',
+    ))->handle(
+        app(GeneralSettings::class),
+        app(M3uProxyService::class),
+        app(TmdbService::class),
+    );
+
+    // No row created for the throttled job — the 2 pre-seeded Downloading
+    // rows are untouched.
+    expect(CachedContentFile::count())->toBe(2);
+    Http::assertNothingSent();
+});
+
+it('sets tries=0 and a future retryUntil() deadline so concurrency-throttle releases never permanently fail the job', function () {
+    // Regression test: this job used to ship with $tries=1, which meant any
+    // job that hit the Step 3 concurrency gate even once and called
+    // $this->release() would be permanently failed with
+    // MaxAttemptsExceededException on its very next redelivery — Laravel
+    // counts every release() as an "attempt" against $tries. retryUntil()
+    // replaces that cap with a wall-clock deadline instead (see
+    // Worker::markJobAsFailedIfAlreadyExceedsMaxAttempts), so this asserts
+    // the fix's actual shape rather than re-deriving Laravel's queue
+    // internals in a test.
+    $job = new DownloadCachedContentFile(
+        dynamicGroup: $this->group,
+        contentType: 'movie',
+        tmdbId: '550',
+        tvdbId: null,
+        seasonNumber: null,
+        episodeNumber: null,
+        quality: null,
+        sourceUrl: 'https://provider.example/movie.mp4',
+    );
+
+    expect($job->tries)->toBe(0)
+        ->and($job->retryUntil())->toBeInstanceOf(Carbon::class)
+        ->and($job->retryUntil()->isFuture())->toBeTrue();
+});
+
+it('reclaims a Pending row (created at dispatch time) and re-attempts the download', function () {
+    Storage::fake('local');
+    config()->set('filesystems.default', 'local');
+
+    Http::fake(['*' => Http::response('PENDING_RECLAIMED', 200)]);
+
+    // DynamicGroupCacheDispatchService::dispatchJob() now creates this row
+    // in Pending status immediately at dispatch time, before the job ever
+    // runs — the activity widget reads it to show the item as queued.
+    $pending = CachedContentFile::factory()->create([
+        'content_type' => 'movie',
+        'tmdb_id' => '550',
+        'quality' => '1080p',
+        'status' => CachedContentFileStatus::Pending,
+    ]);
+
+    (new DownloadCachedContentFile(
+        dynamicGroup: $this->group,
+        contentType: 'movie',
+        tmdbId: '550',
+        tvdbId: null,
+        seasonNumber: null,
+        episodeNumber: null,
+        quality: '1080p',
+        sourceUrl: 'https://provider.example/movie.mp4',
+    ))->handle(
+        app(GeneralSettings::class),
+        app(M3uProxyService::class),
+        app(TmdbService::class),
+    );
+
+    // Same row id reclaimed — no new row created, file written
+    expect(CachedContentFile::count())->toBe(1);
+    $file = $pending->fresh();
+    expect($file->status)->toBe(CachedContentFileStatus::Completed)
+        ->and($file->file_path)->not->toBeNull()
+        ->and($file->dynamicGroups->first()->id)->toBe($this->group->id);
+});
+
 it('skips connection pre-flight when available_streams is 0 (disabled)', function () {
     Storage::fake('local');
     config()->set('filesystems.default', 'local');
@@ -493,6 +594,209 @@ it('streams the downloaded temp file into storage instead of loading it into mem
 
     expect(CachedContentFile::first()->status)->toBe(CachedContentFileStatus::Completed);
     expect($capturedContents)->toBeResource();
+});
+
+it('reportDownloadProgress flags the job cancelled instead of throwing when the row is flagged cancelled', function () {
+    // "Cancel download" (DynamicGroupCacheActivityWidget::deleteCachedFile())
+    // sets CachedContentFile::cancellationCacheKey($id) before deleting the
+    // row. checkCancellation() — called from reportDownloadProgress(), which
+    // is wired to Guzzle's PROGRESS option — sets a cooperative $cancelled
+    // flag rather than throwing: throwing from inside a curl progress
+    // callback crashes the worker process instead of unwinding as a normal
+    // PHP exception, which orphans the Redis queue reservation and leaves
+    // the queue_monitor row stuck (confirmed via a real Horizon run). The
+    // flag is checked by handle() after the HTTP GET returns instead.
+    $file = CachedContentFile::create([
+        'content_type' => 'movie',
+        'tmdb_id' => '3',
+        'content_fingerprint' => 'movie:3::::',
+        'status' => CachedContentFileStatus::Downloading,
+    ]);
+    Cache::put(CachedContentFile::cancellationCacheKey($file->id), true);
+
+    $job = new DownloadCachedContentFile(
+        dynamicGroup: $this->group,
+        contentType: 'movie',
+        tmdbId: '3',
+        tvdbId: null,
+        seasonNumber: null,
+        episodeNumber: null,
+        quality: null,
+        sourceUrl: 'https://provider.example/movie.mp4',
+    );
+
+    $reflection = new ReflectionObject($job);
+    $reflection->getProperty('progressFile')->setValue($job, $file);
+
+    $job->reportDownloadProgress(10_485_760, 1_048_576);
+
+    expect($reflection->getProperty('cancelled')->getValue($job))->toBeTrue();
+});
+
+it('reportDownloadProgress does not throw when the row is not flagged cancelled', function () {
+    $file = CachedContentFile::create([
+        'content_type' => 'movie',
+        'tmdb_id' => '4',
+        'content_fingerprint' => 'movie:4::::',
+        'status' => CachedContentFileStatus::Downloading,
+    ]);
+
+    $job = new DownloadCachedContentFile(
+        dynamicGroup: $this->group,
+        contentType: 'movie',
+        tmdbId: '4',
+        tvdbId: null,
+        seasonNumber: null,
+        episodeNumber: null,
+        quality: null,
+        sourceUrl: 'https://provider.example/movie.mp4',
+    );
+
+    $reflection = new ReflectionObject($job);
+    $reflection->getProperty('progressFile')->setValue($job, $file);
+
+    $job->reportDownloadProgress(10_485_760, 1_048_576);
+    expect($file->fresh()->bytes_downloaded)->toBe(1_048_576);
+});
+
+it('streamResponseToFile stops reading further chunks once cancelled mid-transfer (real mid-stream abort)', function () {
+    // Regression test for the crash-based cancellation this replaced:
+    // throwing from inside curl's progress callback stopped the transfer but
+    // crashed the worker process, orphaning the Redis queue reservation and
+    // leaving the queue_monitor row stuck (confirmed via a real Horizon
+    // run). This drives streamResponseToFile() directly against a fake
+    // multi-chunk PSR-7 stream so we can prove the read loop actually stops
+    // pulling further chunks — not just that handle() discards the result
+    // afterward (that's the next test) — once checkCancellation() flags it.
+    $file = CachedContentFile::create([
+        'content_type' => 'movie',
+        'tmdb_id' => '5',
+        'content_fingerprint' => 'movie:5::::',
+        'status' => CachedContentFileStatus::Downloading,
+    ]);
+    Cache::put(CachedContentFile::cancellationCacheKey($file->id), true);
+
+    $job = new DownloadCachedContentFile(
+        dynamicGroup: $this->group,
+        contentType: 'movie',
+        tmdbId: '5',
+        tvdbId: null,
+        seasonNumber: null,
+        episodeNumber: null,
+        quality: null,
+        sourceUrl: 'https://provider.example/movie.mp4',
+    );
+
+    $reflection = new ReflectionObject($job);
+    $reflection->getProperty('progressFile')->setValue($job, $file);
+
+    // Guzzle's FnStream lets us hand back one fixed "network chunk" per
+    // read() call regardless of the requested length, mimicking a real
+    // streaming socket instead of a buffer that returns everything at once.
+    $chunks = ['AAAA', 'BBBB', 'CCCC'];
+    $reads = 0;
+    $stream = FnStream::decorate(
+        Utils::streamFor(implode('', $chunks)),
+        [
+            'read' => function (int $length) use (&$reads, $chunks): string {
+                $chunk = $chunks[$reads] ?? '';
+                $reads++;
+
+                return $chunk;
+            },
+            'eof' => fn (): bool => $reads >= count($chunks),
+        ]
+    );
+    $response = new Illuminate\Http\Client\Response(new Response(200, [], $stream));
+
+    $tempPath = tempnam(sys_get_temp_dir(), 'dgc_test_');
+    $reflection->getMethod('streamResponseToFile')->invoke($job, $response, $tempPath);
+
+    // Only the first chunk was written — checkCancellation() (called from
+    // reportDownloadProgress() after every chunk) saw the flag on the very
+    // first check and the loop broke immediately instead of draining the
+    // rest of the body.
+    expect(file_get_contents($tempPath))->toBe('AAAA')
+        ->and($reads)->toBe(1);
+
+    @unlink($tempPath);
+});
+
+it('handle() discards the download and skips Storage/Completed when cancelled mid-transfer', function () {
+    // Http::fake() returns the whole faked body as a single in-memory
+    // stream rather than delivering it in real network chunks, so we can't
+    // drive a mid-loop cancellation through it the way the test above does
+    // — instead this simulates cancellation having already been flagged
+    // before Step 6 even starts, and asserts handle()'s post-request check
+    // honors it: no Storage write, no flip to Completed.
+    Storage::fake('local');
+    config()->set('filesystems.default', 'local');
+
+    Http::fake([
+        'provider.example/movie.mp4' => Http::response('FAKE_CONTENT', 200),
+    ]);
+
+    $job = new DownloadCachedContentFile(
+        dynamicGroup: $this->group,
+        contentType: 'movie',
+        tmdbId: '550',
+        tvdbId: null,
+        seasonNumber: null,
+        episodeNumber: null,
+        quality: '1080p',
+        sourceUrl: 'https://provider.example/movie.mp4',
+    );
+    (new ReflectionObject($job))->getProperty('cancelled')->setValue($job, true);
+
+    $job->handle(
+        app(GeneralSettings::class),
+        app(M3uProxyService::class),
+        app(TmdbService::class),
+    );
+
+    $file = CachedContentFile::first();
+    expect($file->status)->toBe(CachedContentFileStatus::Downloading)
+        ->and($file->file_path)->toBeNull();
+
+    Storage::disk('local')->assertDirectoryEmpty('cache');
+});
+
+it('skips creating a row when the dispatch-time Pending row was cancelled before any worker reclaimed it', function () {
+    Storage::fake('local');
+    config()->set('filesystems.default', 'local');
+
+    // Mirrors DynamicGroupCacheActivityWidget::deleteCachedFile()'s Pending
+    // branch: the row is gone (deleted) and the fingerprint-keyed flag is
+    // set in its place.
+    $fingerprint = CachedContentFile::fingerprintFor([
+        'content_type' => 'movie',
+        'tmdb_id' => '550',
+        'quality' => '1080p',
+    ]);
+    Cache::put(CachedContentFile::pendingCancellationCacheKey($fingerprint), true);
+
+    Http::fake(); // any outbound request would fail the test — must skip before Step 6
+
+    (new DownloadCachedContentFile(
+        dynamicGroup: $this->group,
+        contentType: 'movie',
+        tmdbId: '550',
+        tvdbId: null,
+        seasonNumber: null,
+        episodeNumber: null,
+        quality: '1080p',
+        sourceUrl: 'https://provider.example/movie.mp4',
+    ))->handle(
+        app(GeneralSettings::class),
+        app(M3uProxyService::class),
+        app(TmdbService::class),
+    );
+
+    expect(CachedContentFile::count())->toBe(0);
+    Http::assertNothingSent();
+
+    // Consumed (Cache::pull), so it can't suppress a later legitimate dispatch.
+    expect(Cache::has(CachedContentFile::pendingCancellationCacheKey($fingerprint)))->toBeFalse();
 });
 
 it('throttles progress updates to the 1 MiB boundary', function () {
