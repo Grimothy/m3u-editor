@@ -52,6 +52,16 @@ class RunPlaylistSortAlpha implements ShouldQueue
             $isAll = empty($selectedGroups) || in_array('all', $selectedGroups);
 
             if ($target === 'live_groups') {
+                // Defensive guard: live channels no longer carry a rating source
+                // (the channels.rating column was dropped in 2025_06_23). The
+                // Sort By dropdown prevents users from selecting this combo, but
+                // a hand-edited sort_alpha_config or a future UI change could
+                // route rating here — fail loudly so the bad rule is visible
+                // instead of silently throwing deep inside SortService.
+                if ($column === 'rating') {
+                    throw new \InvalidArgumentException("Column 'rating' is not supported for target 'live_groups' (no rating source on live channels).");
+                }
+
                 $query = $this->playlist->liveGroups();
                 if (! $isAll) {
                     $query = $query->whereIn('name_internal', $selectedGroups);

@@ -613,7 +613,7 @@ class SortService
             return;
         }
 
-        // Fallback for other drivers: ORDER BY SELECT then CASE update
+        // Fallback for other drivers: ORDER BY SELECT then persist via helper.
         $ids = $record->channels()
             ->orderByRaw("json_extract(info, '$.rating') IS NULL ASC")
             ->orderByRaw("CAST(COALESCE(json_extract(info, '$.rating'), '0') AS REAL) {$direction}")
@@ -621,21 +621,7 @@ class SortService
             ->pluck('id')
             ->all();
 
-        if (empty($ids)) {
-            return;
-        }
-
-        $cases = [];
-        $i = 1;
-        foreach ($ids as $id) {
-            $cases[] = "WHEN {$id} THEN {$i}";
-            $i++;
-        }
-
-        $casesSql = implode(' ', $cases);
-        $idsSql = implode(',', $ids);
-
-        DB::statement("UPDATE channels SET sort = CASE id {$casesSql} END WHERE id IN ({$idsSql})");
+        $this->persistSortColumn('channels', 'sort', $ids);
     }
 
     /**
@@ -675,7 +661,7 @@ class SortService
             return;
         }
 
-        // Fallback for other drivers
+        // Fallback for other drivers: ORDER BY SELECT then persist via helper.
         $ids = $record->series()
             ->orderByRaw('rating IS NULL ASC')
             ->orderByRaw("CAST(NULLIF(rating, '') AS DECIMAL) {$direction}")
@@ -683,21 +669,7 @@ class SortService
             ->pluck('id')
             ->all();
 
-        if (empty($ids)) {
-            return;
-        }
-
-        $cases = [];
-        $i = 1;
-        foreach ($ids as $id) {
-            $cases[] = "WHEN {$id} THEN {$i}";
-            $i++;
-        }
-
-        $casesSql = implode(' ', $cases);
-        $idsSql = implode(',', $ids);
-
-        DB::statement("UPDATE series SET sort = CASE id {$casesSql} END WHERE id IN ({$idsSql})");
+        $this->persistSortColumn('series', 'sort', $ids);
     }
 
     /**
@@ -733,7 +705,7 @@ class SortService
             return;
         }
 
-        // Fallback for other drivers
+        // Fallback for other drivers: ORDER BY SELECT then persist via helper.
         $ids = Channel::where('playlist_id', $playlist->id)
             ->where('is_vod', true)
             ->orderByRaw("json_extract(info, '$.rating') IS NULL ASC")
@@ -743,19 +715,7 @@ class SortService
             ->map(fn ($id) => (int) $id)
             ->all();
 
-        if (empty($ids)) {
-            return;
-        }
-
-        $cases = [];
-        foreach ($ids as $i => $id) {
-            $cases[] = "WHEN {$id} THEN ".($i + 1);
-        }
-
-        $casesSql = implode(' ', $cases);
-        $idsSql = implode(',', $ids);
-
-        DB::statement("UPDATE channels SET sort = CASE id {$casesSql} END WHERE id IN ({$idsSql})");
+        $this->persistSortColumn('channels', 'sort', $ids);
     }
 
     /**
@@ -788,7 +748,7 @@ class SortService
             return;
         }
 
-        // Fallback for other drivers
+        // Fallback for other drivers: ORDER BY SELECT then persist via helper.
         $ids = Series::where('playlist_id', $playlist->id)
             ->orderByRaw('rating IS NULL ASC')
             ->orderByRaw("CAST(NULLIF(rating, '') AS DECIMAL) {$direction}")
@@ -797,19 +757,7 @@ class SortService
             ->map(fn ($id) => (int) $id)
             ->all();
 
-        if (empty($ids)) {
-            return;
-        }
-
-        $cases = [];
-        foreach ($ids as $i => $id) {
-            $cases[] = "WHEN {$id} THEN ".($i + 1);
-        }
-
-        $casesSql = implode(' ', $cases);
-        $idsSql = implode(',', $ids);
-
-        DB::statement("UPDATE series SET sort = CASE id {$casesSql} END WHERE id IN ({$idsSql})");
+        $this->persistSortColumn('series', 'sort', $ids);
     }
 
     /**

@@ -198,3 +198,19 @@ it('dispatches bulkSortGroupChannelsByRating when sort_alpha_config targets vod_
     expect((int) $hit->refresh()->sort)->toBe(1)
         ->and((int) $skip->refresh()->sort)->toBe(99);
 });
+
+it('throws when sort_alpha_config targets live_groups with column=rating (no rating source on live channels)', function () {
+    // The dropdown prevents this combo, but a hand-edited config or future
+    // UI change could route rating to live_groups — live channels no longer
+    // carry a rating source (the channels.rating column was dropped in
+    // 2025_06_23). Fail loudly so the bad rule is visible instead of
+    // silently throwing deep inside SortService.
+    $this->playlist->update([
+        'sort_alpha_config' => [
+            ['enabled' => true, 'target' => 'live_groups', 'group' => ['all'], 'column' => 'rating', 'sort' => 'DESC'],
+        ],
+    ]);
+
+    expect(fn () => (new RunPlaylistSortAlpha($this->playlist))->handle())
+        ->toThrow(InvalidArgumentException::class);
+});
