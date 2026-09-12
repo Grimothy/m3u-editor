@@ -7,6 +7,7 @@ use App\Enums\DvrSeriesMode;
 use App\Models\Channel;
 use App\Models\DvrRecordingRule;
 use App\Models\DvrSetting;
+use App\Models\PlaylistAuth;
 use App\Settings\GeneralSettings;
 use App\Traits\HasDvrMatchedAirings;
 use App\Traits\HasUserFiltering;
@@ -84,6 +85,19 @@ class DvrRecordingRuleResource extends Resource
                         ->mapWithKeys(fn (DvrSetting $s) => [$s->id => $s->playlist?->name ?? "DVR #{$s->id}"]))
                     ->required()
                     ->searchable(),
+
+                Select::make('playlist_auth_id')
+                    ->label(__('Schedule For (Auth)'))
+                    ->helperText(__('Pick whose authenticated viewing session this rule is for. Leave as "Me (owner)" for your own rules.'))
+                    ->options(fn () => PlaylistAuth::where('user_id', Auth::id())
+                        ->orderBy('name')
+                        ->get()
+                        ->mapWithKeys(fn (PlaylistAuth $a) => [$a->id => $a->name.' ('.$a->username.')'])
+                        ->prepend(__('Me (owner)'), null)
+                        ->all())
+                    ->nullable()
+                    ->searchable()
+                    ->placeholder(__('Me (owner)')),
 
                 Select::make('type')
                     ->label(__('Rule Type'))
@@ -220,6 +234,13 @@ class DvrRecordingRuleResource extends Resource
 
                 TextColumn::make('dvrSetting.playlist.name')
                     ->label(__('Playlist'))
+                    ->sortable()
+                    ->toggleable(),
+
+                TextColumn::make('playlistAuth.name')
+                    ->label(__('Auth'))
+                    ->placeholder(__('Me (owner)'))
+                    ->searchable()
                     ->sortable()
                     ->toggleable(),
 
