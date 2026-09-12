@@ -1177,14 +1177,15 @@ class PlaylistService
 
         if ($isVod) {
             $sourceSchema[] = Select::make('merge_key')
-                ->label('Merge key')
+                ->label(__('Merge key'))
                 ->options([
                     'stream_id' => 'Stream ID',
                     'tmdb_id' => 'TMDB ID',
                 ])
                 ->default('stream_id')
                 ->required()
-                ->helperText('Use TMDB ID to merge the same movie across providers when stream IDs differ. Entries without a TMDB ID are skipped.');
+                ->live()
+                ->helperText(__('Use TMDB ID to merge the same movie across providers when stream IDs differ. Entries without a TMDB ID are skipped.'));
         }
 
         $behaviorSchema = [
@@ -1231,20 +1232,21 @@ class PlaylistService
         ];
 
         if ($isVod) {
-            $schema[] = Fieldset::make('VOD Resolution Priority')
+            $schema[] = Fieldset::make(__('VOD Resolution Priority'))
+                ->hidden(fn (Get $get): bool => $get('merge_key') !== 'tmdb_id')
                 ->schema([
                     Toggle::make('vod_resolution_priority_enabled')
-                        ->label('Promote higher-resolution duplicate when same TMDB ID found')
+                        ->label(__('Promote higher-resolution duplicate when same TMDB ID found'))
                         ->inline(false)
                         ->default(true)
-                        ->helperText('When enabled, the higher-resolution duplicate becomes the master when the same TMDB ID appears at multiple resolutions.'),
+                        ->helperText(__('When enabled, the higher-resolution duplicate becomes the master when the same TMDB ID appears at multiple resolutions.')),
                     Toggle::make('vod_use_filename_resolution')
-                        ->label('Parse resolution from title/URL when ffprobe data is missing')
+                        ->label(__('Parse resolution from title/URL when ffprobe data is missing'))
                         ->inline(false)
                         ->default(true)
-                        ->helperText('Derive resolution from the title, name, or URL when the stream has not been probed with ffprobe.'),
+                        ->helperText(__('Derive resolution from the title, name, or URL when the stream has not been probed with ffprobe.')),
                     Select::make('vod_min_resolution_promote')
-                        ->label('Discard filename-derived resolution below this height')
+                        ->label(__('Discard filename-derived resolution below this height'))
                         ->options([
                             480 => '480p',
                             720 => '720p',
@@ -1252,12 +1254,12 @@ class PlaylistService
                             2160 => '2160p',
                         ])
                         ->default(720)
-                        ->helperText('Channels whose filename-parsed resolution is below this threshold are treated as having no resolution signal. Probed resolution always passes through.'),
+                        ->helperText(__('Channels whose filename-parsed resolution is below this threshold are treated as having no resolution signal. Probed resolution always passes through.')),
                     Toggle::make('vod_verify_filename_via_probe')
-                        ->label('Verify filename-derived resolution via ffprobe after merge')
+                        ->label(__('Verify filename-derived resolution via ffprobe after merge'))
                         ->inline(false)
                         ->default(false)
-                        ->helperText('When enabled, channels whose resolution was derived from filename/title/URL (not probed) are queued for ffprobe after the merge completes. Next merge uses the probed value.'),
+                        ->helperText(__('When enabled, channels whose resolution was derived from filename/title/URL (not probed) are queued for ffprobe after the merge completes. Next merge uses the probed value.')),
                 ])
                 ->columns(2)
                 ->columnSpanFull();

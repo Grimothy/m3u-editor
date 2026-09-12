@@ -2476,6 +2476,7 @@ class PlaylistResource extends Resource implements CopilotResource
                                 ])
                                 ->default('stream_id')
                                 ->required()
+                                ->live()
                                 ->helperText(__('Use TMDB ID to merge the same movie across providers when stream IDs differ. VOD channels without a TMDB ID are skipped.')),
                             Toggle::make('auto_merge_config.check_resolution')
                                 ->label(__('Prioritize by resolution'))
