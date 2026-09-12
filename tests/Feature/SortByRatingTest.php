@@ -79,9 +79,9 @@ it('sorts series within a category by rating DESC', function () {
 
     $this->service->bulkSortCategorySeriesByRating($this->seriesCategory, 'DESC');
 
-    expect($hi->refresh()->sort)->toBe(1)
-        ->and($low->refresh()->sort)->toBe(2)
-        ->and($unrated->refresh()->sort)->toBe(3);
+    expect((int) $hi->refresh()->sort)->toBe(1)
+        ->and((int) $low->refresh()->sort)->toBe(2)
+        ->and((int) $unrated->refresh()->sort)->toBe(3);
 });
 
 // ────────────────────────────────────────────────────────────────────────────
@@ -124,10 +124,10 @@ it('sorts all series in a playlist globally by rating DESC with no category coll
 
     $this->service->bulkSortPlaylistSeriesByRating($this->playlist, 'DESC');
 
-    expect($c2Hi->refresh()->sort)->toBe(1)
-        ->and($c1Hi->refresh()->sort)->toBe(2)
-        ->and($c1Low->refresh()->sort)->toBe(3)
-        ->and($c2Low->refresh()->sort)->toBe(4);
+    expect((int) $c2Hi->refresh()->sort)->toBe(1)
+        ->and((int) $c1Hi->refresh()->sort)->toBe(2)
+        ->and((int) $c1Low->refresh()->sort)->toBe(3)
+        ->and((int) $c2Low->refresh()->sort)->toBe(4);
 });
 
 // ────────────────────────────────────────────────────────────────────────────
@@ -165,8 +165,8 @@ it('dispatches bulkSortPlaylistSeriesByRating when sort_alpha_config targets ser
 
     (new RunPlaylistSortAlpha($this->playlist))->handle();
 
-    expect($hi->refresh()->sort)->toBe(1)
-        ->and($low->refresh()->sort)->toBe(2);
+    expect((int) $hi->refresh()->sort)->toBe(1)
+        ->and((int) $low->refresh()->sort)->toBe(2);
 });
 
 it('dispatches bulkSortGroupChannelsByRating when sort_alpha_config targets vod_groups with specific groups and column=rating', function () {
