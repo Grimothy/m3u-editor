@@ -649,6 +649,7 @@ class PlaylistController extends Controller
             $result['vod_resolution_priority_enabled'] = $vodResolutionPriorityEnabled;
             $result['vod_use_filename_resolution'] = (bool) ($config['vod_use_filename_resolution'] ?? true);
             $result['vod_min_resolution_promote'] = (int) ($config['vod_min_resolution_promote'] ?? 720);
+            $result['vod_verify_filename_via_probe'] = (bool) ($config['vod_verify_filename_via_probe'] ?? false);
         }
 
         return $result;
