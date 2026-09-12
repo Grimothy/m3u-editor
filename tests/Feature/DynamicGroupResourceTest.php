@@ -1,5 +1,6 @@
 <?php
 
+use App\Enums\CachedContentFileStatus;
 use App\Enums\SyncRunPhase;
 use App\Enums\SyncRunStatus;
 use App\Filament\Resources\Categories\CategoryResource;
@@ -335,8 +336,8 @@ it('the Movies relation manager shows a blue Cached check per row when a complet
     ])
         ->assertOk()
         ->loadTable()
-        ->assertTableColumnStateSet('is_cached', true, $cached)
-        ->assertTableColumnStateSet('is_cached', false, $uncached);
+        ->assertTableColumnStateSet('is_cached', CachedContentFileStatus::Completed, $cached)
+        ->assertTableColumnStateSet('is_cached', null, $uncached);
 });
 
 it('lists the real synced dynamic_group_items members on the Series relation manager table', function () {
