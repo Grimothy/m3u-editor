@@ -16,6 +16,7 @@ use App\Settings\GeneralSettings;
 use Illuminate\Contracts\Cache\Factory;
 use Illuminate\Foundation\Testing\RefreshDatabase;
 use Illuminate\Support\Facades\Bus;
+use Illuminate\Support\Facades\Cache;
 use Illuminate\Support\Facades\DB;
 use Livewire\Livewire;
 
@@ -883,6 +884,61 @@ it('the per-row Cancel action is visible only on Pending/Downloading rows and re
 
     expect(CachedContentFile::find($pending->id))->toBeNull()
         ->and(Storage::disk('local')->exists('cache/movie:810::::.mp4'))->toBeFalse();
+});
+
+it('cancelling a Downloading row flags it via cancellationCacheKey so the worker aborts mid-transfer', function () {
+    Storage::fake('local');
+    config()->set('filesystems.default', 'local');
+
+    $downloading = CachedContentFile::factory()->create([
+        'status' => CachedContentFileStatus::Downloading,
+        'content_type' => 'movie',
+        'tmdb_id' => '820',
+    ]);
+
+    Livewire::test(VodDynamicGroupCacheActivityWidget::class)
+        ->assertOk()
+        ->loadTable()
+        ->callTableAction('cancel', $downloading);
+
+    expect(Cache::has(CachedContentFile::cancellationCacheKey($downloading->id)))->toBeTrue();
+});
+
+it('cancelling a Pending row flags it via pendingCancellationCacheKey (keyed by fingerprint, row is gone)', function () {
+    Storage::fake('local');
+    config()->set('filesystems.default', 'local');
+
+    $pending = CachedContentFile::factory()->create([
+        'status' => CachedContentFileStatus::Pending,
+        'content_type' => 'movie',
+        'tmdb_id' => '821',
+    ]);
+    $fingerprint = $pending->content_fingerprint;
+
+    Livewire::test(VodDynamicGroupCacheActivityWidget::class)
+        ->assertOk()
+        ->loadTable()
+        ->callTableAction('cancel', $pending);
+
+    expect(Cache::has(CachedContentFile::pendingCancellationCacheKey($fingerprint)))->toBeTrue()
+        // Row-id-keyed flag is irrelevant here — nothing was ever Downloading.
+        ->and(Cache::has(CachedContentFile::cancellationCacheKey($pending->id)))->toBeFalse();
+});
+
+it('deleting a Completed row does not set any cancellation flag', function () {
+    Storage::fake('local');
+    config()->set('filesystems.default', 'local');
+
+    $completed = CachedContentFile::factory()->completed()->create([
+        'content_type' => 'movie', 'tmdb_id' => '822',
+    ]);
+
+    Livewire::test(VodDynamicGroupCacheActivityWidget::class)
+        ->assertOk()
+        ->loadTable()
+        ->callTableAction('deleteCache', $completed);
+
+    expect(Cache::has(CachedContentFile::cancellationCacheKey($completed->id)))->toBeFalse();
 });
 
 it('Bulk Delete removes the storage file and the row for every selected CachedContentFile', function () {

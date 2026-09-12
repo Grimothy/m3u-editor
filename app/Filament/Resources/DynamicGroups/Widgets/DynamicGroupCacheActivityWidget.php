@@ -22,6 +22,7 @@ use Filament\Tables\Enums\RecordActionsPosition;
 use Filament\Tables\Table;
 use Filament\Widgets\TableWidget as BaseWidget;
 use Illuminate\Support\Collection;
+use Illuminate\Support\Facades\Cache;
 use Illuminate\Support\Facades\Log;
 use Illuminate\Support\Facades\Storage;
 
@@ -238,9 +239,22 @@ abstract class DynamicGroupCacheActivityWidget extends BaseWidget
                     // row. Same mechanical effect as deleteCache (row +
                     // partial storage go away) but gated to in-flight states -
                     // operator wouldn't cancel a Completed download, they'd
-                    // delete it. Worker, if still running, continues
-                    // downloading to an orphaned file that's cleaned up by
-                    // the orphan sweep command.
+                    // delete it. deleteCachedFile() sets a cancellation flag
+                    // before removing the row (CachedContentFile::
+                    // cancellationCacheKey()/pendingCancellationCacheKey()),
+                    // which DownloadCachedContentFile::streamResponseToFile()
+                    // checks roughly every 2 seconds between 64 KiB chunk
+                    // reads and, on a match, breaks its read loop and closes
+                    // the connection immediately — a real mid-transfer abort,
+                    // not just a stopped-tracking-row cosmetic fix (an earlier
+                    // version threw from inside curl's progress callback to
+                    // get the same effect, which crashed the worker process
+                    // instead of unwinding cleanly and orphaned the queue
+                    // reservation; streaming the response body through PHP
+                    // instead of curl is what makes breaking the loop safe).
+                    // A Pending row that's already been dequeued to a worker
+                    // has a narrower window where the job may still start a
+                    // fresh download before the flag is consumed.
                     Action::make('cancel')
                         ->label(__('Cancel download'))
                         ->icon('heroicon-o-x-circle')
@@ -251,7 +265,7 @@ abstract class DynamicGroupCacheActivityWidget extends BaseWidget
                         ], true))
                         ->requiresConfirmation()
                         ->modalHeading(__('Cancel this in-flight download?'))
-                        ->modalDescription(__('Removes the tracking row and any partial storage file. The worker may still finish downloading to disk (becomes an orphan, swept by the cleanup command).'))
+                        ->modalDescription(__('Removes the tracking row and any partial storage file, and stops the transfer. An active download stops within a few seconds; a not-yet-started one may rarely still begin if a worker was already about to pick it up.'))
                         ->modalSubmitActionLabel(__('Cancel download'))
                         ->action(function (CachedContentFile $record): void {
                             self::deleteCachedFile($record);
@@ -272,8 +286,14 @@ abstract class DynamicGroupCacheActivityWidget extends BaseWidget
                                     $otherGroups === 1 ? 'group' : 'groups',
                                 )
                                 : '';
+                            $inFlightWarning = in_array($record->status, [
+                                CachedContentFileStatus::Pending,
+                                CachedContentFileStatus::Downloading,
+                            ], true)
+                                ? ' This download is still in progress - the worker is signaled to abort and stops within a few seconds.'
+                                : '';
 
-                            return __('This removes the file from Storage and deletes the cached_content_files row. Playback will fall back to the live source.').$sharedWarning;
+                            return __('This removes the file from Storage and deletes the cached_content_files row. Playback will fall back to the live source.').$sharedWarning.$inFlightWarning;
                         })
                         ->modalSubmitActionLabel(__('Delete'))
                         ->action(function (CachedContentFile $record): void {
@@ -325,7 +345,7 @@ abstract class DynamicGroupCacheActivityWidget extends BaseWidget
                         ->color('warning')
                         ->requiresConfirmation()
                         ->modalHeading(__('Cancel selected in-flight downloads?'))
-                        ->modalDescription(__('Removes the tracking row and any partial storage file for every Pending / Downloading row in the selection. Failed / Completed rows are skipped.'))
+                        ->modalDescription(__('Removes the tracking row and any partial storage file for every Pending / Downloading row in the selection, and stops the transfers. Failed / Completed rows are skipped.'))
                         ->modalSubmitActionLabel(__('Cancel selected'))
                         ->deselectRecordsAfterCompletion()
                         ->action(function (Collection $records): void {
@@ -356,7 +376,7 @@ abstract class DynamicGroupCacheActivityWidget extends BaseWidget
                         ->color('danger')
                         ->requiresConfirmation()
                         ->modalHeading(__('Delete selected cached files?'))
-                        ->modalDescription(__('Removes the row + storage file for every selected row. Shared rows will fall back to the live source for any other Dynamic Groups that reference them.'))
+                        ->modalDescription(__('Removes the row + storage file for every selected row. Shared rows will fall back to the live source for any other Dynamic Groups that reference them. Any row still Pending/Downloading is also signaled to abort and stops within a few seconds.'))
                         ->modalSubmitActionLabel(__('Delete selected'))
                         ->deselectRecordsAfterCompletion()
                         ->action(function (Collection $records): void {
@@ -609,6 +629,18 @@ abstract class DynamicGroupCacheActivityWidget extends BaseWidget
      */
     public static function deleteCachedFile(CachedContentFile $record): void
     {
+        // Signal cancellation BEFORE deleting the row, so a worker that's
+        // actively downloading this row (or about to reclaim it from
+        // Pending) picks up the flag instead of running to completion
+        // against an orphaned file. See DownloadCachedContentFile::
+        // checkCancellation() / the Step 5 pendingCancellationCacheKey
+        // check for how these are consumed.
+        if ($record->status === CachedContentFileStatus::Downloading) {
+            Cache::put(CachedContentFile::cancellationCacheKey($record->id), true, now()->addHours(48));
+        } elseif ($record->status === CachedContentFileStatus::Pending) {
+            Cache::put(CachedContentFile::pendingCancellationCacheKey($record->content_fingerprint), true, now()->addMinutes(10));
+        }
+
         if (! empty($record->file_path)) {
             try {
                 Storage::disk($record->resolveStorageDisk())->delete($record->file_path);
