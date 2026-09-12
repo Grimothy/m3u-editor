@@ -234,7 +234,7 @@ class SyncListener
             deactivateFailoverChannels: $deactivateFailover,
             forceCompleteRemerge: $forceCompleteRemerge,
             preferCatchupAsPrimary: $preferCatchupAsPrimary,
-            weightedConfig: self::buildWeightedConfig($config, ($config['merge_key'] ?? 'stream_id') === 'tmdb_id' ? 'vod' : 'live'),
+            weightedConfig: self::buildWeightedConfig($config),
             newChannelsOnly: $newChannelsOnly,
             regexPatterns: ! empty($config['regex_patterns'] ?? []) ? $config['regex_patterns'] : null,
             fallbackMergeConfig: PlaylistService::buildMergeFallbackConfig($config),
@@ -247,41 +247,25 @@ class SyncListener
     /**
      * Build weighted config array from playlist config if any weighted options are set
      */
-    private static function buildWeightedConfig(array $config, string $contentType = 'live'): ?array
+    private static function buildWeightedConfig(array $config): ?array
     {
-        $isVod = $contentType === 'vod';
-        $vodResolutionPriorityEnabled = $isVod && ($config['vod_resolution_priority_enabled'] ?? true);
-
         $hasWeightedOptions = ! empty($config['priority_attributes'])
             || ! empty($config['group_priorities'])
             || ! empty($config['priority_keywords'])
             || isset($config['prefer_codec'])
             || ($config['exclude_disabled_groups'] ?? false);
 
-        if (! $hasWeightedOptions && ! $vodResolutionPriorityEnabled) {
+        if (! $hasWeightedOptions) {
             return null; // Use legacy behavior
         }
 
-        $priorityAttributes = $config['priority_attributes'] ?? [];
-        if ($vodResolutionPriorityEnabled) {
-            $priorityAttributes = PlaylistService::vodPriorityAttributes(is_array($priorityAttributes) ? $priorityAttributes : []);
-        }
-
-        $result = [
-            'priority_attributes' => $priorityAttributes,
+        return [
+            'priority_attributes' => $config['priority_attributes'] ?? null,
             'group_priorities' => $config['group_priorities'] ?? [],
             'priority_keywords' => $config['priority_keywords'] ?? [],
             'prefer_codec' => $config['prefer_codec'] ?? null,
             'exclude_disabled_groups' => $config['exclude_disabled_groups'] ?? false,
         ];
-
-        if ($isVod) {
-            $result['vod_resolution_priority_enabled'] = $vodResolutionPriorityEnabled;
-            $result['vod_use_filename_resolution'] = (bool) ($config['vod_use_filename_resolution'] ?? true);
-            $result['vod_min_resolution_promote'] = (int) ($config['vod_min_resolution_promote'] ?? 720);
-        }
-
-        return $result;
     }
 
     /**
