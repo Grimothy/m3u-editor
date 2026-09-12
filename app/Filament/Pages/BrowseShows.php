@@ -64,6 +64,8 @@ class BrowseShows extends Page
 
     public ?int $dvr_setting_id = null;
 
+    public ?int $scheduleForPlaylistAuthId = null;
+
     public string $keyword = '';
 
     public string $category = '';
@@ -134,12 +136,25 @@ class BrowseShows extends Page
         return (int) ceil($this->totalShows / self::PER_PAGE);
     }
 
+    /**
+     * Resolves the playlist_auth_id that scheduled recordings/rules will be
+     * attributed to. Null = the playlist owner themselves (the admin).
+     */
+    public function effectiveSchedulePlaylistAuthId(): ?int
+    {
+        return $this->scheduleForPlaylistAuthId !== null && $this->scheduleForPlaylistAuthId !== ''
+            ? (int) $this->scheduleForPlaylistAuthId
+            : null;
+    }
+
     public function filtersForm(Schema $schema): Schema
     {
         return $schema
             ->statePath(null)
             ->schema([
                 Grid::make(['default' => 1, 'sm' => 2, 'lg' => 3])->schema([
+                    $this->scheduleForPlaylistAuthField(),
+
                     Select::make('dvr_setting_id')
                         ->label(__('DVR Setting (Playlist)'))
                         ->placeholder(__('No DVR settings configured'))
@@ -403,6 +418,7 @@ class BrowseShows extends Page
 
         DvrRecordingRule::create([
             'user_id' => Auth::id(),
+            'playlist_auth_id' => $this->effectiveSchedulePlaylistAuthId(),
             'dvr_setting_id' => $this->dvr_setting_id,
             'type' => DvrRuleType::Once,
             'programme_id' => $programmeId,
@@ -590,6 +606,7 @@ class BrowseShows extends Page
 
         DvrRecordingRule::create(array_merge([
             'user_id' => Auth::id(),
+            'playlist_auth_id' => $this->effectiveSchedulePlaylistAuthId(),
             'dvr_setting_id' => $this->dvr_setting_id,
             'type' => DvrRuleType::Series,
             'series_title' => $title,

@@ -6122,5 +6122,14 @@
     "veryfast": "veryfast",
     "vs.": "vs.",
     "your-api-key-here": "your-api-key-here",
+<<<<<<< HEAD
     "yt-dlp format selector followed by optional flags. Example: bestvideo+bestaudio/best --no-playlist": "yt-dlp format selector followed by optional flags. Example: bestvideo+bestaudio/best --no-playlist"
+=======
+    "yt-dlp format selector followed by optional flags. Example: bestvideo+bestaudio/best --no-playlist": "yt-dlp format selector followed by optional flags. Example: bestvideo+bestaudio/best --no-playlist",
+    "⚠️ IPTV WARNING: This will analyze each stream to determine resolution, which may cause rate limiting or blocking with IPTV providers.": "⚠️ IPTV WARNING: This will analyze each stream to determine resolution, which may cause rate limiting or blocking with IPTV providers.",
+    "Schedule For (Auth)": "Schedule For (Auth)",
+    "Pick whose authenticated viewing session this rule is for. Leave as \"Me (owner)\" for your own rules.": "Pick whose authenticated viewing session this rule is for. Leave as \"Me (owner)\" for your own rules.",
+    "Me (owner)": "Me (owner)",
+    "Selected auth does not belong to your account.": "Selected auth does not belong to your account."
+>>>>>>> 27b8f57e (feat(dvr): schedule recording rules on behalf of another PlaylistAuth)
 }

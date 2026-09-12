@@ -4,6 +4,7 @@ namespace App\Filament\Concerns;
 
 use App\Models\Channel;
 use App\Models\Group;
+use App\Models\PlaylistAuth;
 use Filament\Actions\Action;
 use Filament\Forms\Components\Select;
 use Filament\Forms\Components\TextInput;
@@ -115,6 +116,26 @@ trait HasBrowseShowsFiltersForm
                 14 => __('14 days'),
                 30 => __('30 days'),
             ]);
+    }
+
+    /**
+     * Picker for which authenticated viewing session a record action is attributed to.
+     * Scoped to auth records owned by the current user (admin schedules for wife's
+     * guest auth, etc.). Null = "Me (owner)" — the playlist owner themselves.
+     */
+    protected function scheduleForPlaylistAuthField(): Select
+    {
+        return Select::make('scheduleForPlaylistAuthId')
+            ->label(__('Schedule For (Auth)'))
+            ->helperText(__('Pick whose authenticated viewing session this rule is for. Leave as "Me (owner)" for your own rules.'))
+            ->options(fn () => PlaylistAuth::where('user_id', auth()->id())
+                ->orderBy('name')
+                ->get()
+                ->mapWithKeys(fn (PlaylistAuth $a) => [$a->id => $a->name.' ('.$a->username.')'])
+                ->prepend(__('Me (owner)'), null)
+                ->all())
+            ->default(null)
+            ->live();
     }
 
     // --- Show detail slide-over ---
