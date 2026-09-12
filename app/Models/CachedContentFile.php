@@ -137,6 +137,35 @@ class CachedContentFile extends Model
     }
 
     /**
+     * Cache key used to signal cancellation of an in-flight (Downloading)
+     * download to the worker running DownloadCachedContentFile::handle().
+     * Keyed by row id, which is never reused (Postgres bigserial), so a
+     * cancelled row's key can never collide with a later, unrelated
+     * dispatch for the same content.
+     *
+     * Checked periodically from the job's Guzzle PROGRESS callback — see
+     * DownloadCachedContentFile::checkCancellation().
+     */
+    public static function cancellationCacheKey(int $id): string
+    {
+        return "dynamic-group-cache:cancel:{$id}";
+    }
+
+    /**
+     * Cache key used to signal cancellation of a job that hasn't started
+     * downloading yet (Pending — cancelled before a worker reclaimed it).
+     * Keyed by content_fingerprint (the row itself is already deleted by
+     * the time this is checked) and consumed via Cache::pull() the one
+     * time DownloadCachedContentFile::handle() is about to create a fresh
+     * row for it, so a stale flag can never suppress a later, unrelated
+     * legitimate dispatch for the same fingerprint.
+     */
+    public static function pendingCancellationCacheKey(string $fingerprint): string
+    {
+        return "dynamic-group-cache:cancel-pending:{$fingerprint}";
+    }
+
+    /**
      * Dynamic groups that reference this cached file.
      */
     public function dynamicGroups(): BelongsToMany

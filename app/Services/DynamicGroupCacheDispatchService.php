@@ -10,7 +10,9 @@ use App\Models\DynamicGroup;
 use App\Models\Episode;
 use App\Models\Playlist;
 use App\Settings\GeneralSettings;
+use Illuminate\Database\QueryException;
 use Illuminate\Support\Collection;
+use Illuminate\Support\Facades\DB;
 
 /**
  * Shared dispatch + lookup helpers for the Dynamic Group Cache feature.
@@ -139,7 +141,7 @@ class DynamicGroupCacheDispatchService
             return false;
         }
 
-        return $this->dispatchJob($group, 'movie', $tmdbId, null, null, null, $quality, $url);
+        return $this->dispatchJob($group, $fingerprint, 'movie', $tmdbId, null, null, null, $quality, $url);
     }
 
     /**
@@ -173,7 +175,7 @@ class DynamicGroupCacheDispatchService
             return false;
         }
 
-        return $this->dispatchJob($group, 'episode', $tmdbId, null, $episode->season, $episode->episode_number, $quality, $url);
+        return $this->dispatchJob($group, $fingerprint, 'episode', $tmdbId, null, $episode->season, $episode->episode_number, $quality, $url);
     }
 
     /**
@@ -279,8 +281,26 @@ class DynamicGroupCacheDispatchService
             ->first();
     }
 
+    /**
+     * Create the tracking row in Pending status immediately, before the job
+     * is even dispatched, so the Cache Activity widget can show it as
+     * queued right away — previously the row didn't exist until the job's
+     * own handle() cleared the concurrency gate, so anything waiting on a
+     * throttled slot was invisible to the UI.
+     *
+     * Uses firstOrCreate keyed on the unique content_fingerprint: if a row
+     * already exists (Failed past cooldown, or Downloading/Pending from a
+     * previous dispatch for the same content — shouldSkip() allows those
+     * through), it's left untouched here and the job's own reclaim logic
+     * (DownloadCachedContentFile::reclaimExistingRow()) governs the
+     * transition. Wrapped the same way as the job's own INSERT (DB::transaction
+     * + QueryException fallback) to survive a concurrent dispatch racing on
+     * the same fingerprint — see DownloadCachedContentFile.php Step 5 for
+     * why the savepoint nesting matters on Postgres.
+     */
     private function dispatchJob(
         DynamicGroup $group,
+        string $fingerprint,
         string $contentType,
         ?string $tmdbId,
         ?string $tvdbId,
@@ -289,6 +309,23 @@ class DynamicGroupCacheDispatchService
         ?string $quality,
         string $url,
     ): bool {
+        try {
+            $file = DB::transaction(fn () => CachedContentFile::create([
+                'content_type' => $contentType,
+                'tmdb_id' => $tmdbId,
+                'tvdb_id' => $tvdbId,
+                'season_number' => $seasonNumber,
+                'episode_number' => $episodeNumber,
+                'quality' => $quality,
+                'content_fingerprint' => $fingerprint,
+                'status' => CachedContentFileStatus::Pending,
+            ]));
+        } catch (QueryException) {
+            $file = CachedContentFile::where('content_fingerprint', $fingerprint)->first();
+        }
+
+        $file?->dynamicGroups()->syncWithoutDetaching([$group->id]);
+
         DownloadCachedContentFile::dispatch(
             $group,
             $contentType,

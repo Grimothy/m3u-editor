@@ -497,6 +497,38 @@ it('dispatchForGroup queues one job per eligible channel in a vod group', functi
         ->and($result['reason'])->toBeNull();
 });
 
+it('dispatchForGroup creates Pending tracking rows immediately, before any job runs', function () {
+    // Regression test: DownloadCachedContentFile previously only created its
+    // tracking row after clearing the concurrency gate inside handle(), so a
+    // throttled job (no free Downloading slot) had no row at all and was
+    // invisible to the Cache Activity widget. dispatchJob() now creates the
+    // row up front in Pending status. Bus::fake() means the job body never
+    // runs here, so any row found afterwards can only have come from dispatch.
+    $this->playlist->update(['dynamic_groups_config' => [
+        ['name' => 'Trending', 'cache_enabled' => true],
+    ]]);
+    $group = DynamicGroup::create([
+        'playlist_id' => $this->playlist->id,
+        'user_id' => $this->user->id,
+        'type' => 'vod', 'source' => 'popular', 'name' => 'Trending',
+    ]);
+    $channels = collect();
+    foreach (['200', '201', '202'] as $tmdbId) {
+        $channels->push(Channel::factory()->for($this->playlist)->create(['tmdb_id' => $tmdbId]));
+    }
+    $group->channels()->attach($channels->pluck('id')->all());
+
+    $this->service->dispatchForGroup($group->fresh());
+
+    expect(CachedContentFile::where('status', CachedContentFileStatus::Pending)->count())->toBe(3);
+    foreach (['200', '201', '202'] as $tmdbId) {
+        $file = CachedContentFile::where('tmdb_id', $tmdbId)->first();
+        expect($file)->not->toBeNull()
+            ->and($file->status)->toBe(CachedContentFileStatus::Pending)
+            ->and($file->dynamicGroups->pluck('id')->all())->toBe([$group->id]);
+    }
+});
+
 it('dispatchForGroup skips already-completed channels and reports accurate count', function () {
     $this->playlist->update(['dynamic_groups_config' => [
         ['name' => 'Trending', 'cache_enabled' => true],
