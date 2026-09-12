@@ -48,6 +48,14 @@ class ViewDynamicGroup extends ViewRecord
     protected ?string $redirectUrlAfterDelete = null;
 
     /**
+     * Re-render every 2s so the spinning `is_cached` icon on Downloading rows
+     * (in the Channels/Series relation managers) animates live while cache
+     * downloads are in flight. Without polling, `animate-spin` is frozen until
+     * the user manually reloads.
+     */
+    protected ?string $pollingInterval = '2s';
+
+    /**
      * Default Filament title is "View {getModelLabel()}" - since the resource's
      * model label is the type-mixed "Dynamic Group", a series-type record's
      * page was titled "View Dynamic Group" instead of "View Dynamic Category".
@@ -77,7 +85,7 @@ class ViewDynamicGroup extends ViewRecord
     {
         return [
             Action::make('cache_now')
-                ->label(__('Cache Now'))
+                ->label(__('Cache All'))
                 ->icon('heroicon-o-cloud-arrow-down')
                 ->color('info')
                 ->requiresConfirmation()

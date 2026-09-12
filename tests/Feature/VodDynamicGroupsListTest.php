@@ -187,7 +187,7 @@ it('links the view action to the shared DynamicGroupResource view route', functi
         ->assertTableActionHasUrl('view', $expectedUrl, $group);
 });
 
-it('exposes view and delete actions but no edit', function () {
+it('exposes view, edit, and delete actions in the row action group', function () {
     $group = DynamicGroup::create([
         'playlist_id' => $this->playlist->id, 'user_id' => $this->user->id,
         'type' => 'vod', 'source' => 'trending', 'name' => 'Mine',
@@ -195,13 +195,117 @@ it('exposes view and delete actions but no edit', function () {
 
     Livewire::test(ListVodDynamicGroups::class)
         ->assertTableActionExists('view')
-        ->assertTableActionExists('delete')
-        ->assertTableActionDoesNotExist('edit');
+        ->assertTableActionExists('edit')
+        ->assertTableActionExists('delete');
 
     expect($group->refresh()->exists())->toBeTrue();
 });
 
+it('edit action pre-fills the form with the underlying rule and re-syncs on save', function () {
+    // Drive the same flow the action's fillForm + action closures
+    // would, so the test focuses on the rule-lookup + write path
+    // rather than Filament's form-fill plumbing (covered upstream
+    // by the materializeRule test).
+    $tmdb = Mockery::mock(TmdbService::class);
+    $tmdb->shouldReceive('collectDynamicGroupResults')->andReturn([['tmdb_id' => '999']]);
+    app()->instance(TmdbService::class, $tmdb);
+
+    $playlist = $this->playlist;
+    $playlist->update(['dynamic_groups_config' => [
+        [
+            'enabled' => true,
+            'type' => 'vod',
+            'source' => 'trending',
+            'name' => 'Trending Movies',
+            'tmdb_params' => [],
+            'cache_enabled' => false,
+        ],
+    ]]);
+
+    $group = DynamicGroup::create([
+        'playlist_id' => $playlist->id, 'user_id' => $this->user->id,
+        'type' => 'vod', 'source' => 'trending', 'name' => 'Trending Movies',
+    ]);
+
+    Livewire::test(ListVodDynamicGroups::class)
+        ->mountTableAction('edit', $group)
+        ->assertSchemaComponentExists('enabled')
+        ->assertFormFieldIsDisabled('type')
+        ->assertFormFieldIsDisabled('source')
+        ->assertFormFieldIsDisabled('name')
+        ->fillForm(['enabled' => false])
+        ->callMountedTableAction();
+
+    $rule = $playlist->fresh()->dynamic_groups_config[0];
+    expect($rule)->toMatchArray([
+        'enabled' => false,
+        'type' => 'vod',
+        'source' => 'trending',
+        'name' => 'Trending Movies',
+    ]);
+
+    Bus::assertDispatched(SyncDynamicGroups::class, fn ($job) => $job->playlistId === $playlist->id);
+});
+
+it('edit form pre-fills the enabled toggle with the rule\'s actual state (false)', function () {
+    // Regression guard: the shared rule schema sets Toggle::make('enabled')
+    // ->default(true). If that default leaks into the edit slide-over
+    // (because other ->live() fields trigger a re-render that resets the
+    // toggle), the form would show the rule as enabled when it's not.
+    // The fix strips the default in edit mode so fillForm wins.
+    $playlist = $this->playlist;
+    $playlist->update(['dynamic_groups_config' => [
+        [
+            'enabled' => false,
+            'type' => 'vod',
+            'source' => 'trending',
+            'name' => 'Disabled Group',
+            'tmdb_params' => [],
+            'cache_enabled' => false,
+        ],
+    ]]);
+
+    $group = DynamicGroup::create([
+        'playlist_id' => $playlist->id, 'user_id' => $this->user->id,
+        'type' => 'vod', 'source' => 'trending', 'name' => 'Disabled Group',
+    ]);
+
+    Livewire::test(ListVodDynamicGroups::class)
+        ->mountTableAction('edit', $group)
+        ->assertSchemaComponentStateSet('enabled', false);
+});
+
+it('edit form defaults enabled to true when the rule lacks the enabled key (legacy rule)', function () {
+    // Legacy rule: stored in playlist.dynamic_groups_config without
+    // the 'enabled' key (predates the toggle being added to the
+    // schema). The DynamicGroup row was materialized with
+    // enabled => true (SyncDynamicGroups::materializeRule forces it),
+    // so the grid shows enabled — the Edit form must match.
+    $playlist = $this->playlist;
+    $playlist->update(['dynamic_groups_config' => [
+        [
+            // no 'enabled' key at all
+            'type' => 'vod',
+            'source' => 'trending',
+            'name' => 'Legacy Rule',
+            'tmdb_params' => [],
+            'cache_enabled' => false,
+        ],
+    ]]);
+
+    $group = DynamicGroup::create([
+        'playlist_id' => $playlist->id, 'user_id' => $this->user->id,
+        'type' => 'vod', 'source' => 'trending', 'name' => 'Legacy Rule',
+        'enabled' => true,
+    ]);
+
+    Livewire::test(ListVodDynamicGroups::class)
+        ->mountTableAction('edit', $group)
+        ->assertSchemaComponentStateSet('enabled', true);
+});
+
 it('deleting a row removes the DynamicGroup record', function () {
+
     $group = DynamicGroup::create([
         'playlist_id' => $this->playlist->id, 'user_id' => $this->user->id,
         'type' => 'vod', 'source' => 'trending', 'name' => 'Mine',

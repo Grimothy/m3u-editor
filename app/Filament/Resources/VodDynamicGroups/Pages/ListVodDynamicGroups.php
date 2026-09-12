@@ -15,12 +15,14 @@ use App\Services\DynamicGroupCacheDispatchService;
 use App\Services\TmdbService;
 use App\Settings\GeneralSettings;
 use Filament\Actions\Action;
+use Filament\Actions\ActionGroup;
 use Filament\Actions\BulkAction;
 use Filament\Actions\CreateAction;
 use Filament\Actions\DeleteAction;
 use Filament\Forms\Components\Select;
 use Filament\Notifications\Notification;
 use Filament\Resources\Pages\ListRecords;
+use Filament\Schemas\Components\Component;
 use Filament\Schemas\Components\EmbeddedTable;
 use Filament\Schemas\Components\Livewire;
 use Filament\Schemas\Components\Section;
@@ -338,17 +340,14 @@ class ListVodDynamicGroups extends ListRecords
                     ->sortable(),
             ])
             ->recordActions([
-                DeleteAction::make()
-                    ->button()
-                    ->size('sm')
-                    ->hiddenLabel(),
-                Action::make('view')
-                    ->label(__('View'))
-                    ->icon('heroicon-o-eye')
-                    ->url(fn (DynamicGroup $record): string => DynamicGroupResource::getUrl('view', ['record' => $record]))
-                    ->button()
-                    ->size('sm')
-                    ->hiddenLabel(),
+                ActionGroup::make([
+                    Action::make('view')
+                        ->label(__('View'))
+                        ->icon('heroicon-o-eye')
+                        ->url(fn (DynamicGroup $record): string => DynamicGroupResource::getUrl('view', ['record' => $record])),
+                    $this->getEditRuleAction(),
+                    DeleteAction::make(),
+                ]),
             ], RecordActionsPosition::BeforeCells)
             ->bulkActions([
                 BulkAction::make('cache_now')
@@ -404,5 +403,191 @@ class ListVodDynamicGroups extends ListRecords
             ->emptyStateHeading(__('No Dynamic Groups configured'))
             ->emptyStateDescription(__('Add Dynamic Groups in the Playlist form → Processing → Dynamic Groups (TMDB) section. Synced TMDB lists appear here with their current member counts.'))
             ->emptyStateIcon('heroicon-o-sparkles');
+    }
+
+    /**
+     * Edit-action for the row's 3-dot menu. The DynamicGroup row is a
+     * materialized projection of a rule on the parent playlist's
+     * `dynamic_groups_config`, keyed by the (type, source, name)
+     * triple — so editing the row means editing that rule.
+     *
+     * The triple is locked (disabled) in the form: changing type/source/
+     * name would silently mismatch the row's identity. To "rename" a
+     * group, delete the row and add a new one. Everything else
+     * (enabled toggle, tmdb_params.*, cache_*) is editable and a
+     * SyncDynamicGroups re-run is queued on save so membership and
+     * cache state pick up the new params.
+     */
+    protected function getEditRuleAction(): Action
+    {
+        return Action::make('edit')
+            ->label(__('Edit'))
+            ->icon('heroicon-o-pencil-square')
+            ->slideOver()
+            ->modalHeading(fn (DynamicGroup $record): string => $record->type === 'vod'
+                ? __('Edit Dynamic Group')
+                : __('Edit Dynamic Category'))
+            ->modalSubmitActionLabel(__('Save changes'))
+            ->schema($this->getEditRuleSchema())
+            ->fillForm(fn (DynamicGroup $record): array => $this->loadRuleForRow($record))
+            ->action(function (array $data, DynamicGroup $record): void {
+                $playlist = $record->playlist;
+                if (! $playlist) {
+                    Notification::make()
+                        ->danger()
+                        ->title(__('Playlist not found'))
+                        ->body(__('The parent playlist for this Dynamic Group no longer exists.'))
+                        ->send();
+
+                    return;
+                }
+
+                $config = $playlist->dynamic_groups_config ?? [];
+                $index = $this->findRuleIndex($playlist, $record);
+
+                if ($index === null) {
+                    Notification::make()
+                        ->danger()
+                        ->title(__('Rule not found'))
+                        ->body(__("Could not locate this Dynamic Group's rule on the parent playlist. The row may have been orphaned."))
+                        ->send();
+
+                    return;
+                }
+
+                // Preserve the locked identity fields — even though
+                // the form disables them, defend against a tampered
+                // POST.
+                $data['type'] = $record->type;
+                $data['source'] = $record->source;
+                $data['name'] = $record->name;
+
+                $config[$index] = collect($data)
+                    ->only([
+                        'enabled', 'type', 'source', 'name', 'tmdb_params',
+                        'cache_enabled',
+                        'cache_content_selection', 'cache_content_days',
+                        'cache_retention_mode', 'cache_retention_extra_days',
+                        'cache_selected_content_ids',
+                        'cache_location_override',
+                        'cache_prefer_quality_keyword', 'cache_avoid_duplicate_content',
+                    ])
+                    ->all();
+
+                $playlist->update(['dynamic_groups_config' => array_values($config)]);
+
+                // Re-sync the playlist so the rule's enabled state +
+                // tmdb_params take effect (and disabled rules get
+                // their rows cleaned up by SyncDynamicGroups).
+                SyncDynamicGroups::dispatch($playlist->id);
+
+                Notification::make()
+                    ->success()
+                    ->title(__('Dynamic Group updated'))
+                    ->body(__('Membership and cache state will refresh in the background.'))
+                    ->send();
+            });
+    }
+
+    /**
+     * Edit schema = the same Dynamic Groups rule schema the header
+     * CreateAction uses, with the identity triple (type, source,
+     * name) locked. Re-uses the canonical schema definition so the
+     * edit form stays in lockstep with the create form when fields
+     * are added/removed upstream.
+     *
+     * @return array<int, Component>
+     */
+    protected function getEditRuleSchema(): array
+    {
+        return collect(PlaylistResource::getDynamicGroupRuleSchema())
+            ->map(function ($component) {
+                if (! method_exists($component, 'getName')) {
+                    return $component;
+                }
+
+                $name = $component->getName();
+
+                // In edit mode, the rule's identity triple is locked:
+                // changing type/source/name would silently mismatch the
+                // materialized row's (type, source, name) key. Render
+                // them disabled so the user can't edit them, and drop
+                // the ->live() on `type` so its afterStateUpdated()
+                // doesn't fire on initial mount and clobber the form
+                // state filled from the rule (most visibly: the
+                // 'enabled' toggle's value).
+                if ($name === 'type') {
+                    return $component->disabled()->live(false);
+                }
+
+                if (in_array($name, ['source', 'name'], true)) {
+                    return $component->disabled();
+                }
+
+                return $component;
+            })
+            ->all();
+    }
+
+    /**
+     * Pull the current rule array out of the parent playlist's
+     * dynamic_groups_config, matched by (type, source, name) triple.
+     * Returns an empty array when the rule can't be found — the
+     * action surfaces a "Rule not found" notification on save.
+     *
+     * @return array<string, mixed>
+     */
+    protected function loadRuleForRow(DynamicGroup $record): array
+    {
+        $playlist = $record->playlist;
+        if (! $playlist) {
+            return [];
+        }
+
+        $index = $this->findRuleIndex($playlist, $record);
+        if ($index === null) {
+            return [];
+        }
+
+        $rule = $playlist->dynamic_groups_config[$index] ?? [];
+
+        // Ensure 'enabled' is always present and bool. Rules created
+        // before the toggle was added to the schema may lack the key
+        // entirely; default to true to match the DynamicGroup row's
+        // `enabled` column (forced true by SyncDynamicGroups::materializeRule)
+        // and the Create action's default.
+        $rule['enabled'] = (bool) ($rule['enabled'] ?? true);
+
+        return $rule;
+    }
+
+    /**
+     * Locate the index of the row's rule inside the playlist's
+     * dynamic_groups_config. Matches on the (type, source, name)
+     * triple, which is the canonical SyncDynamicGroups identity
+     * key — see SyncDynamicGroups::handle().
+     */
+    protected function findRuleIndex(Playlist $playlist, DynamicGroup $record): ?int
+    {
+        $config = $playlist->dynamic_groups_config ?? [];
+
+        foreach ($config as $index => $rule) {
+            if (! is_array($rule)) {
+                continue;
+            }
+            if (($rule['type'] ?? null) !== $record->type) {
+                continue;
+            }
+            if (($rule['source'] ?? null) !== $record->source) {
+                continue;
+            }
+            if (trim((string) ($rule['name'] ?? '')) !== $record->name) {
+                continue;
+            }
+
+            return $index;
+        }
+
+        return null;
     }
 }

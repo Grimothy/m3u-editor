@@ -159,7 +159,7 @@ it('links the view action to the shared DynamicGroupResource view route', functi
         ->assertTableActionHasUrl('view', $expectedUrl, $group);
 });
 
-it('exposes view and delete actions but no edit', function () {
+it('exposes view, edit, and delete actions in the row action group', function () {
     $group = DynamicGroup::create([
         'playlist_id' => $this->playlist->id, 'user_id' => $this->user->id,
         'type' => 'series', 'source' => 'trending', 'name' => 'Mine',
@@ -167,11 +167,102 @@ it('exposes view and delete actions but no edit', function () {
 
     Livewire::test(ListSeriesDynamicGroups::class)
         ->assertTableActionExists('view')
-        ->assertTableActionExists('delete')
-        ->assertTableActionDoesNotExist('edit');
+        ->assertTableActionExists('edit')
+        ->assertTableActionExists('delete');
+});
+
+it('edit action pre-fills the form with the underlying rule and re-syncs on save', function () {
+    $playlist = $this->playlist;
+    $playlist->update(['dynamic_groups_config' => [
+        [
+            'enabled' => true,
+            'type' => 'series',
+            'source' => 'trending',
+            'name' => 'Trending Series',
+            'tmdb_params' => [],
+            'cache_enabled' => false,
+        ],
+    ]]);
+
+    $group = DynamicGroup::create([
+        'playlist_id' => $playlist->id, 'user_id' => $this->user->id,
+        'type' => 'series', 'source' => 'trending', 'name' => 'Trending Series',
+    ]);
+
+    Livewire::test(ListSeriesDynamicGroups::class)
+        ->mountTableAction('edit', $group)
+        ->assertSchemaComponentExists('enabled')
+        ->assertFormFieldIsDisabled('type')
+        ->assertFormFieldIsDisabled('source')
+        ->assertFormFieldIsDisabled('name')
+        ->fillForm(['enabled' => false])
+        ->callMountedTableAction();
+
+    $rule = $playlist->fresh()->dynamic_groups_config[0];
+    expect($rule)->toMatchArray([
+        'enabled' => false,
+        'type' => 'series',
+        'source' => 'trending',
+        'name' => 'Trending Series',
+    ]);
+
+    Bus::assertDispatched(SyncDynamicGroups::class, fn ($job) => $job->playlistId === $playlist->id);
+});
+
+it('edit form pre-fills the enabled toggle with the rule\'s actual state (false)', function () {
+    $playlist = $this->playlist;
+    $playlist->update(['dynamic_groups_config' => [
+        [
+            'enabled' => false,
+            'type' => 'series',
+            'source' => 'trending',
+            'name' => 'Disabled Series',
+            'tmdb_params' => [],
+            'cache_enabled' => false,
+        ],
+    ]]);
+
+    $group = DynamicGroup::create([
+        'playlist_id' => $playlist->id, 'user_id' => $this->user->id,
+        'type' => 'series', 'source' => 'trending', 'name' => 'Disabled Series',
+    ]);
+
+    Livewire::test(ListSeriesDynamicGroups::class)
+        ->mountTableAction('edit', $group)
+        ->assertSchemaComponentStateSet('enabled', false);
+});
+
+it('edit form defaults enabled to true when the rule lacks the enabled key (legacy rule)', function () {
+    // Legacy rule: stored in playlist.dynamic_groups_config without
+    // the 'enabled' key (predates the toggle being added to the
+    // schema). The DynamicGroup row was materialized with
+    // enabled => true (SyncDynamicGroups::materializeRule forces it),
+    // so the grid shows enabled — the Edit form must match.
+    $playlist = $this->playlist;
+    $playlist->update(['dynamic_groups_config' => [
+        [
+            // no 'enabled' key at all
+            'type' => 'series',
+            'source' => 'trending',
+            'name' => 'Legacy Series',
+            'tmdb_params' => [],
+            'cache_enabled' => false,
+        ],
+    ]]);
+
+    $group = DynamicGroup::create([
+        'playlist_id' => $playlist->id, 'user_id' => $this->user->id,
+        'type' => 'series', 'source' => 'trending', 'name' => 'Legacy Series',
+        'enabled' => true,
+    ]);
+
+    Livewire::test(ListSeriesDynamicGroups::class)
+        ->mountTableAction('edit', $group)
+        ->assertSchemaComponentStateSet('enabled', true);
 });
 
 it('deleting a row removes the DynamicGroup record', function () {
+
     $group = DynamicGroup::create([
         'playlist_id' => $this->playlist->id, 'user_id' => $this->user->id,
         'type' => 'series', 'source' => 'trending', 'name' => 'Mine',
