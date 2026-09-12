@@ -285,7 +285,7 @@ return [
             'maxTime' => $horizonIntEnv('HORIZON_DYNAMIC_GROUP_CACHE_MAX_TIME', 7200),
             'maxJobs' => $horizonIntEnv('HORIZON_DYNAMIC_GROUP_CACHE_MAX_JOBS', 50),
             'memory' => $horizonIntEnv('HORIZON_DYNAMIC_GROUP_CACHE_MEMORY', 512), // MB — file handles can be GB
-            'tries' => 1, // Job handles retries in-handle via status=Failed + cooldown
+            'tries' => 1, // Overridden by the job's own $tries/retryUntil() (DownloadCachedContentFile.php) — this value is unused
             'timeout' => (int) config('dvr.playlist_download_timeout', 3600),
             'nice' => 5,
         ],
