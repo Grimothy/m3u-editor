@@ -235,7 +235,6 @@
          scoped to this playlist so it only shows items available locally) --}}
     @include('filament.partials.cast-section', [
         'cast' => $castList,
-        'collapsed' => true,
         'filmographyPage' => \Filament\Facades\Filament::getCurrentPanel()->getId() === 'admin'
             ? \App\Filament\Pages\ActorFilmography::class
             : \App\Filament\GuestPanel\Pages\GuestActorFilmography::class,
