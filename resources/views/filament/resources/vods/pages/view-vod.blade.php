@@ -198,21 +198,11 @@
                         @endif
                     </div>
 
-                    {{-- Cast & Director --}}
-                    @if ($director || $cast)
-                        <div class="space-y-2 border-t border-white/10 pt-4">
-                            @if ($director)
-                                <p class="text-sm">
-                                    <span class="text-gray-400">Director:</span>
-                                    <span class="text-white">{{ $director }}</span>
-                                </p>
-                            @endif
-                            @if ($cast)
-                                <p class="text-sm">
-                                    <span class="text-gray-400">Cast:</span>
-                                    <span class="text-white">{{ Str::limit($cast, 200) }}</span>
-                                </p>
-                            @endif
+                    {{-- Director --}}
+                    @if ($director)
+                        <div class="border-t border-white/10 pt-4 text-sm">
+                            <span class="text-gray-400">Director:</span>
+                            <span class="text-white">{{ $director }}</span>
                         </div>
                     @endif
                 </div>
@@ -281,19 +271,42 @@
                         </button>
                     </div>
 
-                    @if ($director || $cast)
-                        <div class="space-y-1 pt-2 text-sm">
-                            @if ($director)
-                                <p><span class="text-gray-500">Director:</span> {{ $director }}</p>
-                            @endif
-                            @if ($cast)
-                                <p><span class="text-gray-500">Cast:</span> {{ Str::limit($cast, 150) }}</p>
-                            @endif
-                        </div>
+                    @if ($director)
+                        <p class="pt-2 text-sm"><span class="text-gray-500">Director:</span> {{ $director }}</p>
                     @endif
                 </div>
             </div>
         </div>
+    @endif
+
+    {{-- Cast avatars (TMDB-resolved when tmdb_id present) --}}
+    @php
+        $filmographyPageClass = \Filament\Facades\Filament::getCurrentPanel()->getId() === 'admin'
+            ? \App\Filament\Pages\ActorFilmography::class
+            : \App\Filament\GuestPanel\Pages\GuestActorFilmography::class;
+        $playlistUuid = $record->playlist?->uuid ?? null;
+        $isGuestPanel = \Filament\Facades\Filament::getCurrentPanel()->getId() !== 'admin';
+    @endphp
+    @if (! empty($castMembers))
+        <x-filament::section
+            :collapsible="true"
+            compact
+            :collapsed="true"
+            heading="{{ __('Cast') }}"
+        >
+            <x-slot name="afterHeader">
+                <x-filament::badge color="gray">
+                    {{ count($castMembers) }}
+                </x-filament::badge>
+            </x-slot>
+
+            @include('filament.partials.cast-avatar-grid', [
+                'castMembers' => $castMembers,
+                'filmographyPage' => $filmographyPageClass,
+                'playlistId' => $isGuestPanel ? null : ($record->playlist_id ?? null),
+                'playlistUuid' => $isGuestPanel ? $playlistUuid : null,
+            ])
+        </x-filament::section>
     @endif
 
     {{-- Technical Details --}}

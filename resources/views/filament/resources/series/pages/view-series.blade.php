@@ -138,21 +138,11 @@
                         </div>
                     @endif
 
-                    {{-- Cast & Director --}}
-                    @if ($record->director || $record->cast)
-                        <div class="space-y-2 border-t border-white/10 pt-4">
-                            @if ($record->director)
-                                <p class="text-sm">
-                                    <span class="text-gray-400">Director:</span>
-                                    <span class="text-white">{{ $record->director }}</span>
-                                </p>
-                            @endif
-                            @if ($record->cast)
-                                <p class="text-sm">
-                                    <span class="text-gray-400">Cast:</span>
-                                    <span class="text-white">{{ Str::limit($record->cast, 200) }}</span>
-                                </p>
-                            @endif
+                    {{-- Director --}}
+                    @if ($record->director)
+                        <div class="border-t border-white/10 pt-4 text-sm">
+                            <span class="text-gray-400">Director:</span>
+                            <span class="text-white">{{ $record->director }}</span>
                         </div>
                     @endif
                 </div>
@@ -204,19 +194,42 @@
                         <p class="text-gray-600 dark:text-gray-300">{{ Str::limit($record->plot, 300) }}</p>
                     @endif
 
-                    @if ($record->director || $record->cast)
-                        <div class="space-y-1 text-sm">
-                            @if ($record->director)
-                                <p><span class="text-gray-500">Director:</span> {{ $record->director }}</p>
-                            @endif
-                            @if ($record->cast)
-                                <p><span class="text-gray-500">Cast:</span> {{ Str::limit($record->cast, 150) }}</p>
-                            @endif
-                        </div>
+                    @if ($record->director)
+                        <p class="text-sm"><span class="text-gray-500">Director:</span> {{ $record->director }}</p>
                     @endif
                 </div>
             </div>
         </div>
+    @endif
+
+    {{-- Cast avatars (TMDB-resolved when tmdb_id present) --}}
+    @php
+        $filmographyPageClass = \Filament\Facades\Filament::getCurrentPanel()->getId() === 'admin'
+            ? \App\Filament\Pages\ActorFilmography::class
+            : \App\Filament\GuestPanel\Pages\GuestActorFilmography::class;
+        $playlistUuid = $record->playlist?->uuid ?? null;
+        $isGuestPanel = \Filament\Facades\Filament::getCurrentPanel()->getId() !== 'admin';
+    @endphp
+    @if (! empty($castMembers))
+        <x-filament::section
+            :collapsible="true"
+            compact
+            :collapsed="true"
+            heading="{{ __('Cast') }}"
+        >
+            <x-slot name="afterHeader">
+                <x-filament::badge color="gray">
+                    {{ count($castMembers) }}
+                </x-filament::badge>
+            </x-slot>
+
+            @include('filament.partials.cast-avatar-grid', [
+                'castMembers' => $castMembers,
+                'filmographyPage' => $filmographyPageClass,
+                'playlistId' => $isGuestPanel ? null : ($record->playlist_id ?? null),
+                'playlistUuid' => $isGuestPanel ? $playlistUuid : null,
+            ])
+        </x-filament::section>
     @endif
 
     {{-- Probed Stream Info (aggregated across episodes) --}}

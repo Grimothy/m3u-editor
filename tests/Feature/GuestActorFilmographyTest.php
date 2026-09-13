@@ -1,6 +1,7 @@
 <?php
 
 use App\Filament\GuestPanel\Pages\GuestActorFilmography;
+use App\Models\Channel;
 use App\Models\Playlist;
 use App\Models\User;
 use App\Settings\GeneralSettings;
@@ -86,6 +87,12 @@ it('allows access when authenticated with uuid', function () {
 it('populates person and filmography on mount', function () {
     setGuestSession($this->playlist->uuid);
 
+    // Seed a VOD matching tmdb_id 100 so the playlist-scoped filter keeps it.
+    Channel::factory()->for($this->owner)->for($this->playlist, 'playlist')->create([
+        'is_vod' => true,
+        'tmdb_id' => 100,
+    ]);
+
     Cache::flush();
 
     $page = new GuestActorFilmography;
@@ -118,4 +125,51 @@ it('uses the title from the person name when available', function () {
     $page->mount();
 
     expect((string) $page->getTitle())->toBe('Guest Actor');
+});
+
+it('filters filmography to series+vod in the originating guest playlist', function () {
+    Cache::flush();
+    Http::preventStrayRequests();
+    Http::fake([
+        'api.themoviedb.org/3/person/*' => Http::sequence()
+            ->push(['name' => 'Guest Actor', 'profile_path' => '/guest.jpg', 'biography' => 'Bio.'], 200)
+            ->push([
+                'cast' => [
+                    ['id' => 100, 'media_type' => 'movie', 'title' => 'Inception', 'character' => 'Cobb', 'release_date' => '2010-07-15', 'poster_path' => '/inc.jpg'],
+                    ['id' => 200, 'media_type' => 'movie', 'title' => 'Other movie', 'character' => 'X', 'release_date' => '2011-07-15', 'poster_path' => '/oth.jpg'],
+                ],
+            ], 200),
+    ]);
+
+    setGuestSession($this->playlist->uuid);
+
+    // Only Inception (tmdb_id 100) is in the guest playlist.
+    Channel::factory()->for($this->owner)->for($this->playlist, 'playlist')->create([
+        'is_vod' => true,
+        'tmdb_id' => 100,
+    ]);
+
+    $page = new GuestActorFilmography;
+    $page->personId = 456;
+    $page->name = 'Guest Actor';
+    $page->mount();
+
+    expect($page->filmography)->toHaveCount(1)
+        ->and($page->filmography[0]['tmdb_id'])->toBe(100);
+});
+
+it('does not filter when playlistUuid is empty', function () {
+    // The default Http::fake returns 1 filmography item; with no playlist filter
+    // the page should keep it as-is.
+    $request = Request::create('/');
+    app()->instance('request', $request);
+
+    Cache::flush();
+
+    $page = new GuestActorFilmography;
+    $page->personId = 456;
+    $page->name = 'Guest Actor';
+    $page->mount();
+
+    expect($page->filmography)->toHaveCount(1);
 });
