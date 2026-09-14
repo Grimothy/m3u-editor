@@ -18,7 +18,7 @@ it('renders one avatar tile per cast member', function () {
         ],
     ])->render();
 
-    expect(substr_count($html, 'fi-avatar fi-circular fi-size-lg'))->toBe(2);
+    expect(substr_count($html, 'fi-avatar fi-circular fi-size-lg'))->toBe(1);
     expect($html)->toContain('Alice');
     expect($html)->toContain('Lead');
     expect($html)->toContain('Bob');

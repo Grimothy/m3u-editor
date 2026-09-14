@@ -33,16 +33,7 @@
                         $actorName = (string) $member['name'];
                         $character = (string) ($member['character'] ?? '');
                         $photo = $member['photo'] ?? null;
-                        $tileInner = '
-                            <div class="fi-avatar fi-circular fi-size-lg flex h-24 w-24 items-center justify-center overflow-hidden rounded-full bg-gray-200 dark:bg-gray-700">'
-                            .($photo
-                                ? '<x-filament::avatar src="'.e($photo).'" alt="'.e($actorName).'" size="lg" />'
-                                : '<x-filament::icon icon="heroicon-o-user" class="h-10 w-10 text-gray-400" />')
-                            .'</div>
-                            <div class="mt-2 line-clamp-2 text-sm font-medium text-gray-900 dark:text-gray-100">'.e($actorName).'</div>'
-                            .($character !== ''
-                                ? '<div class="line-clamp-2 text-xs text-gray-500 dark:text-gray-400">'.e($character).'</div>'
-                                : '');
+                        $tileClasses = 'flex w-24 flex-shrink-0 flex-col items-center text-center';
                     @endphp
 
                     @if ($filmographyPageClass && $personId > 0)
@@ -57,13 +48,23 @@
                         @endphp
                         <a
                             href="{{ $filmographyUrl }}"
-                            class="group flex w-24 flex-shrink-0 flex-col items-center text-center transition-opacity hover:opacity-80"
+                            class="group {{ $tileClasses }} transition-opacity hover:opacity-80"
                             title="{{ __('View filmography') }} — {{ $actorName }}"
                         >
-                            {!! $tileInner !!}
+                            @include('filament.partials.cast-section-tile', [
+                                'photo' => $photo,
+                                'actorName' => $actorName,
+                                'character' => $character,
+                            ])
                         </a>
                     @else
-                        <div class="flex w-24 flex-shrink-0 flex-col items-center text-center">{!! $tileInner !!}</div>
+                        <div class="{{ $tileClasses }}">
+                            @include('filament.partials.cast-section-tile', [
+                                'photo' => $photo,
+                                'actorName' => $actorName,
+                                'character' => $character,
+                            ])
+                        </div>
                     @endif
                 @endforeach
             </div>
