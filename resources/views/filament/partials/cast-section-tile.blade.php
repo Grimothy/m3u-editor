@@ -10,11 +10,7 @@
         <x-filament::icon icon="heroicon-o-user" class="h-6 w-6 text-gray-400" />
     </div>
 @endif
-<div class="mt-2 line-clamp-2 text-sm font-medium text-gray-900 dark:text-gray-100">
-    {{ $actorName }}
-</div>
+<div class="mt-2 line-clamp-2 text-sm font-medium text-gray-900 dark:text-gray-100">{{ $actorName }}</div>
 @if (! empty($character))
-    <div class="line-clamp-2 text-xs text-gray-500 dark:text-gray-400">
-        {{ $character }}
-    </div>
+    <div class="line-clamp-2 text-xs text-gray-500 dark:text-gray-400">{{ $character }}</div>
 @endif
