@@ -325,17 +325,22 @@
 
     {{-- Cast (clickable: each tile navigates to the actor's filmography page,
          scoped to this playlist so it only shows items available locally) --}}
+    @php
+        // Detect the active panel without crashing when no panel context is
+        // available (e.g. Livewire tests that don't set up a Filament panel).
+        // Default to 'admin' so admin tests resolve the right Filmography class
+        // and admin ownership checks still run; production URLs pick up the
+        // real panel id.
+        $activePanelId = \Filament\Facades\Filament::getCurrentPanel()?->getId() ?? 'admin';
+        $isAdminPanel = $activePanelId === 'admin';
+    @endphp
     @include('filament.partials.cast-section', [
         'cast' => $castList,
-        'filmographyPage' => \Filament\Facades\Filament::getCurrentPanel()->getId() === 'admin'
+        'filmographyPage' => $isAdminPanel
             ? \App\Filament\Pages\ActorFilmography::class
             : \App\Filament\GuestPanel\Pages\GuestActorFilmography::class,
-        'playlistId' => \Filament\Facades\Filament::getCurrentPanel()->getId() === 'admin'
-            ? ($record->playlist_id ?? null)
-            : null,
-        'playlistUuid' => \Filament\Facades\Filament::getCurrentPanel()->getId() !== 'admin'
-            ? ($record->playlist?->uuid ?? null)
-            : null,
+        'playlistId' => $isAdminPanel ? ($record->playlist_id ?? null) : null,
+        'playlistUuid' => ! $isAdminPanel ? ($record->playlist?->uuid ?? null) : null,
     ])
 
     {{-- Technical Details --}}
