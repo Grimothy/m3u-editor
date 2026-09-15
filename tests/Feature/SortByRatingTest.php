@@ -27,7 +27,7 @@ beforeEach(function () {
 });
 
 // ────────────────────────────────────────────────────────────────────────────
-// bulkSortGroupChannelsByRating — VOD channels within a single group
+// bulkSortGroupChannelsByRating - VOD channels within a single group
 // ────────────────────────────────────────────────────────────────────────────
 
 it('sorts VOD channels within a group by rating DESC (highest rated first)', function () {
@@ -37,7 +37,7 @@ it('sorts VOD channels within a group by rating DESC (highest rated first)', fun
 
     $this->service->bulkSortGroupChannelsByRating($this->vodGroup, 'DESC');
 
-    // Channel.sort has a `decimal:4` cast on the model — see Channel::$casts.
+    // Channel.sort has a `decimal:4` cast on the model - see Channel::$casts.
     // Cast back to int for the assertion (matches SortByReleaseDateBulkActionsTest pattern).
     expect((int) $hi->refresh()->sort)->toBe(1)
         ->and((int) $mid->refresh()->sort)->toBe(2)
@@ -50,7 +50,7 @@ it('sorts VOD channels within a group by rating ASC and pushes null-rated to the
 
     $this->service->bulkSortGroupChannelsByRating($this->vodGroup, 'ASC');
 
-    // Even in ASC order, the unrated channel sinks to the bottom — otherwise
+    // Even in ASC order, the unrated channel sinks to the bottom - otherwise
     // nulls would float to the top of an ASC sort, which is never what the
     // user wants for "sort by rating".
     expect((int) $rated->refresh()->sort)->toBe(1)
@@ -68,8 +68,34 @@ it('handles missing rating JSON path (info column null) without crashing', funct
         ->and((int) $b->refresh()->sort)->toBeInt();
 });
 
+it('falls back to the channels.rating column when info->rating is absent (no TMDB enrichment yet)', function () {
+    // Provider-supplied rating on the live column, never enriched via
+    // FetchTmdbIds (no `info->rating`). This must NOT be treated as unrated.
+    $providerRated = Channel::factory()->for($this->user)->for($this->playlist)->for($this->vodGroup, 'group')->create(['is_vod' => true, 'title' => 'ProviderRated', 'sort' => 99, 'rating' => '6.0']);
+    $tmdbRated = Channel::factory()->for($this->user)->for($this->playlist)->for($this->vodGroup, 'group')->create(['is_vod' => true, 'title' => 'TmdbRated', 'sort' => 99, 'info' => ['rating' => 8.5]]);
+    $unrated = Channel::factory()->for($this->user)->for($this->playlist)->for($this->vodGroup, 'group')->create(['is_vod' => true, 'title' => 'Unrated', 'sort' => 99]);
+
+    $this->service->bulkSortGroupChannelsByRating($this->vodGroup, 'DESC');
+
+    expect((int) $tmdbRated->refresh()->sort)->toBe(1)
+        ->and((int) $providerRated->refresh()->sort)->toBe(2)
+        ->and((int) $unrated->refresh()->sort)->toBe(3);
+});
+
+it('prefers info->rating over channels.rating when both are present', function () {
+    $channel = Channel::factory()->for($this->user)->for($this->playlist)->for($this->vodGroup, 'group')->create(['is_vod' => true, 'sort' => 99, 'rating' => '2.0', 'info' => ['rating' => 9.0]]);
+    $other = Channel::factory()->for($this->user)->for($this->playlist)->for($this->vodGroup, 'group')->create(['is_vod' => true, 'sort' => 99, 'rating' => '5.0']);
+
+    $this->service->bulkSortGroupChannelsByRating($this->vodGroup, 'DESC');
+
+    // $channel's TMDB rating (9.0) beats $other's provider rating (5.0),
+    // even though $channel's own provider rating (2.0) would have lost.
+    expect((int) $channel->refresh()->sort)->toBe(1)
+        ->and((int) $other->refresh()->sort)->toBe(2);
+});
+
 // ────────────────────────────────────────────────────────────────────────────
-// bulkSortCategorySeriesByRating — series within a single category
+// bulkSortCategorySeriesByRating - series within a single category
 // ────────────────────────────────────────────────────────────────────────────
 
 it('sorts series within a category by rating DESC', function () {
@@ -84,8 +110,28 @@ it('sorts series within a category by rating DESC', function () {
         ->and((int) $unrated->refresh()->sort)->toBe(3);
 });
 
+it('treats an empty-string rating the same as null (sinks to the bottom)', function () {
+    $rated = Series::factory()->for($this->user)->for($this->playlist)->for($this->seriesCategory, 'category')->create(['rating' => '6.0', 'sort' => 99]);
+    $emptyString = Series::factory()->for($this->user)->for($this->playlist)->for($this->seriesCategory, 'category')->create(['rating' => '', 'sort' => 99]);
+
+    $this->service->bulkSortCategorySeriesByRating($this->seriesCategory, 'DESC');
+
+    expect((int) $rated->refresh()->sort)->toBe(1)
+        ->and((int) $emptyString->refresh()->sort)->toBe(2);
+});
+
+it('preserves decimal precision when sorting series by rating (no rounding ties)', function () {
+    $a = Series::factory()->for($this->user)->for($this->playlist)->for($this->seriesCategory, 'category')->create(['rating' => '7.8', 'sort' => 99]);
+    $b = Series::factory()->for($this->user)->for($this->playlist)->for($this->seriesCategory, 'category')->create(['rating' => '7.5', 'sort' => 99]);
+
+    $this->service->bulkSortCategorySeriesByRating($this->seriesCategory, 'DESC');
+
+    expect((int) $a->refresh()->sort)->toBe(1)
+        ->and((int) $b->refresh()->sort)->toBe(2);
+});
+
 // ────────────────────────────────────────────────────────────────────────────
-// bulkSortPlaylistVodByRating — all VOD channels across the playlist, globally
+// bulkSortPlaylistVodByRating - all VOD channels across the playlist, globally
 // ────────────────────────────────────────────────────────────────────────────
 
 it('sorts all VOD channels in a playlist globally by rating DESC with no group collisions', function () {
@@ -110,7 +156,7 @@ it('sorts all VOD channels in a playlist globally by rating DESC with no group c
 });
 
 // ────────────────────────────────────────────────────────────────────────────
-// bulkSortPlaylistSeriesByRating — all series across the playlist, globally
+// bulkSortPlaylistSeriesByRating - all series across the playlist, globally
 // ────────────────────────────────────────────────────────────────────────────
 
 it('sorts all series in a playlist globally by rating DESC with no category collisions', function () {
@@ -131,7 +177,7 @@ it('sorts all series in a playlist globally by rating DESC with no category coll
 });
 
 // ────────────────────────────────────────────────────────────────────────────
-// RunPlaylistSortAlpha job integration — the sort_alpha_config column === 'rating'
+// RunPlaylistSortAlpha job integration - the sort_alpha_config column === 'rating'
 // branches dispatch to the new SortService methods.
 // ────────────────────────────────────────────────────────────────────────────
 
@@ -173,7 +219,7 @@ it('dispatches bulkSortGroupChannelsByRating when sort_alpha_config targets vod_
     // RunPlaylistSortAlpha filters groups by `name_internal` (the internal
     // provider-supplied group name), not the user-facing `name`. GroupFactory
     // doesn't set name_internal by default, so we set it explicitly to make
-    // the filter match — same pattern as the playlist UI auto-populates.
+    // the filter match - same pattern as the playlist UI auto-populates.
     $otherGroup = Group::factory()->for($this->user)->for($this->playlist)->create(['type' => 'vod', 'name' => 'Other', 'name_internal' => 'Other']);
     $targetGroup = Group::factory()->for($this->user)->for($this->playlist)->create(['type' => 'vod', 'name' => 'Target', 'name_internal' => 'Target']);
 
@@ -201,10 +247,10 @@ it('dispatches bulkSortGroupChannelsByRating when sort_alpha_config targets vod_
 
 it('throws when sort_alpha_config targets live_groups with column=rating (no rating source on live channels)', function () {
     // The dropdown prevents this combo, but a hand-edited config or future
-    // UI change could route rating to live_groups — live channels no longer
-    // carry a rating source (the channels.rating column was dropped in
-    // 2025_06_23). Fail loudly so the bad rule is visible instead of
-    // silently throwing deep inside SortService.
+    // UI change could route rating to live_groups - live channels are never
+    // VOD/series entries, so they don't carry a meaningful rating value.
+    // Fail loudly so the bad rule is visible instead of silently no-op'ing
+    // deep inside SortService.
     $this->playlist->update([
         'sort_alpha_config' => [
             ['enabled' => true, 'target' => 'live_groups', 'group' => ['all'], 'column' => 'rating', 'sort' => 'DESC'],

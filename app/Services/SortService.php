@@ -8,6 +8,7 @@ use App\Models\CustomPlaylist;
 use App\Models\Group;
 use App\Models\Playlist;
 use App\Models\Series;
+use Illuminate\Database\Eloquent\Builder;
 use Illuminate\Database\Eloquent\Collection;
 use Illuminate\Support\Facades\DB;
 
@@ -572,192 +573,185 @@ class SortService
     }
 
     /**
-     * Bulk-update VOD channels' sort order within a group by TMDB rating.
+     * Rank rows in $table by a driver-specific rating expression via
+     * ROW_NUMBER() on MySQL/Postgres/SQLite, or a PHP-side ORDER BY +
+     * persistSortColumn() pass on any other driver.
      *
-     * Rating source: `info->rating` JSON (TMDB `vote_average` populated by
-     * FetchTmdbIds). Cast to numeric for ordering — the JSON path returns
-     * text on Postgres/SQLite, and the source channel `rating` column was
-     * dropped in 2025_06_23 so the JSON value is now the only source.
+     * NULL ordering: rows where the driver's "null" expression is NULL sink
+     * to the bottom regardless of $direction, so an unrated row is never
+     * what a "sort by rating" user wants at the top of an ASC sort.
      *
-     * NULL ordering: items without a rating float to the bottom regardless
-     * of $order. The IS NULL check uses the *raw* JSON extraction (no
-     * COALESCE/CAST), so unrated rows are detected even when the value
-     * expression is wrapped in COALESCE → 0 for ordering.
+     * @param  array{mysql: string, pgsql: string, sqlite: string}  $isNullExprByDriver  driver => expression to test IS NULL (unrated detection)
+     * @param  array{mysql: string, pgsql: string, sqlite: string}  $valueExprByDriver  driver => numeric expression to order by
+     * @param  array<int, mixed>  $whereBindings  positional bindings for $whereSql, reused verbatim on every branch
+     * @param  \Closure(): Builder  $fallbackQuery  builds the already-scoped fallback query for drivers with no window-function support
+     */
+    private function bulkSortByRatingExpression(
+        string $table,
+        string $whereSql,
+        array $whereBindings,
+        array $isNullExprByDriver,
+        array $valueExprByDriver,
+        string $direction,
+        \Closure $fallbackQuery,
+    ): void {
+        $driver = DB::getPdo()->getAttribute(\PDO::ATTR_DRIVER_NAME);
+
+        if ($driver === 'mysql' || $driver === 'mariadb') {
+            $orderBy = "{$isNullExprByDriver['mysql']} IS NULL ASC, {$valueExprByDriver['mysql']} {$direction}, id";
+            DB::statement("UPDATE {$table} t1 JOIN (SELECT id, ROW_NUMBER() OVER (ORDER BY {$orderBy}) AS rn FROM {$table} WHERE {$whereSql}) t2 ON t1.id = t2.id SET t1.sort = t2.rn", $whereBindings);
+
+            return;
+        }
+
+        if ($this->isPostgres($driver)) {
+            $orderBy = "{$isNullExprByDriver['pgsql']} IS NULL ASC, {$valueExprByDriver['pgsql']} {$direction}, id";
+            DB::statement("UPDATE {$table} SET sort = t.rn FROM (SELECT id, ROW_NUMBER() OVER (ORDER BY {$orderBy}) AS rn FROM {$table} WHERE {$whereSql}) t WHERE {$table}.id = t.id", $whereBindings);
+
+            return;
+        }
+
+        if ($driver === 'sqlite') {
+            $orderBy = "{$isNullExprByDriver['sqlite']} IS NULL ASC, {$valueExprByDriver['sqlite']} {$direction}, id";
+            DB::statement("WITH ranked AS (SELECT id, ROW_NUMBER() OVER (ORDER BY {$orderBy}) AS rn FROM {$table} WHERE {$whereSql}) UPDATE {$table} SET sort = (SELECT rn FROM ranked WHERE ranked.id = {$table}.id) WHERE {$whereSql}", array_merge($whereBindings, $whereBindings));
+
+            return;
+        }
+
+        // Fallback for other drivers: reuse the SQLite-flavored expressions
+        // (no window-function support to lean on either way), sort via the
+        // query builder, and persist with a single CASE update.
+        $ids = $fallbackQuery()
+            ->orderByRaw("{$isNullExprByDriver['sqlite']} IS NULL ASC")
+            ->orderByRaw("{$valueExprByDriver['sqlite']} {$direction}")
+            ->orderBy('id')
+            ->pluck('id')
+            ->map(fn ($id) => (int) $id)
+            ->all();
+
+        $this->persistSortColumn($table, 'sort', $ids);
+    }
+
+    /**
+     * Rating expressions shared by every channel-rating sort: prefers the
+     * TMDB-enriched `info->rating` JSON (populated by FetchTmdbIds), falling
+     * back to the provider-supplied `channels.rating` column when no TMDB
+     * rating has been fetched yet. Both sides are NULLIF-wrapped so an empty
+     * string on either source is treated the same as a missing value.
+     *
+     * @return array{isNull: array{mysql: string, pgsql: string, sqlite: string}, value: array{mysql: string, pgsql: string, sqlite: string}}
+     */
+    private function channelRatingExprs(): array
+    {
+        $raw = [
+            'mysql' => "COALESCE(NULLIF(JSON_UNQUOTE(JSON_EXTRACT(info, '$.rating')), ''), NULLIF(CAST(rating AS CHAR), ''))",
+            'pgsql' => "COALESCE(NULLIF(info->>'rating', ''), NULLIF(rating::text, ''))",
+            'sqlite' => "COALESCE(NULLIF(json_extract(info, '$.rating'), ''), NULLIF(CAST(rating AS TEXT), ''))",
+        ];
+
+        return [
+            'isNull' => $raw,
+            'value' => [
+                'mysql' => "CAST(COALESCE({$raw['mysql']}, '0') AS DECIMAL(4,2))",
+                'pgsql' => "COALESCE({$raw['pgsql']}, '0')::numeric",
+                'sqlite' => "CAST(COALESCE({$raw['sqlite']}, '0') AS REAL)",
+            ],
+        ];
+    }
+
+    /**
+     * Rating expressions shared by every series-rating sort: `series.rating`
+     * (string column storing decimal text like "7.5"), NULLIF-wrapped so an
+     * empty string is treated as unrated rather than sorting as 0.
+     *
+     * @return array{isNull: array{mysql: string, pgsql: string, sqlite: string}, value: array{mysql: string, pgsql: string, sqlite: string}}
+     */
+    private function seriesRatingExprs(): array
+    {
+        $raw = "NULLIF(rating, '')";
+
+        return [
+            'isNull' => ['mysql' => $raw, 'pgsql' => $raw, 'sqlite' => $raw],
+            'value' => [
+                'mysql' => "CAST(COALESCE({$raw}, '0') AS DECIMAL(4,2))",
+                'pgsql' => "COALESCE({$raw}, '0')::numeric",
+                'sqlite' => "CAST(COALESCE({$raw}, '0') AS REAL)",
+            ],
+        ];
+    }
+
+    /**
+     * Bulk-update VOD channels' sort order within a group by rating.
      */
     public function bulkSortGroupChannelsByRating(Group $record, string $order = 'DESC'): void
     {
-        $direction = strtoupper($order) === 'DESC' ? 'DESC' : 'ASC';
-        $driver = DB::getPdo()->getAttribute(\PDO::ATTR_DRIVER_NAME);
+        $exprs = $this->channelRatingExprs();
 
-        if ($driver === 'mysql' || $driver === 'mariadb') {
-            $isNullExpr = "JSON_EXTRACT(info, '$.rating')";
-            $valueExpr = "CAST(COALESCE(JSON_UNQUOTE(JSON_EXTRACT(info, '$.rating')), '0') AS DECIMAL(4,2))";
-            DB::statement("UPDATE channels c JOIN (SELECT id, ROW_NUMBER() OVER (ORDER BY {$isNullExpr} IS NULL ASC, {$valueExpr} {$direction}, id) AS rn FROM channels WHERE group_id = ?) t ON c.id = t.id SET c.sort = t.rn", [$record->id]);
-
-            return;
-        }
-
-        if ($this->isPostgres($driver)) {
-            $isNullExpr = "(info->>'rating')";
-            $valueExpr = "NULLIF(info->>'rating', '')::numeric";
-            DB::statement("UPDATE channels SET sort = t.rn FROM (SELECT id, ROW_NUMBER() OVER (ORDER BY {$isNullExpr} IS NULL ASC, {$valueExpr} {$direction}, id) AS rn FROM channels WHERE group_id = ?) t WHERE channels.id = t.id", [$record->id]);
-
-            return;
-        }
-
-        if ($driver === 'sqlite') {
-            $isNullExpr = "json_extract(info, '$.rating')";
-            $valueExpr = "CAST(COALESCE(json_extract(info, '$.rating'), '0') AS REAL)";
-            DB::statement("WITH ranked AS (SELECT id, ROW_NUMBER() OVER (ORDER BY {$isNullExpr} IS NULL ASC, {$valueExpr} {$direction}, id) AS rn FROM channels WHERE group_id = ?) UPDATE channels SET sort = (SELECT rn FROM ranked WHERE ranked.id = channels.id) WHERE group_id = ?", [$record->id, $record->id]);
-
-            return;
-        }
-
-        // Fallback for other drivers: ORDER BY SELECT then persist via helper.
-        $ids = $record->channels()
-            ->orderByRaw("json_extract(info, '$.rating') IS NULL ASC")
-            ->orderByRaw("CAST(COALESCE(json_extract(info, '$.rating'), '0') AS REAL) {$direction}")
-            ->orderBy('id')
-            ->pluck('id')
-            ->all();
-
-        $this->persistSortColumn('channels', 'sort', $ids);
+        $this->bulkSortByRatingExpression(
+            table: 'channels',
+            whereSql: 'group_id = ?',
+            whereBindings: [$record->id],
+            isNullExprByDriver: $exprs['isNull'],
+            valueExprByDriver: $exprs['value'],
+            direction: strtoupper($order) === 'DESC' ? 'DESC' : 'ASC',
+            fallbackQuery: fn () => $record->channels(),
+        );
     }
 
     /**
-     * Bulk-update series' sort order within a category by TMDB rating.
-     *
-     * Rating source: `series.rating` (string column, TMDB `vote_average`).
-     * Cast to numeric for ordering — the column was declared as `string` in
-     * the 2025_05_21 migration but stores decimal values like "7.5".
-     *
-     * NULL ordering: unrated series sink to the bottom regardless of $order.
-     * IS NULL uses the raw column (not COALESCE/NULLIF-wrapped) so an empty
-     * string rating is still detected as unrated.
+     * Bulk-update series' sort order within a category by rating.
      */
     public function bulkSortCategorySeriesByRating(Category $record, string $order = 'DESC'): void
     {
-        $direction = strtoupper($order) === 'DESC' ? 'DESC' : 'ASC';
-        $driver = DB::getPdo()->getAttribute(\PDO::ATTR_DRIVER_NAME);
+        $exprs = $this->seriesRatingExprs();
 
-        $isNullExpr = 'rating';
-        $valueExpr = "CAST(NULLIF(rating, '') AS DECIMAL)";
-
-        if ($driver === 'mysql' || $driver === 'mariadb') {
-            DB::statement("UPDATE series s JOIN (SELECT id, ROW_NUMBER() OVER (ORDER BY {$isNullExpr} IS NULL ASC, {$valueExpr} {$direction}, id) AS rn FROM series WHERE category_id = ?) t ON s.id = t.id SET s.sort = t.rn", [$record->id]);
-
-            return;
-        }
-
-        if ($this->isPostgres($driver)) {
-            DB::statement("UPDATE series SET sort = t.rn FROM (SELECT id, ROW_NUMBER() OVER (ORDER BY {$isNullExpr} IS NULL ASC, {$valueExpr} {$direction}, id) AS rn FROM series WHERE category_id = ?) t WHERE series.id = t.id", [$record->id]);
-
-            return;
-        }
-
-        if ($driver === 'sqlite') {
-            DB::statement("WITH ranked AS (SELECT id, ROW_NUMBER() OVER (ORDER BY {$isNullExpr} IS NULL ASC, {$valueExpr} {$direction}, id) AS rn FROM series WHERE category_id = ?) UPDATE series SET sort = (SELECT rn FROM ranked WHERE ranked.id = series.id) WHERE category_id = ?", [$record->id, $record->id]);
-
-            return;
-        }
-
-        // Fallback for other drivers: ORDER BY SELECT then persist via helper.
-        $ids = $record->series()
-            ->orderByRaw('rating IS NULL ASC')
-            ->orderByRaw("CAST(NULLIF(rating, '') AS DECIMAL) {$direction}")
-            ->orderBy('id')
-            ->pluck('id')
-            ->all();
-
-        $this->persistSortColumn('series', 'sort', $ids);
+        $this->bulkSortByRatingExpression(
+            table: 'series',
+            whereSql: 'category_id = ?',
+            whereBindings: [$record->id],
+            isNullExprByDriver: $exprs['isNull'],
+            valueExprByDriver: $exprs['value'],
+            direction: strtoupper($order) === 'DESC' ? 'DESC' : 'ASC',
+            fallbackQuery: fn () => $record->series(),
+        );
     }
 
     /**
-     * Sort ALL VOD channels in a playlist globally by TMDB rating.
+     * Sort ALL VOD channels in a playlist globally by rating.
      * Assigns unique sort numbers 1..N across all groups so there are no collisions.
      */
     public function bulkSortPlaylistVodByRating(Playlist $playlist, string $order = 'DESC'): void
     {
-        $direction = strtoupper($order) === 'DESC' ? 'DESC' : 'ASC';
-        $driver = DB::getPdo()->getAttribute(\PDO::ATTR_DRIVER_NAME);
+        $exprs = $this->channelRatingExprs();
 
-        if ($driver === 'mysql' || $driver === 'mariadb') {
-            $isNullExpr = "JSON_EXTRACT(info, '$.rating')";
-            $valueExpr = "CAST(COALESCE(JSON_UNQUOTE(JSON_EXTRACT(info, '$.rating')), '0') AS DECIMAL(4,2))";
-            DB::statement("UPDATE channels c JOIN (SELECT id, ROW_NUMBER() OVER (ORDER BY {$isNullExpr} IS NULL ASC, {$valueExpr} {$direction}, id) AS rn FROM channels WHERE playlist_id = ? AND is_vod = 1) t ON c.id = t.id SET c.sort = t.rn", [$playlist->id]);
-
-            return;
-        }
-
-        if ($this->isPostgres($driver)) {
-            $isNullExpr = "(info->>'rating')";
-            $valueExpr = "NULLIF(info->>'rating', '')::numeric";
-            DB::statement("UPDATE channels SET sort = t.rn FROM (SELECT id, ROW_NUMBER() OVER (ORDER BY {$isNullExpr} IS NULL ASC, {$valueExpr} {$direction}, id) AS rn FROM channels WHERE playlist_id = ? AND is_vod = true) t WHERE channels.id = t.id", [$playlist->id]);
-
-            return;
-        }
-
-        if ($driver === 'sqlite') {
-            $isNullExpr = "json_extract(info, '$.rating')";
-            $valueExpr = "CAST(COALESCE(json_extract(info, '$.rating'), '0') AS REAL)";
-            DB::statement("WITH ranked AS (SELECT id, ROW_NUMBER() OVER (ORDER BY {$isNullExpr} IS NULL ASC, {$valueExpr} {$direction}, id) AS rn FROM channels WHERE playlist_id = ? AND is_vod = 1) UPDATE channels SET sort = (SELECT rn FROM ranked WHERE ranked.id = channels.id) WHERE playlist_id = ? AND is_vod = 1", [$playlist->id, $playlist->id]);
-
-            return;
-        }
-
-        // Fallback for other drivers: ORDER BY SELECT then persist via helper.
-        $ids = Channel::where('playlist_id', $playlist->id)
-            ->where('is_vod', true)
-            ->orderByRaw("json_extract(info, '$.rating') IS NULL ASC")
-            ->orderByRaw("CAST(COALESCE(json_extract(info, '$.rating'), '0') AS REAL) {$direction}")
-            ->orderBy('id')
-            ->pluck('id')
-            ->map(fn ($id) => (int) $id)
-            ->all();
-
-        $this->persistSortColumn('channels', 'sort', $ids);
+        $this->bulkSortByRatingExpression(
+            table: 'channels',
+            whereSql: 'playlist_id = ? AND is_vod IS TRUE',
+            whereBindings: [$playlist->id],
+            isNullExprByDriver: $exprs['isNull'],
+            valueExprByDriver: $exprs['value'],
+            direction: strtoupper($order) === 'DESC' ? 'DESC' : 'ASC',
+            fallbackQuery: fn () => Channel::where('playlist_id', $playlist->id)->where('is_vod', true),
+        );
     }
 
     /**
-     * Sort ALL series in a playlist globally by TMDB rating.
+     * Sort ALL series in a playlist globally by rating.
      * Assigns unique sort numbers 1..N across all categories so there are no collisions.
      */
     public function bulkSortPlaylistSeriesByRating(Playlist $playlist, string $order = 'DESC'): void
     {
-        $direction = strtoupper($order) === 'DESC' ? 'DESC' : 'ASC';
-        $driver = DB::getPdo()->getAttribute(\PDO::ATTR_DRIVER_NAME);
+        $exprs = $this->seriesRatingExprs();
 
-        $isNullExpr = 'rating';
-        $valueExpr = "CAST(NULLIF(rating, '') AS DECIMAL)";
-
-        if ($driver === 'mysql' || $driver === 'mariadb') {
-            DB::statement("UPDATE series s JOIN (SELECT id, ROW_NUMBER() OVER (ORDER BY {$isNullExpr} IS NULL ASC, {$valueExpr} {$direction}, id) AS rn FROM series WHERE playlist_id = ?) t ON s.id = t.id SET s.sort = t.rn", [$playlist->id]);
-
-            return;
-        }
-
-        if ($this->isPostgres($driver)) {
-            DB::statement("UPDATE series SET sort = t.rn FROM (SELECT id, ROW_NUMBER() OVER (ORDER BY {$isNullExpr} IS NULL ASC, {$valueExpr} {$direction}, id) AS rn FROM series WHERE playlist_id = ?) t WHERE series.id = t.id", [$playlist->id]);
-
-            return;
-        }
-
-        if ($driver === 'sqlite') {
-            DB::statement("WITH ranked AS (SELECT id, ROW_NUMBER() OVER (ORDER BY {$isNullExpr} IS NULL ASC, {$valueExpr} {$direction}, id) AS rn FROM series WHERE playlist_id = ?) UPDATE series SET sort = (SELECT rn FROM ranked WHERE ranked.id = series.id) WHERE playlist_id = ?", [$playlist->id, $playlist->id]);
-
-            return;
-        }
-
-        // Fallback for other drivers: ORDER BY SELECT then persist via helper.
-        $ids = Series::where('playlist_id', $playlist->id)
-            ->orderByRaw('rating IS NULL ASC')
-            ->orderByRaw("CAST(NULLIF(rating, '') AS DECIMAL) {$direction}")
-            ->orderBy('id')
-            ->pluck('id')
-            ->map(fn ($id) => (int) $id)
-            ->all();
-
-        $this->persistSortColumn('series', 'sort', $ids);
+        $this->bulkSortByRatingExpression(
+            table: 'series',
+            whereSql: 'playlist_id = ?',
+            whereBindings: [$playlist->id],
+            isNullExprByDriver: $exprs['isNull'],
+            valueExprByDriver: $exprs['value'],
+            direction: strtoupper($order) === 'DESC' ? 'DESC' : 'ASC',
+            fallbackQuery: fn () => Series::where('playlist_id', $playlist->id),
+        );
     }
 
     /**
