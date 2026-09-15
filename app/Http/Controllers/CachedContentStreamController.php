@@ -2,6 +2,7 @@
 
 namespace App\Http\Controllers;
 
+use App\Http\Controllers\Concerns\StreamLocalFile;
 use App\Models\CachedContentFile;
 use App\Models\CustomPlaylist;
 use App\Models\MergedPlaylist;
@@ -111,61 +112,13 @@ class CachedContentStreamController extends Controller
 
         $fullPath = Storage::disk($disk)->path($file->file_path);
         $fileSize = filesize($fullPath);
-        $mimeType = $file->resolveMimeType();
-        $filename = basename($file->file_path);
 
-        $range = $request->header('Range');
-
-        if ($range && preg_match('/bytes=(\d+)-(\d*)/', $range, $matches)) {
-            $start = (int) $matches[1];
-            $end = isset($matches[2]) && $matches[2] !== '' ? (int) $matches[2] : $fileSize - 1;
-            $length = $end - $start + 1;
-
-            $headers = [
-                'Content-Type' => $mimeType,
-                'Content-Length' => $length,
-                'Content-Range' => "bytes {$start}-{$end}/{$fileSize}",
-                'Accept-Ranges' => 'bytes',
-                'Content-Disposition' => "inline; filename=\"{$filename}\"",
-            ];
-
-            return response()->stream(function () use ($fullPath, $start, $length) {
-                $handle = fopen($fullPath, 'rb');
-                if ($handle === false) {
-                    return;
-                }
-                fseek($handle, $start);
-                $remaining = $length;
-
-                while (! feof($handle) && $remaining > 0) {
-                    $chunkSize = min(8192, $remaining);
-                    echo fread($handle, $chunkSize);
-                    $remaining -= $chunkSize;
-                }
-
-                fclose($handle);
-            }, 206, $headers);
-        }
-
-        $headers = [
-            'Content-Type' => $mimeType,
-            'Content-Length' => $fileSize,
-            'Accept-Ranges' => 'bytes',
-            'Content-Disposition' => "inline; filename=\"{$filename}\"",
-        ];
-
-        return response()->stream(function () use ($fullPath) {
-            $handle = fopen($fullPath, 'rb');
-            if ($handle === false) {
-                return;
-            }
-
-            while (! feof($handle)) {
-                echo fread($handle, 8192);
-                flush();
-            }
-
-            fclose($handle);
-        }, 200, $headers);
+        return StreamLocalFile::serve(
+            fullPath: $fullPath,
+            fileSize: $fileSize,
+            mimeType: $file->resolveMimeType(),
+            filename: basename($file->file_path),
+            range: $request->header('Range'),
+        );
     }
 }

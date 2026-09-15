@@ -3,6 +3,7 @@
 namespace App\Models;
 
 use App\Enums\CachedContentFileStatus;
+use Illuminate\Database\Eloquent\Builder;
 use Illuminate\Database\Eloquent\Factories\HasFactory;
 use Illuminate\Database\Eloquent\Model;
 use Illuminate\Database\Eloquent\Relations\BelongsToMany;
@@ -31,8 +32,11 @@ use Illuminate\Support\Str;
  * @property Carbon|null $last_verified_at
  * @property Carbon|null $last_failed_at
  * @property int $failure_count
+ * @property bool $never_expire
  * @property Carbon $created_at
  * @property Carbon $updated_at
+ *
+ * @method static Builder<static> ownedByUser(?User $user, bool $adminBypass = false)
  */
 class CachedContentFile extends Model
 {
@@ -58,6 +62,7 @@ class CachedContentFile extends Model
         'last_verified_at',
         'last_failed_at',
         'failure_count',
+        'never_expire',
     ];
 
     /**
@@ -68,6 +73,7 @@ class CachedContentFile extends Model
         return [
             'status' => CachedContentFileStatus::class,
             'failure_count' => 'integer',
+            'never_expire' => 'boolean',
             'last_verified_at' => 'datetime',
             'last_failed_at' => 'datetime',
             'last_progress_at' => 'datetime',
@@ -171,6 +177,39 @@ class CachedContentFile extends Model
     public function dynamicGroups(): BelongsToMany
     {
         return $this->belongsToMany(DynamicGroup::class, 'cached_content_file_dynamic_groups');
+    }
+
+    /**
+     * Filter to cached files reachable through a DynamicGroup whose
+     * owning playlist belongs to the given user.
+     *
+     * `cached_content_files` intentionally has no `user_id` column — one
+     * file can be shared across many playlists/groups — so ownership is
+     * always expressed via the pivot. `whereHas('dynamicGroups.playlist',
+     * ...)` is the only correct filter and mirrors the auth pattern in
+     * `CachedContentStreamController::stream()`.
+     *
+     * When `$adminBypass` is true OR `$user` is null, returns the query
+     * unchanged. Callers MUST NOT use this scope to gate unauthenticated
+     * access (Filament widgets/relation managers always have an
+     * authenticated user); the null-user fallback exists so the same
+     * call site works for the rare "no auth, admin bypass implied"
+     * shape. `CachedContentStreamController` authenticates via playlist
+     * credentials and does NOT call this scope — leave it alone.
+     *
+     * @param  Builder<static>  $query
+     * @return Builder<static>
+     */
+    public function scopeOwnedByUser(Builder $query, ?User $user, bool $adminBypass = false): Builder
+    {
+        if ($adminBypass || $user === null) {
+            return $query;
+        }
+
+        return $query->whereHas(
+            'dynamicGroups.playlist',
+            fn (Builder $q) => $q->where('user_id', $user->id),
+        );
     }
 
     /**

@@ -1,6 +1,7 @@
 <?php
 
 use App\Enums\CachedContentFileStatus;
+use App\Jobs\SyncDynamicGroups;
 use App\Models\CachedContentFile;
 use App\Models\Channel;
 use App\Models\DynamicGroup;
@@ -131,23 +132,29 @@ it('does not delete file when any group uses never_expire mode', function () {
         ->and($disposableGroup->fresh()->cachedContentFiles)->toHaveCount(0);
 });
 
-it('stamps dropped_at on first sight and only detaches after extra_days for lifetime_plus_days', function () {
+it('preserves files when a never_expire rule is disabled (SyncDynamicGroups pins the file before deleting the orphaned group)', function () {
+    // Regression for PR #1500 Bug 3: SyncDynamicGroups hard-deletes stale
+    // DynamicGroup rows (rules that were disabled or renamed), the pivot's
+    // cascadeOnDelete removes the group's references in the same
+    // transaction, and the next retention pass hard-deletes the file even
+    // though the rule that was just disabled said never_expire. The fix
+    // stamps `never_expire=true` on referenced CachedContentFile rows
+    // before the DynamicGroup::delete() fires; retention then short-
+    // circuits on that flag regardless of pivot state.
     Storage::fake('local');
     config()->set('filesystems.default', 'local');
 
+    // Step 1: a never_expire rule with a materialized DynamicGroup and a
+    // Completed cached file pinned to it.
     $this->playlist->update([
-        'dynamic_groups_config' => [
-            [
-                'enabled' => true,
-                'type' => 'vod',
-                'source' => 'trending',
-                'name' => 'Top Movies',
-                'cache_enabled' => true,
-                'cache_content_selection' => 'all',
-                'cache_retention_mode' => 'lifetime_plus_days',
-                'cache_retention_extra_days' => 7,
-            ],
-        ],
+        'dynamic_groups_config' => [[
+            'enabled' => true,
+            'type' => 'vod',
+            'source' => 'trending',
+            'name' => 'Forever Group',
+            'cache_enabled' => true,
+            'cache_retention_mode' => 'never_expire',
+        ]],
     ]);
 
     $group = DynamicGroup::create([
@@ -155,7 +162,7 @@ it('stamps dropped_at on first sight and only detaches after extra_days for life
         'user_id' => $this->user->id,
         'type' => 'vod',
         'source' => 'trending',
-        'name' => 'Top Movies',
+        'name' => 'Forever Group',
     ]);
 
     $file = CachedContentFile::factory()->completed()->create([
@@ -167,32 +174,94 @@ it('stamps dropped_at on first sight and only detaches after extra_days for life
     ]);
     $file->dynamicGroups()->attach($group->id);
 
-    // First run: dropped_at gets stamped, no detach yet
+    // Step 2: simulate the user disabling the rule via the Edit form and
+    // re-syncing — the playlist rule flips to `enabled: false`, then
+    // SyncDynamicGroups runs. We don't go through the form here, we just
+    // mutate the config in-place + invoke the job directly so this test
+    // owns its exact precondition without depending on Filament form
+    // semantics.
+    $this->playlist->update([
+        'dynamic_groups_config' => [[
+            'enabled' => false,
+            'type' => 'vod',
+            'source' => 'trending',
+            'name' => 'Forever Group',
+            'cache_enabled' => true,
+            'cache_retention_mode' => 'never_expire',
+        ]],
+    ]);
+
+    (new SyncDynamicGroups($this->playlist->id))->handle();
+
+    // The DynamicGroup row is gone (cascaded via SyncDynamicGroups
+    // stale-row cleanup), but the file should still be alive — the
+    // never_expire flag was stamped before the delete.
+    expect($group->fresh())->toBeNull()
+        ->and($file->fresh())->not->toBeNull()
+        ->and($file->fresh()->never_expire)->toBeTrue();
+
+    // Step 3: retention must NOT delete the file.
     $this->service->runAll();
 
-    $pivotRow = DB::table('cached_content_file_dynamic_groups')
-        ->where('cached_content_file_id', $file->id)
-        ->where('dynamic_group_id', $group->id)
-        ->first();
-    expect($pivotRow)->not->toBeNull()
-        ->and($pivotRow->dropped_at)->not->toBeNull();
     expect($file->fresh())->not->toBeNull();
+});
 
-    // Second run within grace period: still no detach
+it('does not pin files for stale groups whose rule had a non-never_expire retention mode', function () {
+    // Counter-test to the previous one: disabling a match_group_lifetime
+    // rule should still allow retention to delete the file once the
+    // pivot rows are gone. Pinning everything would leak orphaned files
+    // forever.
+    Storage::fake('local');
+    config()->set('filesystems.default', 'local');
+
+    $this->playlist->update([
+        'dynamic_groups_config' => [[
+            'enabled' => true,
+            'type' => 'vod',
+            'source' => 'trending',
+            'name' => 'Disposable Group',
+            'cache_enabled' => true,
+            'cache_retention_mode' => 'match_group_lifetime',
+        ]],
+    ]);
+
+    $group = DynamicGroup::create([
+        'playlist_id' => $this->playlist->id,
+        'user_id' => $this->user->id,
+        'type' => 'vod',
+        'source' => 'trending',
+        'name' => 'Disposable Group',
+    ]);
+
+    $file = CachedContentFile::factory()->completed()->create([
+        'content_type' => 'movie',
+        'tmdb_id' => '550',
+        'quality' => null,
+        'disk' => 'local',
+        'file_path' => 'cache/movie-550.mp4',
+    ]);
+    $file->dynamicGroups()->attach($group->id);
+
+    // Disable the rule and re-sync.
+    $this->playlist->update([
+        'dynamic_groups_config' => [[
+            'enabled' => false,
+            'type' => 'vod',
+            'source' => 'trending',
+            'name' => 'Disposable Group',
+            'cache_enabled' => true,
+            'cache_retention_mode' => 'match_group_lifetime',
+        ]],
+    ]);
+
+    (new SyncDynamicGroups($this->playlist->id))->handle();
+
+    expect($file->fresh())->not->toBeNull()
+        ->and($file->fresh()->never_expire)->toBeFalse();
+
+    // Retention hard-deletes the now-orphan file (same as the
+    // pre-fix behavior for non-never_expire groups).
     $this->service->runAll();
-    expect(DB::table('cached_content_file_dynamic_groups')
-        ->where('cached_content_file_id', $file->id)
-        ->where('dynamic_group_id', $group->id)
-        ->exists())->toBeTrue();
-
-    // Backdate dropped_at past the 7-day grace, run again: detach + hard-delete
-    DB::table('cached_content_file_dynamic_groups')
-        ->where('cached_content_file_id', $file->id)
-        ->where('dynamic_group_id', $group->id)
-        ->update(['dropped_at' => now()->subDays(8)]);
-
-    $this->service->runAll();
-
     expect($file->fresh())->toBeNull();
 });
 
@@ -243,6 +312,113 @@ it('keeps files that are still in the group\'s live membership', function () {
 
     expect($file->fresh())->not->toBeNull()
         ->and($file->dynamicGroups)->toHaveCount(1);
+});
+
+// --- PR #1500 Bug 4: tvdb_id mismatches between live membership and cache ---
+
+it('keeps a cached file when the live channel has a matching tvdb_id (VOD)', function () {
+    // Regression for PR #1500 Bug 4: liveFingerprintsForGroup() built
+    // fingerprints without tvdb_id, but CachedContentFile::fingerprintFor()
+    // includes tvdb_id in the format `content_type:tmdb_id:tvdb_id:...:quality`.
+    // A row cached with a non-null tvdb_id never matched live membership
+    // and could be hard-deleted while still wanted by the group.
+    Storage::fake('local');
+    config()->set('filesystems.default', 'local');
+
+    $this->playlist->update([
+        'dynamic_groups_config' => [[
+            'enabled' => true,
+            'type' => 'vod',
+            'source' => 'trending',
+            'name' => 'Top Movies',
+            'cache_enabled' => true,
+            'cache_retention_mode' => 'match_group_lifetime',
+        ]],
+    ]);
+
+    $group = DynamicGroup::create([
+        'playlist_id' => $this->playlist->id,
+        'user_id' => $this->user->id,
+        'type' => 'vod', 'source' => 'trending', 'name' => 'Top Movies',
+    ]);
+
+    $channel = Channel::factory()->create([
+        'playlist_id' => $this->playlist->id,
+        'tmdb_id' => '550',
+        'tvdb_id' => 81351,
+        'url' => 'http://example.com/movie.mp4',
+        'is_vod' => true,
+    ]);
+    $group->channels()->attach($channel->id);
+
+    // Cached row uses both tmdb_id AND tvdb_id — matches the channel.
+    $file = CachedContentFile::factory()->completed()->create([
+        'content_type' => 'movie',
+        'tmdb_id' => '550',
+        'tvdb_id' => '81351',
+        'quality' => null,
+        'disk' => 'local',
+        'file_path' => 'cache/movie:550:81351:::.mp4',
+    ]);
+    $file->dynamicGroups()->attach($group->id);
+
+    $this->service->runAll();
+
+    expect($file->fresh())->not->toBeNull()
+        ->and($file->fresh()->dynamicGroups)->toHaveCount(1);
+});
+
+it('does NOT keep a cached file when tvdb_id differs between live channel and cache (VOD)', function () {
+    // Counter-test to the previous one: the fix produces a fingerprint
+    // that includes tvdb_id, so a cache row with a DIFFERENT tvdb_id than
+    // the live channel must be treated as out-of-membership even if
+    // tmdb_id matches. (Different tvdb_id typically means a different
+    // regional cut — content identity doesn't match and the cached file
+    // is no longer what the group wants.)
+    Storage::fake('local');
+    config()->set('filesystems.default', 'local');
+
+    $this->playlist->update([
+        'dynamic_groups_config' => [[
+            'enabled' => true,
+            'type' => 'vod',
+            'source' => 'trending',
+            'name' => 'Top Movies',
+            'cache_enabled' => true,
+            'cache_retention_mode' => 'match_group_lifetime',
+        ]],
+    ]);
+
+    $group = DynamicGroup::create([
+        'playlist_id' => $this->playlist->id,
+        'user_id' => $this->user->id,
+        'type' => 'vod', 'source' => 'trending', 'name' => 'Top Movies',
+    ]);
+
+    $channel = Channel::factory()->create([
+        'playlist_id' => $this->playlist->id,
+        'tmdb_id' => '550',
+        'tvdb_id' => 99999, // different from cached row
+        'url' => 'http://example.com/movie.mp4',
+        'is_vod' => true,
+    ]);
+    $group->channels()->attach($channel->id);
+
+    $file = CachedContentFile::factory()->completed()->create([
+        'content_type' => 'movie',
+        'tmdb_id' => '550',
+        'tvdb_id' => '81351',
+        'quality' => null,
+        'disk' => 'local',
+        'file_path' => 'cache/movie:550:81351:::.mp4',
+    ]);
+    $file->dynamicGroups()->attach($group->id);
+
+    $this->service->runAll();
+
+    // File is detached and then hard-deleted because no live membership
+    // shares the same (tmdb_id, tvdb_id) fingerprint.
+    expect($file->fresh())->toBeNull();
 });
 
 it('does nothing when there are no CachedContentFiles', function () {

@@ -58,7 +58,7 @@ Schedule::command('app:run-scheduled-backups')
     ->everyTwoMinutes()
     ->withoutOverlapping();
 
-// Cache dynamic group content — every 2 min, the command itself checks the
+// Cache dynamic group content - every 2 min, the command itself checks the
 // user-configurable cron string via CronExpression::isDue() (mirrors
 // RunScheduledBackups exactly). The retention cleanup is on a daily schedule
 // further below so it runs after a fresh dynamic-group sync.

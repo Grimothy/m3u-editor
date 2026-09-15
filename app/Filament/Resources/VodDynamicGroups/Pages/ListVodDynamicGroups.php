@@ -54,6 +54,31 @@ use RuntimeException;
  * The row's "view" action links to the shared
  * `DynamicGroupResource::getUrl('view', ...)` route — single detail page
  * keyed by record id, breadcrumb chains through `VodGroupResource`.
+ *
+ * TODO(pr-review-1500/Item1): This file and its Series twin
+ * (`SeriesDynamicGroups\Pages\ListSeriesDynamicGroups`) are ~99%
+ * copy-paste (~590 lines of identical code each). Extract a shared
+ * abstract base at `app/Filament/Resources/DynamicGroups/Pages/
+ * BaseListDynamicGroups.php` holding:
+ *   - `getTabs()`, `getPlaylistSubTabs()`, `content()`, `table()`
+ *     skeleton (table columns + record actions + bulk actions are
+ *     template-method overrides)
+ *   - `getHeaderActions()` CreateAction skeleton (label injected
+ *     by subclass via abstract `getCreateActionLabel()`)
+ *   - `getEditRuleAction()`, `getEditRuleSchema()`,
+ *     `loadRuleForRow()`, `findRuleIndex()` — fully identical
+ *   - `dispatchCacheNowBulkAction()` — fully identical
+ * The two concrete pages then carry only the type-specific bits:
+ *   - `getType()` ('vod' / 'series'), `getContentType()`
+ *     ('movie' / 'episode')
+ *   - `getCacheActivityWidgetClass()`
+ *     (VodDynamicGroupCacheActivityWidget / Series...)
+ *   - `getMemberRelationName()` ('channels' / 'series'),
+ *     `getItemsColumnName()` ('channels_count' / 'series_count')
+ *   - `getCreateActionLabel()`, `getBulkActionDescriptionContext()`
+ * Deferred because the change is large and the two pages have
+ * subtly-different test coverage that would all need re-validating
+ * in lockstep; see PR #1500 review notes.
  */
 class ListVodDynamicGroups extends ListRecords
 {
@@ -116,11 +141,18 @@ class ListVodDynamicGroups extends ListRecords
                     $data['type'] = 'vod';
                     $data['user_id'] = auth()->id();
                     $playlist = Playlist::findOrFail($data['playlist_id']);
+                    // Whitelist must mirror the Edit action's whitelist
+                    // (see getEditRuleAction()) so options the user picks at
+                    // creation time aren't silently dropped. Symmetric to
+                    // Edit so the two surfaces stay in lockstep.
                     $rule = collect($data)
                         ->only([
                             'enabled', 'type', 'source', 'name', 'tmdb_params',
                             'cache_enabled',
-                            'cache_content_selection', 'cache_location_override',
+                            'cache_content_selection', 'cache_content_days',
+                            'cache_retention_mode', 'cache_retention_extra_days',
+                            'cache_selected_content_ids',
+                            'cache_location_override',
                             'cache_prefer_quality_keyword', 'cache_avoid_duplicate_content',
                         ])
                         ->all();
@@ -266,6 +298,98 @@ class ListVodDynamicGroups extends ListRecords
             ]);
     }
 
+    /**
+     * Per-row map of group_id => ['enabled' => bool, 'cached' => int,
+     * 'total' => int]. Built lazily by the cache_status state closure
+     * below: first call iterates the page's loaded table records,
+     * builds every row's content-fingerprint set, and issues ONE batched
+     * query against cached_content_files to learn which fingerprints
+     * are completed. Subsequent calls in the same render hit the
+     * memoized map — no per-row queries.
+     *
+     * Cache lives on the Livewire instance so it persists across the
+     * per-row state() closures but is rebuilt on the next render (new
+     * Livewire request cycle resets the property to null).
+     *
+     * @var array<int, array{enabled: bool, cached: int, total: int}>|null
+     */
+    protected ?array $cacheStatusIndex = null;
+
+    /**
+     * Memoized per-row cache_status map for the table on this render.
+     * First call walks getTableRecords() (channels are eager-loaded via
+     * modifyQueryUsing), builds a per-row fingerprint set, issues ONE
+     * batched CachedContentFile lookup, and stores the result keyed by
+     * group id. Subsequent state() closures hit the memoized map.
+     *
+     * @return array<int, array{enabled: bool, cached: int, total: int}>
+     */
+    public function getCacheStatusIndex(): array
+    {
+        if ($this->cacheStatusIndex !== null) {
+            return $this->cacheStatusIndex;
+        }
+
+        $dispatch = app(DynamicGroupCacheDispatchService::class);
+        $index = [];
+        $fingerprintsById = [];
+        $allFingerprints = [];
+
+        foreach ($this->getTableRecords() as $record) {
+            $rule = $dispatch->resolveRuleForGroup($record);
+            if ($rule === null || ! ($rule['cache_enabled'] ?? false)) {
+                $index[$record->id] = ['enabled' => false, 'cached' => 0, 'total' => 0];
+
+                continue;
+            }
+
+            $quality = $dispatch->resolveQuality($rule);
+            $fingerprints = $record->channels
+                ->map(fn ($channel): string => CachedContentFile::fingerprintFor([
+                    'content_type' => 'movie',
+                    'tmdb_id' => $channel->tmdb_id !== null ? (string) $channel->tmdb_id : null,
+                    'quality' => $quality,
+                ]))
+                ->all();
+
+            $fingerprintsById[$record->id] = $fingerprints;
+            $index[$record->id] = [
+                'enabled' => true,
+                // cached is filled in below once we know which
+                // fingerprints are Completed; total = this row's
+                // fingerprint count.
+                'cached' => 0,
+                'total' => count($fingerprints),
+            ];
+
+            foreach ($fingerprints as $fp) {
+                $allFingerprints[$fp] = true;
+            }
+        }
+
+        if (! empty($allFingerprints)) {
+            // One query for the whole page: which of the union of
+            // every row's fingerprints are currently Completed? The
+            // resulting set is keyed by fingerprint so the per-row
+            // count below is a hash lookup instead of a SQL query.
+            $completedSet = CachedContentFile::query()
+                ->whereIn('content_fingerprint', array_keys($allFingerprints))
+                ->where('status', CachedContentFileStatus::Completed)
+                ->pluck('content_fingerprint')
+                ->flip() // ['fp1' => 0, 'fp2' => 1, ...] — set-style keys
+                ->toArray();
+
+            foreach ($fingerprintsById as $id => $rowFingerprints) {
+                $index[$id]['cached'] = count(array_filter(
+                    $rowFingerprints,
+                    fn (string $fp): bool => isset($completedSet[$fp]),
+                ));
+            }
+        }
+
+        return $this->cacheStatusIndex = $index;
+    }
+
     public function table(Table $table): Table
     {
         return $table
@@ -277,7 +401,12 @@ class ListVodDynamicGroups extends ListRecords
             // separate groupBy('playlist_id') query against the
             // resource's getEloquentQuery() and that combination blows
             // up Postgres (subquery columns must be in GROUP BY).
-            ->modifyQueryUsing(fn (Builder $query) => $query->withCount('channels'))
+            //
+            // with('channels') eager-loads the actual pivot rows so the
+            // cache_status column can iterate them without per-row
+            // lazy-loads. The cache_status helper also batches a single
+            // CachedContentFile::query() across ALL rows' fingerprints.
+            ->modifyQueryUsing(fn (Builder $query) => $query->withCount('channels')->with('channels'))
             ->recordUrl(fn (DynamicGroup $record): string => DynamicGroupResource::getUrl('view', ['record' => $record]))
             ->columns([
                 TextColumn::make('playlist.name')
@@ -298,6 +427,14 @@ class ListVodDynamicGroups extends ListRecords
                 // Group-level "Cached / Total" fraction. Per-movie
                 // Cached indicators live on ChannelsRelationManager
                 // inside ViewDynamicGroup (the movie grid), not here.
+                //
+                // N+1 fix: the previous closure lazy-loaded $record->channels
+                // AND issued one CachedContentFile::whereIn(...)->count()
+                // PER ROW. This version delegates to
+                // getCacheStatusIndex(), which iterates the loaded
+                // table ONCE, builds every row's fingerprints, and
+                // issues a single batched query for the whole page.
+                // The state closure is then O(1) per row.
                 TextColumn::make('cache_status')
                     ->label(__('Cache progress'))
                     // "Cached / Total" for vod-type groups that have
@@ -305,34 +442,26 @@ class ListVodDynamicGroups extends ListRecords
                     // the old DynamicGroupsWidget used — see that
                     // widget's docblock for the rationale on why we
                     // don't pivot-count.
+                    //
+                    // The closure is O(1) per row thanks to
+                    // getCacheStatusIndex(), which batches a single
+                    // CachedContentFile::query() across all rows'
+                    // fingerprints and memoizes the per-row result on
+                    // the Livewire instance.
                     ->state(function (DynamicGroup $record): string {
-                        $dispatch = app(DynamicGroupCacheDispatchService::class);
-                        $rule = $dispatch->resolveRuleForGroup($record);
-                        if ($rule === null || ! ($rule['cache_enabled'] ?? false)) {
+                        // Anonymous closures defined inside an instance
+                        // method automatically bind to $this (the Livewire
+                        // page). Memoized on the page instance so the
+                        // per-row closures don't each pay for the batched
+                        // CachedContentFile lookup.
+                        $row = $this->getCacheStatusIndex()[$record->id] ?? null;
+                        if ($row === null || ! ($row['enabled'] ?? false)) {
                             return '—';
                         }
 
-                        $channels = $record->channels;
-                        $total = $channels->count();
-                        if ($total === 0) {
-                            return '0/0';
-                        }
-
-                        $quality = $dispatch->resolveQuality($rule);
-                        $fingerprints = $channels
-                            ->map(fn ($channel) => CachedContentFile::fingerprintFor([
-                                'content_type' => 'movie',
-                                'tmdb_id' => $channel->tmdb_id !== null ? (string) $channel->tmdb_id : null,
-                                'quality' => $quality,
-                            ]))
-                            ->all();
-
-                        $cached = CachedContentFile::query()
-                            ->whereIn('content_fingerprint', $fingerprints)
-                            ->where('status', CachedContentFileStatus::Completed)
-                            ->count();
-
-                        return "{$cached}/{$total}";
+                        return $row['total'] === 0
+                            ? '0/0'
+                            : "{$row['cached']}/{$row['total']}";
                     }),
                 TextColumn::make('last_synced_at')
                     ->since()

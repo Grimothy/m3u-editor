@@ -31,7 +31,7 @@ class DownloadCachedContentFile implements ShouldQueue
 
     /**
      * Unused once retryUntil() is defined below (retryUntil takes over the
-     * max-attempts check entirely — see Worker::markJobAsFailedIfAlreadyExceedsMaxAttempts).
+     * max-attempts check entirely - see Worker::markJobAsFailedIfAlreadyExceedsMaxAttempts).
      * Kept at the framework default only as a defensive fallback.
      */
     public int $tries = 0;
@@ -43,7 +43,7 @@ class DownloadCachedContentFile implements ShouldQueue
      * Fixed at dispatch time (retryUntil() is only invoked once, when the
      * payload is built) so it stays constant across every redelivery of
      * this job. Without this, $tries counts each release() as a failed
-     * "attempt" — a job that hits the concurrency gate even once would
+     * "attempt" - a job that hits the concurrency gate even once would
      * permanently fail on its very next redelivery. This shipped as
      * `$tries = 1` and produced 1000+ MaxAttemptsExceededException rows in
      * failed_jobs in practice, since every throttled job died this way.
@@ -66,7 +66,7 @@ class DownloadCachedContentFile implements ShouldQueue
     private ?CachedContentFile $progressFile = null;
 
     /**
-     * Throttle for checkCancellation()'s Cache::has() call — time-based
+     * Throttle for checkCancellation()'s Cache::has() call - time-based
      * (not byte-based like $progressThreshold) so a sub-1-MiB download
      * still gets checked at least once, while a multi-GB one doesn't hit
      * Redis on every ~64KB Guzzle progress tick.
@@ -76,7 +76,7 @@ class DownloadCachedContentFile implements ShouldQueue
     /**
      * Set by checkCancellation() when an operator cancels/deletes the row
      * mid-download. Checked between every 64 KiB read in
-     * streamResponseToFile() (real mid-transfer abort — see that method's
+     * streamResponseToFile() (real mid-transfer abort - see that method's
      * docblock) and again after Step 6 returns, in case cancellation lands
      * after the last chunk but before Step 7.
      */
@@ -92,7 +92,7 @@ class DownloadCachedContentFile implements ShouldQueue
         public ?string $quality,
         public string $sourceUrl,
     ) {
-        // Generous timeout — movie files can be multi-GB. Default 1h.
+        // Generous timeout - movie files can be multi-GB. Default 1h.
         // Future pass: add a dedicated config('dynamic_group_cache.download_timeout', ...).
         $this->timeout = (int) config('dvr.playlist_download_timeout', 3600);
         $this->retryDeadline = now()->addHours(48);
@@ -100,7 +100,7 @@ class DownloadCachedContentFile implements ShouldQueue
     }
 
     /**
-     * See $retryDeadline docblock — this replaces $tries as the max-attempts
+     * See $retryDeadline docblock - this replaces $tries as the max-attempts
      * gate so concurrency-throttle release()s never count toward a failure.
      */
     public function retryUntil(): Carbon
@@ -154,7 +154,7 @@ class DownloadCachedContentFile implements ShouldQueue
         // Downloading. DynamicGroupCacheDispatchService::dispatchJob() now
         // creates the row in Pending status immediately at dispatch time (so
         // the activity widget can show queued items before a worker ever
-        // picks them up) — reclaimExistingRow()'s Pending branch is what
+        // picks them up) - reclaimExistingRow()'s Pending branch is what
         // turns that into a live "Downloading" row here. The other branches
         // it handles:
         //  - Failed row past cooldown  → atomically reclaim (retry the download)
@@ -184,7 +184,7 @@ class DownloadCachedContentFile implements ShouldQueue
                 return;
             }
         } else {
-            // No row found — either a direct dispatch with nothing
+            // No row found - either a direct dispatch with nothing
             // pre-created, or the dispatch-time Pending row was deleted out
             // from under us (operator cancelled it before this worker ever
             // reclaimed it). Cache::pull() so the flag is consumed here and
@@ -208,7 +208,7 @@ class DownloadCachedContentFile implements ShouldQueue
             } catch (QueryException $e) {
                 $existing = CachedContentFile::where('content_fingerprint', $fingerprint)->first();
                 if (! $existing) {
-                    // Race we lost AND no row found — permanent skip (defensive).
+                    // Race we lost AND no row found - permanent skip (defensive).
                     return;
                 }
 
@@ -222,18 +222,18 @@ class DownloadCachedContentFile implements ShouldQueue
         // Step 5.5: Resolve and persist the TMDB title for the activity widget.
         // - Synchronous (one TMDB HTTP call, ~200ms with built-in rate limiting)
         //   because we already know tmdb_id here and the row is freshly created.
-        // - Wrapped in a try/catch — TMDB outage must NEVER block a download.
+        // - Wrapped in a try/catch - TMDB outage must NEVER block a download.
         // - Skipped if title is already populated (reclaim / Step 2 dedup path).
         $this->resolveAndStoreTitle($file, $tmdb);
 
         // Step 6: Download to temp file (mirrors ProcessM3uImport.php:460-470 shape)
         // and stream byte-level progress into the row for the Filament progress UI.
         // - RequestOptions::STREAM routes the request through Guzzle's StreamHandler
-        //   (native PHP streams, not curl) — see streamResponseToFile()'s docblock
+        //   (native PHP streams, not curl) - see streamResponseToFile()'s docblock
         //   for why that matters for cancellation.
         // - bytes_expected is set from Content-Length if present; -1 (unknown) is
         //   passed to reportDownloadProgress() for chunked responses.
-        // - Progress-write failures are swallowed — a missed update must NEVER abort the
+        // - Progress-write failures are swallowed - a missed update must NEVER abort the
         //   actual download. Step 8 stamps the final tally from Storage::size().
         $tempPath = tempnam(sys_get_temp_dir(), 'dgc_');
         $this->progressFile = $file;
@@ -267,7 +267,7 @@ class DownloadCachedContentFile implements ShouldQueue
         // Operator deleted/cancelled the row while the GET above was in
         // flight. streamResponseToFile() already broke its read loop and
         // closed the connection as soon as checkCancellation() flagged it
-        // (real mid-transfer abort — see that method's docblock); this catches
+        // (real mid-transfer abort - see that method's docblock); this catches
         // the narrow edge case where cancellation landed after the last chunk
         // but before Step 6 returned. The row itself was already removed by
         // DynamicGroupCacheActivityWidget::deleteCachedFile(); don't
@@ -281,7 +281,7 @@ class DownloadCachedContentFile implements ShouldQueue
             return;
         }
 
-        // Step 7: Resolve destination — default disk + path derived from fingerprint.
+        // Step 7: Resolve destination - default disk + path derived from fingerprint.
         // Per-group cache_location_override resolution is left for a later pass; for
         // Phase 2 we only honor the global setting + default disk root.
         $disk = $settings->dynamic_group_cache_location
@@ -296,7 +296,7 @@ class DownloadCachedContentFile implements ShouldQueue
             // Multi-GB downloads would OOM against file_get_contents() (we hit a 2GB
             // worker memory_limit exactly this way). Laravel's put() accepts a
             // resource and writes it via Flysystem's writeStream, which streams in
-            // chunks — peak memory stays bounded regardless of file size.
+            // chunks - peak memory stays bounded regardless of file size.
             $stream = fopen($tempPath, 'rb');
             if ($stream === false) {
                 throw new \RuntimeException("Unable to open temp file for reading: {$tempPath}");
@@ -329,7 +329,7 @@ class DownloadCachedContentFile implements ShouldQueue
         try {
             $size = Storage::disk($disk)->size($path) ?: null;
         } catch (\Throwable) {
-            // file_path no longer exists on disk — leave size null
+            // file_path no longer exists on disk - leave size null
         }
 
         try {
@@ -345,7 +345,7 @@ class DownloadCachedContentFile implements ShouldQueue
             ]);
         } catch (\Throwable $e) {
             $this->rollbackStorageWrite($disk, $path, $file, $e);
-            // Temp file was already consumed by Step 7's storage stream — no
+            // Temp file was already consumed by Step 7's storage stream - no
             // unlink needed, but kept the safety net in case Step 7 short-circuited
             // before reading the whole file.
             @unlink($tempPath);
@@ -375,7 +375,7 @@ class DownloadCachedContentFile implements ShouldQueue
     private function reclaimExistingRow(CachedContentFile $existing): ?CachedContentFile
     {
         if ($existing->status === CachedContentFileStatus::Pending) {
-            // Nobody else can be "in flight" on a Pending row — any worker
+            // Nobody else can be "in flight" on a Pending row - any worker
             // that reaches it may claim it. The affected-row-count guard
             // still matters because shouldSkip() permits multiple dispatches
             // for the same fingerprint (e.g. two groups wanting the same
@@ -406,7 +406,7 @@ class DownloadCachedContentFile implements ShouldQueue
                 ]);
 
             if ($reclaimed === 0) {
-                // Another worker won the reclaim race — attach and exit
+                // Another worker won the reclaim race - attach and exit
                 $existing->dynamicGroups()->syncWithoutDetaching([$this->dynamicGroup->id]);
 
                 return null;
@@ -419,7 +419,7 @@ class DownloadCachedContentFile implements ShouldQueue
             // Stale = crashed worker. Threshold = job timeout + 5min safety margin.
             $staleThreshold = now()->subSeconds($this->timeout + 300);
             if ($existing->updated_at >= $staleThreshold) {
-                // Fresh Downloading — another worker is plausibly still on it
+                // Fresh Downloading - another worker is plausibly still on it
                 $existing->dynamicGroups()->syncWithoutDetaching([$this->dynamicGroup->id]);
 
                 return null;
@@ -445,7 +445,7 @@ class DownloadCachedContentFile implements ShouldQueue
         }
 
         // Completed (Step 2 should have already caught this) or any
-        // unexpected state — attach and exit.
+        // unexpected state - attach and exit.
         $existing->dynamicGroups()->syncWithoutDetaching([$this->dynamicGroup->id]);
 
         return null;
@@ -457,7 +457,7 @@ class DownloadCachedContentFile implements ShouldQueue
      * Deletes the file from Storage (best-effort, logs on failure) and marks
      * the row Failed so the dispatcher's failure-cooldown logic governs when
      * the next attempt happens. Without this, the multi-GB file sits in
-     * Storage forever — hasFilePath() returns false (file_path is still null
+     * Storage forever - hasFilePath() returns false (file_path is still null
      * because the failed update never wrote it), so the retention service
      * can't find or clean it up.
      */
@@ -466,7 +466,7 @@ class DownloadCachedContentFile implements ShouldQueue
         try {
             Storage::disk($disk)->delete($path);
         } catch (\Throwable $deleteError) {
-            Log::error("DownloadCachedContentFile: ORPHAN at {$path} after Step 8 update failure — Storage::delete also failed: {$deleteError->getMessage()}");
+            Log::error("DownloadCachedContentFile: ORPHAN at {$path} after Step 8 update failure - Storage::delete also failed: {$deleteError->getMessage()}");
         }
 
         $this->markFailed($file, 'Step 8 update failed (Storage rolled back): '.$cause->getMessage());
@@ -476,7 +476,7 @@ class DownloadCachedContentFile implements ShouldQueue
      * Update the row to Failed, increment failure_count, stamp last_failed_at,
      * and persist the error message onto the row itself.
      *
-     * Never throws — wraps any exception so we don't bubble up and trigger Laravel's
+     * Never throws - wraps any exception so we don't bubble up and trigger Laravel's
      * queue retry (per $tries=1, the dispatcher controls retry timing via the
      * failure-cooldown settings).
      *
@@ -508,11 +508,11 @@ class DownloadCachedContentFile implements ShouldQueue
      *
      * Format (matches the widget's getContentLabel() expectations):
      *   movie        → "Wicked"
-     *   episode      → "Breaking Bad — I.F.T." (em-dash, space, episode name)
+     *   episode      → "Breaking Bad: I.F.T." (colon, space, episode name)
      *                 or "Breaking Bad S01E03" if the season has no episode title
      *   series       → "Breaking Bad"
      *
-     * Failures are swallowed + logged at warning level — TMDB being down or
+     * Failures are swallowed + logged at warning level - TMDB being down or
      * rate-limited must never block a download. The widget falls back to the
      * "type: tmdb N" label when title is null.
      */
@@ -579,7 +579,7 @@ class DownloadCachedContentFile implements ShouldQueue
         $episodeName = is_array($episode) ? ($episode['name'] ?? null) : null;
 
         if ($episodeName !== null && $episodeName !== '') {
-            return "{$seriesName} — {$episodeName}";
+            return "{$seriesName}: {$episodeName}";
         }
 
         return sprintf('%s S%02dE%02d', $seriesName, $seasonNumber, $episodeNumber);
@@ -587,17 +587,17 @@ class DownloadCachedContentFile implements ShouldQueue
 
     /**
      * Read Step 6's response body in 64 KiB chunks, writing each to the temp
-     * file and checking for cancellation between reads — this is what makes
+     * file and checking for cancellation between reads - this is what makes
      * cancellation a real mid-transfer abort instead of a cooperative
      * discard-after-completion.
      *
      * RequestOptions::STREAM routes the request through Guzzle's
-     * StreamHandler (native PHP streams over fopen()) instead of curl —
+     * StreamHandler (native PHP streams over fopen()) instead of curl -
      * Utils::chooseHandler() wraps the default handler in
      * Proxy::wrapStreaming() specifically so `stream: true` requests bypass
      * curl entirely. That matters here: an earlier version of this method
      * aborted downloads by throwing from inside a CURLOPT_PROGRESSFUNCTION
-     * callback, which doesn't unwind as a normal PHP exception — it crashes
+     * callback, which doesn't unwind as a normal PHP exception - it crashes
      * the worker process, confirmed via a real Horizon run (the Redis queue
      * reservation and the queue_monitor row were both left stuck). Breaking
      * out of this plain PHP while-loop and closing the PSR-7 stream is
@@ -633,7 +633,7 @@ class DownloadCachedContentFile implements ShouldQueue
                 $this->reportDownloadProgress($this->bytesExpected ?? -1, $downloaded);
 
                 if ($this->cancelled) {
-                    // Stop pulling further bytes now — closing the stream
+                    // Stop pulling further bytes now - closing the stream
                     // below drops the connection instead of reading the
                     // transfer out to completion.
                     break;
@@ -651,7 +651,7 @@ class DownloadCachedContentFile implements ShouldQueue
      * only when the 1 MiB threshold is crossed (plus once more on the final
      * chunk). $downloadSize is -1 for chunked / no-Content-Length responses.
      *
-     * Update failures are swallowed — progress is advisory; a missed write must NEVER
+     * Update failures are swallowed - progress is advisory; a missed write must NEVER
      * abort the actual download.
      */
     public function reportDownloadProgress(int $downloadSize, int $downloaded): void
@@ -692,7 +692,7 @@ class DownloadCachedContentFile implements ShouldQueue
 
     /**
      * Check whether an operator cancelled this row (deleteCachedFile()) and,
-     * if so, set $cancelled — streamResponseToFile()'s read loop checks it
+     * if so, set $cancelled - streamResponseToFile()'s read loop checks it
      * after every chunk and breaks immediately, closing the connection
      * instead of reading the transfer out to completion.
      *
@@ -719,8 +719,8 @@ class DownloadCachedContentFile implements ShouldQueue
      * reportDownloadProgress()).
      *
      * Returns null on the first event (no previous timestamp to subtract from)
-     * or when the rate collapses to zero (defensive — would otherwise produce
-     * an "infinite" ETA). No EMA / smoothing — the widget polls every 5s and
+     * or when the rate collapses to zero (defensive - would otherwise produce
+     * an "infinite" ETA). No EMA / smoothing - the widget polls every 5s and
      * Guzzle's PROGRESS only fires on throttle-boundary crossings, so
      * consecutive samples are already comparable in scale.
      */

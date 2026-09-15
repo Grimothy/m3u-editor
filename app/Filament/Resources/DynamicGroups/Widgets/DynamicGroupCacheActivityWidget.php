@@ -117,8 +117,12 @@ abstract class DynamicGroupCacheActivityWidget extends BaseWidget
         // doesn't affect canView() because the page-level
         // getTabsContentComponent() is always rendered (the widget
         // is just hidden when there's nothing for the active scope).
+        // Ownership scope is folded in here too: a non-admin must not
+        // see this widget at all when another user's rows exist but
+        // none of theirs do.
         return CachedContentFile::query()
             ->where('content_type', static::$contentType)
+            ->ownedByUser(auth()->user(), auth()->user()?->isAdmin() ?? false)
             ->exists();
     }
 
@@ -131,9 +135,12 @@ abstract class DynamicGroupCacheActivityWidget extends BaseWidget
                 // activePlaylistId is set, also filter through the
                 // pivot to that playlist's dynamic groups. Limit 10
                 // matches the old shared widget so the on-screen
-                // density doesn't change.
+                // density doesn't change. ownedByUser() folds in the
+                // per-user playlist-ownership filter so non-admins
+                // only see their own cached rows.
                 CachedContentFile::query()
                     ->where('content_type', static::$contentType)
+                    ->ownedByUser(auth()->user(), auth()->user()?->isAdmin() ?? false)
                     ->when(
                         $this->activePlaylistId && $this->activePlaylistId !== 'all',
                         fn ($q) => $q->whereHas('dynamicGroups', function ($dq) {
@@ -318,6 +325,7 @@ abstract class DynamicGroupCacheActivityWidget extends BaseWidget
                         ->modalSubmitActionLabel(__('Retry selected'))
                         ->deselectRecordsAfterCompletion()
                         ->action(function (Collection $records): void {
+                            $records = self::filterToOwnedRecords($records);
                             $retried = 0;
                             $skipped = 0;
                             foreach ($records as $record) {
@@ -349,6 +357,7 @@ abstract class DynamicGroupCacheActivityWidget extends BaseWidget
                         ->modalSubmitActionLabel(__('Cancel selected'))
                         ->deselectRecordsAfterCompletion()
                         ->action(function (Collection $records): void {
+                            $records = self::filterToOwnedRecords($records);
                             $cancelled = 0;
                             $skipped = 0;
                             foreach ($records as $record) {
@@ -380,6 +389,7 @@ abstract class DynamicGroupCacheActivityWidget extends BaseWidget
                         ->modalSubmitActionLabel(__('Delete selected'))
                         ->deselectRecordsAfterCompletion()
                         ->action(function (Collection $records): void {
+                            $records = self::filterToOwnedRecords($records);
                             $count = 0;
                             foreach ($records as $record) {
                                 self::deleteCachedFile($record);
@@ -440,12 +450,14 @@ abstract class DynamicGroupCacheActivityWidget extends BaseWidget
      * when there are no rows for THIS widget's content_type — same
      * scope as canView() so an empty VOD page can't get a confusing
      * "expanded but empty" section just because the Series side has
-     * downloads in flight.
+     * downloads in flight. Ownership scope matches canView() too:
+     * a non-admin only sees their own section expanded.
      */
     public function hasCacheActivity(): bool
     {
         return CachedContentFile::query()
             ->where('content_type', static::$contentType)
+            ->ownedByUser(auth()->user(), auth()->user()?->isAdmin() ?? false)
             ->exists();
     }
 
@@ -626,9 +638,21 @@ abstract class DynamicGroupCacheActivityWidget extends BaseWidget
      * actions and the bulk variants. Removes the storage file (when present)
      * then deletes the row - the FK ON DELETE CASCADE on the
      * cached_content_file_dynamic_groups pivot handles shared memberships.
+     *
+     * Ownership is verified before any side effect: non-admin callers who
+     * hand in a row reachable only through another user's playlists no-op
+     * silently. The widget's row + bulk handlers surface this with a
+     * "Could not retry" notification (for `retryCachedFile`) or by
+     * simply not decrementing the "cancelled"/"deleted" counter (for
+     * `deleteCachedFile`); the per-row deleteCache/cancel UIs already
+     * filter to the caller's own rows via the widget query.
      */
     public static function deleteCachedFile(CachedContentFile $record): void
     {
+        if (! self::canActOnRecord($record)) {
+            return;
+        }
+
         // Signal cancellation BEFORE deleting the row, so a worker that's
         // actively downloading this row (or about to reclaim it from
         // Pending) picks up the flag instead of running to completion
@@ -658,12 +682,17 @@ abstract class DynamicGroupCacheActivityWidget extends BaseWidget
      * Episode lookup. Clears failure bookkeeping so the worker's atomic
      * Failed->Downloading UPDATE always wins the reclaim race.
      *
-     * Returns false if no usable group / playlist / source URL can be
-     * found (e.g. the underlying channel was removed since the row was
-     * created). The caller surfaces this as a notification.
+     * Returns false if the caller doesn't own the row, no usable group /
+     * playlist / source URL can be found (e.g. the underlying channel was
+     * removed since the row was created), or the row isn't failed. The
+     * widget surfaces this as a notification.
      */
     public static function retryCachedFile(CachedContentFile $record): bool
     {
+        if (! self::canActOnRecord($record)) {
+            return false;
+        }
+
         $group = $record->dynamicGroups()->first();
         if (! $group) {
             return false;
@@ -716,6 +745,52 @@ abstract class DynamicGroupCacheActivityWidget extends BaseWidget
         )->onQueue('dynamic-group-cache');
 
         return true;
+    }
+
+    /**
+     * Whether the currently authenticated user (or an admin) may act on
+     * the given cached file row. Mirrors the widget query's
+     * `ownedByUser()` filter at the SQL level: a row is reachable iff at
+     * least one referencing DynamicGroup's playlist is owned by
+     * `auth()->user()`. Admins always pass.
+     *
+     * Used by `retryCachedFile()` / `deleteCachedFile()` as the
+     * last-line ownership check, since both are public static methods
+     * callable from anywhere (the widget row + bulk handlers, the
+     * Channels/Series relation managers, tests).
+     */
+    private static function canActOnRecord(CachedContentFile $record): bool
+    {
+        $user = auth()->user();
+        if (! $user) {
+            return false;
+        }
+        if ($user->isAdmin()) {
+            return true;
+        }
+
+        return $record->dynamicGroups()
+            ->whereHas('playlist', fn ($q) => $q->where('user_id', $user->id))
+            ->exists();
+    }
+
+    /**
+     * Bulk-action helper: drop any rows the current user can't act on.
+     * Mirrors `canActOnRecord()` per row so a non-admin can't bulk-
+     * retry/cancel/delete another user's files by selecting them in the
+     * widget. Admins see the full selection unchanged.
+     */
+    private static function filterToOwnedRecords(Collection $records): Collection
+    {
+        $user = auth()->user();
+        if (! $user || $user->isAdmin()) {
+            return $records;
+        }
+
+        return $records->filter(fn (CachedContentFile $record): bool => $record->dynamicGroups()
+            ->whereHas('playlist', fn ($q) => $q->where('user_id', $user->id))
+            ->exists(),
+        );
     }
 
     private static function resolveMovieUrl(Playlist $playlist, CachedContentFile $record): ?string

@@ -2,10 +2,21 @@
 
 use App\Enums\CachedContentFileStatus;
 use App\Models\CachedContentFile;
+use App\Models\DynamicGroup;
+use App\Models\Playlist;
+use App\Models\User;
 use Illuminate\Database\QueryException;
 use Illuminate\Foundation\Testing\RefreshDatabase;
+use Illuminate\Support\Facades\Bus;
 
 uses(RefreshDatabase::class);
+
+beforeEach(function () {
+    // Playlist::factory()->create() fires PlaylistListener → SyncPipelineService
+    // → dispatch(ProcessM3uImport). Bus::fake() catches that; ownership tests
+    // never trigger the listener.
+    Bus::fake();
+});
 
 // fingerprintFor() — locked 5-rule normalization contract:
 //   1. content_type lowercased+trimmed, REQUIRED (throws if empty)
@@ -247,4 +258,122 @@ it('maps content_fingerprint status to the CachedContentFileStatus enum', functi
     expect($pending->status)->toBe(CachedContentFileStatus::Pending)
         ->and($completed->status)->toBe(CachedContentFileStatus::Completed)
         ->and($failed->status)->toBe(CachedContentFileStatus::Failed);
+});
+
+// --- scopeOwnedByUser() — per-user ownership filter on the shared cache table ---
+
+/**
+ * Seed two users + playlists + groups, each with their own cached file.
+ * Returned as [$userA, $userB, $playlistA, $playlistB, $groupA, $groupB, $fileA, $fileB].
+ *
+ * @return array{0: User, 1: User, 2: Playlist, 3: Playlist, 4: DynamicGroup, 5: DynamicGroup, 6: CachedContentFile, 7: CachedContentFile}
+ */
+function seedTwoUsersWithCacheFiles(): array
+{
+    $userA = User::factory()->create(['is_admin' => false]);
+    $userB = User::factory()->create(['is_admin' => false]);
+    $playlistA = Playlist::factory()->for($userA)->create();
+    $playlistB = Playlist::factory()->for($userB)->create();
+    $groupA = DynamicGroup::create([
+        'playlist_id' => $playlistA->id, 'user_id' => $userA->id,
+        'type' => 'vod', 'source' => 'trending', 'name' => 'Group A',
+    ]);
+    $groupB = DynamicGroup::create([
+        'playlist_id' => $playlistB->id, 'user_id' => $userB->id,
+        'type' => 'vod', 'source' => 'trending', 'name' => 'Group B',
+    ]);
+    $fileA = CachedContentFile::factory()->completed()->create([
+        'content_type' => 'movie', 'tmdb_id' => '550',
+    ]);
+    $fileB = CachedContentFile::factory()->completed()->create([
+        'content_type' => 'movie', 'tmdb_id' => '551',
+    ]);
+    $fileA->dynamicGroups()->attach($groupA);
+    $fileB->dynamicGroups()->attach($groupB);
+
+    return [$userA, $userB, $playlistA, $playlistB, $groupA, $groupB, $fileA, $fileB];
+}
+
+it('scopeOwnedByUser() returns all rows when adminBypass is true', function () {
+    [$userA, $userB, , , , , $fileA, $fileB] = seedTwoUsersWithCacheFiles();
+    $admin = User::factory()->create(['is_admin' => true]);
+
+    $ids = CachedContentFile::query()
+        ->ownedByUser($admin, adminBypass: true)
+        ->pluck('id')
+        ->all();
+
+    expect($ids)->toContain($fileA->id, $fileB->id);
+});
+
+it('scopeOwnedByUser() returns all rows when $user is null (defensive fallback)', function () {
+    [$userA, $userB, , , , , $fileA, $fileB] = seedTwoUsersWithCacheFiles();
+
+    $ids = CachedContentFile::query()
+        ->ownedByUser(null)
+        ->pluck('id')
+        ->all();
+
+    expect($ids)->toContain($fileA->id, $fileB->id);
+});
+
+it('scopeOwnedByUser() returns only the given user\'s rows when not admin-bypassed', function () {
+    [$userA, $userB, , , , , $fileA, $fileB] = seedTwoUsersWithCacheFiles();
+
+    $idsA = CachedContentFile::query()
+        ->ownedByUser($userA)
+        ->pluck('id')
+        ->all();
+    $idsB = CachedContentFile::query()
+        ->ownedByUser($userB)
+        ->pluck('id')
+        ->all();
+
+    expect($idsA)->toContain($fileA->id)
+        ->and($idsA)->not->toContain($fileB->id)
+        ->and($idsB)->toContain($fileB->id)
+        ->and($idsB)->not->toContain($fileA->id);
+});
+
+it('scopeOwnedByUser() returns no rows for a non-admin who owns no playlists', function () {
+    seedTwoUsersWithCacheFiles();
+    $stranger = User::factory()->create(['is_admin' => false]);
+
+    $count = CachedContentFile::query()
+        ->ownedByUser($stranger)
+        ->count();
+
+    expect($count)->toBe(0);
+});
+
+it('scopeOwnedByUser() follows the pivot: a file referenced by ANY of the user\'s groups counts as owned', function () {
+    // File A is referenced by both user A's group AND user B's group. Both
+    // users should see it — the scope is OR, not exclusive. This is the
+    // whole point of the pivot pattern: a shared download serves both.
+    // File B remains only on user B's group, so user A still doesn't see it.
+    [$userA, $userB, , , , $groupB, $fileA, $fileB] = seedTwoUsersWithCacheFiles();
+    $fileA->dynamicGroups()->attach($groupB);
+
+    $idsA = CachedContentFile::query()->ownedByUser($userA)->pluck('id')->all();
+    $idsB = CachedContentFile::query()->ownedByUser($userB)->pluck('id')->all();
+
+    // User A owns fileA via groupA; fileB is groupB-only (B's).
+    expect($idsA)->toContain($fileA->id)
+        ->and($idsA)->not->toContain($fileB->id)
+        // User B owns both: fileA via the new shared pivot row + fileB via groupB.
+        ->and($idsB)->toContain($fileA->id, $fileB->id);
+});
+
+it('scopeOwnedByUser() returns no rows for an orphan file (no DynamicGroup memberships)', function () {
+    $user = User::factory()->create(['is_admin' => false]);
+    $orphan = CachedContentFile::factory()->completed()->create([
+        'content_type' => 'movie', 'tmdb_id' => '999',
+    ]);
+
+    $count = CachedContentFile::query()
+        ->ownedByUser($user)
+        ->count();
+
+    expect($count)->toBe(0)
+        ->and(CachedContentFile::find($orphan->id))->not->toBeNull();
 });

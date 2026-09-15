@@ -326,9 +326,15 @@ it('the Movies relation manager shows a blue Cached check per row when a complet
         ['dynamic_group_id' => $group->id, 'item_type' => Channel::class, 'item_id' => $uncached->id],
     ]);
 
-    CachedContentFile::factory()->completed()->create([
+    // The cached file must be attached to the parent DynamicGroup —
+    // cachedFileForChannel() now requires a file referenced by a
+    // DynamicGroup whose playlist is owned by the parent group's
+    // user (the per-user ownership filter that protects against
+    // tmdb_id collisions between users).
+    $cachedFile = CachedContentFile::factory()->completed()->create([
         'content_type' => 'movie', 'tmdb_id' => '550', 'quality' => null,
     ]);
+    $cachedFile->dynamicGroups()->attach($group->id);
 
     Livewire::test(ChannelsRelationManager::class, [
         'ownerRecord' => $group,

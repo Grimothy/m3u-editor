@@ -585,3 +585,163 @@ it('dispatchForGroup returns dispatched=0 with reason when all channels are alre
         ->and($result['cache_enabled'])->toBeTrue()
         ->and($result['reason'])->toContain('All eligible content is already cached or in cooldown');
 });
+
+// --- Phase 5: cache_avoid_duplicate_content toggle (Bug 2) ---------------
+
+it('cache_avoid_duplicate_content=true skips the second rule\'s dispatch when a Completed row exists for the same tmdb_id at a different quality', function () {
+    // Regression for PR #1500 Bug 2: cache_avoid_duplicate_content was a
+    // dead toggle — set on the rule, persisted to the playlist, but never
+    // read by the dispatcher. Two rules for the same channel that prefer
+    // different quality keywords produced two independent downloads, even
+    // when the user opted into the "share across groups" semantics.
+    //
+    // Set up: two rules (1080p + 4K) both contain the same channel with
+    // tmdb_id=550. The 1080p rule has already produced a Completed row;
+    // the 4K rule has cache_avoid_duplicate_content=true and should NOT
+    // dispatch a second download for the same content identity.
+    $this->playlist->update([
+        'dynamic_groups_config' => [
+            [
+                'name' => '1080p Group',
+                'enabled' => true,
+                'cache_enabled' => true,
+                'cache_prefer_quality_keyword' => '1080p',
+                'cache_avoid_duplicate_content' => true,
+            ],
+            [
+                'name' => '4K Group',
+                'enabled' => true,
+                'cache_enabled' => true,
+                'cache_prefer_quality_keyword' => '4K',
+                'cache_avoid_duplicate_content' => true,
+            ],
+        ],
+    ]);
+
+    $hdGroup = DynamicGroup::create([
+        'playlist_id' => $this->playlist->id,
+        'user_id' => $this->user->id,
+        'type' => 'vod', 'source' => 'trending', 'name' => '1080p Group',
+    ]);
+    $fourKGroup = DynamicGroup::create([
+        'playlist_id' => $this->playlist->id,
+        'user_id' => $this->user->id,
+        'type' => 'vod', 'source' => 'trending', 'name' => '4K Group',
+    ]);
+
+    $channel = Channel::factory()->for($this->playlist)->create([
+        'tmdb_id' => '550',
+        'url' => 'http://provider.example/movie.mp4',
+    ]);
+    $hdGroup->channels()->attach($channel->id);
+    $fourKGroup->channels()->attach($channel->id);
+
+    // Simulate that the 1080p rule has already produced a Completed row
+    // — emulate the state the dispatcher would see if 1080p finished first
+    // (or, more realistically, a download completed under an earlier rule
+    // revision).
+    CachedContentFile::factory()->completed()->create([
+        'content_type' => 'movie',
+        'tmdb_id' => '550',
+        'quality' => '1080p',
+        'content_fingerprint' => 'movie:550::1080p',
+    ]);
+
+    $result = $this->service->dispatchForGroup($fourKGroup->fresh());
+
+    expect($result['dispatched'])->toBe(0)
+        ->and($result['cache_enabled'])->toBeTrue();
+});
+
+it('cache_avoid_duplicate_content=false (or unset) still dispatches a fresh download at a different quality', function () {
+    // Counter-test to the previous one: when the toggle is OFF, two rules
+    // with different quality keywords each get their own download. This is
+    // the legacy behavior and must keep working — the toggle is opt-in.
+    $this->playlist->update([
+        'dynamic_groups_config' => [
+            [
+                'name' => '4K Group',
+                'enabled' => true,
+                'cache_enabled' => true,
+                'cache_prefer_quality_keyword' => '4K',
+                // cache_avoid_duplicate_content omitted — defaults to false
+            ],
+        ],
+    ]);
+    $fourKGroup = DynamicGroup::create([
+        'playlist_id' => $this->playlist->id,
+        'user_id' => $this->user->id,
+        'type' => 'vod', 'source' => 'trending', 'name' => '4K Group',
+    ]);
+
+    $channel = Channel::factory()->for($this->playlist)->create([
+        'tmdb_id' => '550',
+    ]);
+    $fourKGroup->channels()->attach($channel->id);
+
+    // Pre-cache 1080p — with the toggle OFF, the 4K rule should still
+    // dispatch its own download.
+    CachedContentFile::factory()->completed()->create([
+        'content_type' => 'movie',
+        'tmdb_id' => '550',
+        'quality' => '1080p',
+    ]);
+
+    $result = $this->service->dispatchForGroup($fourKGroup->fresh());
+
+    expect($result['dispatched'])->toBe(1)
+        ->and($result['cache_enabled'])->toBeTrue();
+});
+
+it('isCrossQualityDuplicate is a no-op when tmdb_id is null (returns false even with toggle on)', function () {
+    // A channel with no TMDB ID can't have its identity matched against a
+    // cached file — there's no key to look up. The dedup must short-circuit
+    // to false so the dispatcher falls through to its other guards.
+    $rule = ['cache_avoid_duplicate_content' => true];
+
+    expect($this->service->isCrossQualityDuplicate($rule, 'movie', null, null, null))->toBeFalse()
+        ->and($this->service->isCrossQualityDuplicate($rule, 'movie', '', null, null))->toBeFalse();
+});
+
+it('isCrossQualityDuplicate returns false when the rule has the toggle off (default)', function () {
+    // Defensive: rules without the flag (or with it explicitly false) must
+    // never be silently deduped — the toggle is opt-in and the default
+    // behavior is per-quality buckets.
+    CachedContentFile::factory()->completed()->create([
+        'content_type' => 'movie',
+        'tmdb_id' => '550',
+    ]);
+
+    expect($this->service->isCrossQualityDuplicate([], 'movie', '550', null, null))->toBeFalse()
+        ->and($this->service->isCrossQualityDuplicate(
+            ['cache_avoid_duplicate_content' => false],
+            'movie',
+            '550',
+            null,
+            null,
+        ))->toBeFalse();
+});
+
+it('isCrossQualityDuplicate returns true when a Completed row exists for the same identity (episode scope)', function () {
+    // Episode identity includes season + episode, so a 1080p S01E01 cache
+    // must dedup a 4K S01E01 dispatch but NOT a 4K S01E02 dispatch (same
+    // series, different episode).
+    CachedContentFile::factory()->completed()->create([
+        'content_type' => 'episode',
+        'tmdb_id' => '1399',
+        'season_number' => 1,
+        'episode_number' => 1,
+        'quality' => '1080p',
+    ]);
+
+    $rule = ['cache_avoid_duplicate_content' => true];
+
+    // Same content identity (same tmdb + season + episode) → dedup fires.
+    expect($this->service->isCrossQualityDuplicate($rule, 'episode', '1399', 1, 1))->toBeTrue();
+
+    // Different episode → not a duplicate.
+    expect($this->service->isCrossQualityDuplicate($rule, 'episode', '1399', 1, 2))->toBeFalse();
+
+    // Different season → not a duplicate.
+    expect($this->service->isCrossQualityDuplicate($rule, 'episode', '1399', 2, 1))->toBeFalse();
+});

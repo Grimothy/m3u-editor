@@ -55,6 +55,18 @@ class DynamicGroupCacheRetentionService
      */
     public function evaluate(CachedContentFile $file): void
     {
+        // PR #1500 Bug 3 short-circuit: if the file is permanently pinned
+        // (the rule that pinned it had cache_retention_mode=never_expire and
+        // was later disabled / replaced — SyncDynamicGroups stamps the flag
+        // before deleting the now-orphaned DynamicGroup row), skip
+        // retention entirely. The file stays on disk and the row stays in
+        // the DB. Re-enabling the rule keeps the flag set harmlessly (the
+        // file is also re-attached via the normal pivot path); a future
+        // fix could clear the flag on re-materialize.
+        if ($file->never_expire === true) {
+            return;
+        }
+
         $groups = $file->dynamicGroups()->with('playlist')->get();
 
         // Track whether any referencing group pins the file forever.
@@ -138,6 +150,14 @@ class DynamicGroupCacheRetentionService
      * VOD (movies): iterate $group->channels (MorphToMany), produce the fingerprints
      *  matching the per-rule quality preference.
      * Series: iterate $group->series → each series' episodes, produce fingerprints.
+     *
+     * Pulls `tvdb_id` from the source row (`channels.tvdb_id` for VOD,
+     * `series.tvdb_id` for episodes — episodes don't have their own
+     * `tvdb_id` column) so the produced fingerprint matches
+     * `CachedContentFile::fingerprintFor`'s `content_type:tmdb_id:tvdb_id:…`
+     * shape. Without this, any row cached with a non-null `tvdb_id` would
+     * never match a live fingerprint and retention would detach it while
+     * the live membership still references the same content.
      */
     private function liveFingerprintsForGroup(DynamicGroup $group, array $rule): Collection
     {
@@ -147,19 +167,23 @@ class DynamicGroupCacheRetentionService
         if ($group->type === 'vod') {
             foreach ($group->channels as $channel) {
                 $tmdbId = $channel->tmdb_id !== null ? (string) $channel->tmdb_id : null;
+                $tvdbId = $channel->tvdb_id !== null ? (string) $channel->tvdb_id : null;
                 $fingerprints->push(CachedContentFile::fingerprintFor([
                     'content_type' => 'movie',
                     'tmdb_id' => $tmdbId,
+                    'tvdb_id' => $tvdbId,
                     'quality' => $quality,
                 ]));
             }
         } elseif ($group->type === 'series') {
             foreach ($group->series as $series) {
                 $tmdbId = $series->tmdb_id !== null ? (string) $series->tmdb_id : null;
+                $tvdbId = $series->tvdb_id !== null ? (string) $series->tvdb_id : null;
                 foreach ($series->episodes as $episode) {
                     $fingerprints->push(CachedContentFile::fingerprintFor([
                         'content_type' => 'episode',
                         'tmdb_id' => $tmdbId,
+                        'tvdb_id' => $tvdbId,
                         'season_number' => $episode->season,
                         'episode_number' => $episode->episode_number,
                         'quality' => $quality,

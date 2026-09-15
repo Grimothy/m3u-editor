@@ -136,6 +136,16 @@ class DynamicGroupCacheDispatchService
             return false;
         }
 
+        // Cross-quality dedup (Phase 5: cache_avoid_duplicate_content toggle).
+        // When the rule opts in, skip dispatching if a Completed row already
+        // exists for this content identity (same movie tmdb_id) regardless of
+        // quality — matches the rule's helper-text intent ("Reuse the same
+        // cached file across multiple groups when content identity matches,
+        // instead of downloading once per group").
+        if ($this->isCrossQualityDuplicate($rule, 'movie', $tmdbId, null, null)) {
+            return false;
+        }
+
         $url = PlaylistUrlService::getChannelUrl($channel, $playlist);
         if (! $url) {
             return false;
@@ -170,6 +180,21 @@ class DynamicGroupCacheDispatchService
             return false;
         }
 
+        // Cross-quality dedup (Phase 5: cache_avoid_duplicate_content toggle).
+        // When the rule opts in, skip dispatching if a Completed row already
+        // exists for this content identity regardless of quality — matches
+        // the rule's helper-text intent ("Reuse the same cached file across
+        // multiple groups when content identity matches, instead of
+        // downloading once per group"). Episodes match on
+        // (content_type, tmdb_id, season_number, episode_number) so the
+        // series' tmdb_id + episode season/number uniquely identify the
+        // content. Cross-quality dedup is intentionally NOT the default —
+        // per the same helper text, opting in here shares a download across
+        // groups, so flipping it on should be a deliberate choice.
+        if ($this->isCrossQualityDuplicate($rule, 'episode', $tmdbId, $episode->season, $episode->episode_number)) {
+            return false;
+        }
+
         $url = PlaylistUrlService::getEpisodeUrl($episode, $playlist);
         if (! $url) {
             return false;
@@ -187,6 +212,50 @@ class DynamicGroupCacheDispatchService
     public function resolveQuality(array $rule): ?string
     {
         return $rule['cache_prefer_quality_keyword'] ?? null;
+    }
+
+    /**
+     * Cross-quality dedup gate for the `cache_avoid_duplicate_content`
+     * rule toggle. When that flag is true on a rule, a Completed
+     * CachedContentFile for the same content identity (same tmdb_id,
+     * same season+episode for episodes) — regardless of its quality or
+     * which DynamicGroup pinned it — is treated as "already served, do
+     * not dispatch a parallel download."
+     *
+     * Returns false when the rule doesn't opt in, so the default
+     * behavior (each rule caches its own quality bucket) is unchanged.
+     * Memory-efficient: a single indexed lookup keyed on (content_type,
+     * tmdb_id, season_number, episode_number); status filter is applied
+     * in PHP since status lives on the row.
+     */
+    public function isCrossQualityDuplicate(
+        array $rule,
+        string $contentType,
+        ?string $tmdbId,
+        ?int $seasonNumber,
+        ?int $episodeNumber,
+    ): bool {
+        if (! ($rule['cache_avoid_duplicate_content'] ?? false)) {
+            return false;
+        }
+
+        if ($tmdbId === null || $tmdbId === '') {
+            return false;
+        }
+
+        $query = CachedContentFile::query()
+            ->where('content_type', $contentType)
+            ->where('tmdb_id', $tmdbId)
+            ->where('season_number', $seasonNumber)
+            ->where('episode_number', $episodeNumber)
+            ->where('status', CachedContentFileStatus::Completed);
+
+        // limit(1) — we only need to know if ANY Completed row exists for
+        // the identity, not which one. EXISTS-style short-circuit keeps the
+        // per-rule cost at one row even when thousands of variants share
+        // the same tmdb_id (rare but possible if a 1080p + 4K variant
+        // both completed before dedup kicks in).
+        return $query->limit(1)->exists();
     }
 
     /**

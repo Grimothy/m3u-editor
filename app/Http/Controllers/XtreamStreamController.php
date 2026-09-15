@@ -355,7 +355,20 @@ class XtreamStreamController extends Controller
             // fires-and-forgets a download for cache misses (so the next
             // play benefits) while this play still flows through the
             // normal proxy/direct branches below.
-            if ($playlist->enable_proxy && $channel->tmdb_id !== null) {
+            //
+            // The whole cache-hit + lazy-dispatch path is gated on
+            // `enable_dynamic_group_cache`: when an admin flips the
+            // feature off, freshly-requested content should fall through
+            // to the normal proxy/direct branches and cached entries
+            // already on disk should not be served. Reading
+            // `GeneralSettings` once at the top of the branch (rather
+            // than re-resolving the singleton inside the lazy-trigger
+            // block, as it was before) ensures the cache-hit check and
+            // the lazy trigger observe the same setting value.
+            if ($playlist->enable_proxy
+                && $channel->tmdb_id !== null
+                && app(GeneralSettings::class)->enable_dynamic_group_cache
+            ) {
                 $tmdbId = (string) $channel->tmdb_id;
                 $dispatchService = app(DynamicGroupCacheDispatchService::class);
                 $cached = $dispatchService->findCompletedCache('movie', $tmdbId, null, null, null);
@@ -370,7 +383,7 @@ class XtreamStreamController extends Controller
                 }
 
                 $settings = app(GeneralSettings::class);
-                if ($settings->enable_dynamic_group_cache && $settings->dynamic_group_cache_lazy_load) {
+                if ($settings->dynamic_group_cache_lazy_load) {
                     $found = $dispatchService->findCacheableRuleForChannel($channel);
                     if ($found !== null) {
                         $fingerprint = CachedContentFile::fingerprintFor([
@@ -435,8 +448,13 @@ class XtreamStreamController extends Controller
             // check + lazy trigger pattern for Episodes. Uses the *series'*
             // tmdb_id (matches Phase 2's dispatcher) so a fingerprint
             // computed here matches what's already cached for the same
-            // content.
-            if ($playlist->enable_proxy) {
+            // content. Same `enable_dynamic_group_cache` gating as
+            // handleVod() — the whole cache-hit + lazy-dispatch path is
+            // skipped when the admin turns the feature off, so previously
+            // cached content is no longer served to fresh requests.
+            if ($playlist->enable_proxy
+                && app(GeneralSettings::class)->enable_dynamic_group_cache
+            ) {
                 $series = $episode->series;
                 if ($series && $series->tmdb_id !== null) {
                     $tmdbId = (string) $series->tmdb_id;
@@ -456,7 +474,7 @@ class XtreamStreamController extends Controller
                     }
 
                     $settings = app(GeneralSettings::class);
-                    if ($settings->enable_dynamic_group_cache && $settings->dynamic_group_cache_lazy_load) {
+                    if ($settings->dynamic_group_cache_lazy_load) {
                         $found = $dispatchService->findCacheableRuleForEpisode($episode);
                         if ($found !== null) {
                             $fingerprint = CachedContentFile::fingerprintFor([

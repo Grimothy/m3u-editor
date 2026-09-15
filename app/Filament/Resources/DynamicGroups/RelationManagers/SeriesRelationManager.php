@@ -195,6 +195,11 @@ class SeriesRelationManager extends RelationManager
      * tmdb_id-only on purpose: any quality variant of each episode's
      * cache row counts as "the cache for this series".
      *
+     * Scoped to the parent DynamicGroup's playlist's owner. Without this
+     * filter, a tmdb_id collision (two users caching the same series)
+     * would let either side see and act on the other's cached rows via
+     * the is_cached badge / Cache Now bulk action.
+     *
      * ponytail: one query per row render; for page-scale growth, switch
      * to a single WHERE IN grouped by series tmdb_id.
      */
@@ -205,9 +210,19 @@ class SeriesRelationManager extends RelationManager
             return collect();
         }
 
+        $playlist = $this->ownerRecord->playlist;
+        $ownerId = $playlist?->user_id;
+
         return CachedContentFile::query()
             ->where('content_type', 'episode')
             ->where('tmdb_id', $tmdbId)
+            ->when(
+                $ownerId !== null,
+                fn ($q) => $q->whereHas(
+                    'dynamicGroups.playlist',
+                    fn ($pq) => $pq->where('user_id', $ownerId),
+                ),
+            )
             ->get();
     }
 

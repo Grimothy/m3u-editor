@@ -40,6 +40,13 @@ beforeEach(function () {
     app(GeneralSettings::class)->enable_dynamic_group_cache = true;
     app(GeneralSettings::class)->save();
     app(GeneralSettings::class)->refresh();
+
+    // Authenticate as an admin by default so the widget's
+    // `ownedByUser(...)` filter is bypassed for the existing row/bulk
+    // action tests. Tests that exercise the non-admin ownership path
+    // override this by re-actingAs($nonAdmin) inside the test body.
+    $this->admin = User::factory()->create(['is_admin' => true]);
+    $this->actingAs($this->admin);
 });
 
 it('canView() returns false when caching is disabled', function () {
@@ -304,20 +311,20 @@ it('falls back to the legacy "type: tmdb N" label for episode rows (Series-side)
         ->assertSee('episode: tmdb 1399 S1E3');
 });
 
-it('renders series episode titles with the em-dash separator (Series-side)', function () {
-    // The TMDB-format title for an episode: "Breaking Bad — Pilot"
+it('renders series episode titles with the colon separator (Series-side)', function () {
+    // The TMDB-format title for an episode: "Breaking Bad: Pilot"
     $episode = CachedContentFile::factory()->downloading(
         downloaded: 100_000_000, expected: 1_000_000_000,
     )->create([
         'content_type' => 'episode', 'tmdb_id' => '1396',
         'season_number' => 1, 'episode_number' => 1,
-        'title' => 'Breaking Bad — Pilot',
+        'title' => 'Breaking Bad: Pilot',
     ]);
 
     Livewire::test(SeriesDynamicGroupCacheActivityWidget::class)
         ->assertOk()
         ->loadTable()
-        ->assertSee('Breaking Bad — Pilot');
+        ->assertSee('Breaking Bad: Pilot');
 });
 
 it('getContentLabel() returns the title field directly when set, regardless of content_type', function () {
@@ -1038,3 +1045,316 @@ it('Bulk Retry dispatches one DownloadCachedContentFile job per Failed row, skip
 
     Bus::assertDispatchedTimes(DownloadCachedContentFile::class, 2);
 });
+
+// --- Per-user ownership scoping (regression: CachedContentFile has no user_id) ---
+
+it('canView() returns false for a non-admin when only another user\'s rows exist', function () {
+    // Non-admin user has zero rows; the other user has one. The widget
+    // must not show another user's activity as a non-admin.
+    $otherUser = User::factory()->create(['is_admin' => false]);
+    $me = User::factory()->create(['is_admin' => false]);
+    $playlist = Playlist::factory()->for($otherUser)->create([
+        'enable_proxy' => true, 'available_streams' => 0,
+    ]);
+    $group = DynamicGroup::create([
+        'playlist_id' => $playlist->id, 'user_id' => $otherUser->id,
+        'type' => 'vod', 'source' => 'trending', 'name' => 'Other',
+    ]);
+    $file = CachedContentFile::factory()->completed()->create([
+        'content_type' => 'movie', 'tmdb_id' => '550',
+    ]);
+    $file->dynamicGroups()->attach($group);
+
+    $this->actingAs($me);
+    expect(VodDynamicGroupCacheActivityWidget::canView())->toBeFalse();
+});
+
+it('canView() returns true for a non-admin when they own at least one row', function () {
+    $me = User::factory()->create(['is_admin' => false]);
+    $playlist = Playlist::factory()->for($me)->create([
+        'enable_proxy' => true, 'available_streams' => 0,
+    ]);
+    $group = DynamicGroup::create([
+        'playlist_id' => $playlist->id, 'user_id' => $me->id,
+        'type' => 'vod', 'source' => 'trending', 'name' => 'Mine',
+    ]);
+    $file = CachedContentFile::factory()->completed()->create([
+        'content_type' => 'movie', 'tmdb_id' => '550',
+    ]);
+    $file->dynamicGroups()->attach($group);
+
+    $this->actingAs($me);
+    expect(VodDynamicGroupCacheActivityWidget::canView())->toBeTrue();
+});
+
+it('canView() returns true for an admin even when they own no rows (sees everything)', function () {
+    // Admin needs zero of their own rows to see the widget — they see
+    // every user's activity.
+    $admin = User::factory()->create(['is_admin' => true]);
+    $otherUser = User::factory()->create(['is_admin' => false]);
+    $playlist = Playlist::factory()->for($otherUser)->create([
+        'enable_proxy' => true, 'available_streams' => 0,
+    ]);
+    $group = DynamicGroup::create([
+        'playlist_id' => $playlist->id, 'user_id' => $otherUser->id,
+        'type' => 'vod', 'source' => 'trending', 'name' => 'Other',
+    ]);
+    $file = CachedContentFile::factory()->completed()->create([
+        'content_type' => 'movie', 'tmdb_id' => '550',
+    ]);
+    $file->dynamicGroups()->attach($group);
+
+    $this->actingAs($admin);
+    expect(VodDynamicGroupCacheActivityWidget::canView())->toBeTrue();
+});
+
+it('the widget table() only shows the calling user\'s rows for a non-admin', function () {
+    // Two users each cache a movie. Non-admin A only sees their own row.
+    $userA = User::factory()->create(['is_admin' => false]);
+    $userB = User::factory()->create(['is_admin' => false]);
+    [$playlistA, $groupA] = seedUserVodSetup($userA);
+    [$playlistB, $groupB] = seedUserVodSetup($userB);
+
+    $fileA = CachedContentFile::factory()->completed()->create([
+        'content_type' => 'movie', 'tmdb_id' => '600',
+    ]);
+    $fileB = CachedContentFile::factory()->completed()->create([
+        'content_type' => 'movie', 'tmdb_id' => '601',
+    ]);
+    $fileA->dynamicGroups()->attach($groupA);
+    $fileB->dynamicGroups()->attach($groupB);
+
+    $this->actingAs($userA);
+    $rows = Livewire::test(VodDynamicGroupCacheActivityWidget::class)
+        ->loadTable()
+        ->instance()
+        ->getTable()
+        ->getRecords();
+    $ids = $rows->pluck('id')->all();
+    expect($ids)->toContain($fileA->id)
+        ->and($ids)->not->toContain($fileB->id);
+});
+
+it('retryCachedFile() refuses to act on rows the caller does not own', function () {
+    // User A's file, user B trying to retry. retryCachedFile is the
+    // public static entry point used by both per-row + bulk handlers —
+    // any caller (widget, relation manager, future surface) is gated
+    // here. No job should dispatch, no row mutation, the call returns
+    // false so the widget's "Could not retry" notification fires.
+    Bus::fake();
+
+    $userA = User::factory()->create(['is_admin' => false]);
+    $userB = User::factory()->create(['is_admin' => false]);
+    [$playlistA, $groupA] = seedUserVodSetup($userA);
+    $channel = Channel::factory()->for($playlistA)->create([
+        'is_vod' => true, 'tmdb_id' => 700, 'url' => 'http://example.com/m.mp4',
+    ]);
+
+    $fileA = CachedContentFile::factory()->failed()->create([
+        'content_type' => 'movie', 'tmdb_id' => '700',
+    ]);
+    $fileA->dynamicGroups()->attach($groupA);
+
+    $this->actingAs($userB);
+    $result = VodDynamicGroupCacheActivityWidget::retryCachedFile($fileA);
+
+    expect($result)->toBeFalse();
+    Bus::assertNotDispatched(DownloadCachedContentFile::class);
+    // The row is untouched: status still Failed, no zeroed counters.
+    $fileA->refresh();
+    expect($fileA->status)->toBe(CachedContentFileStatus::Failed)
+        ->and($fileA->failure_count)->toBeGreaterThan(0);
+});
+
+it('retryCachedFile() acts on rows when the caller is an admin (sees every user)', function () {
+    // Mirror of the previous test but with the admin caller — same row,
+    // different actor, opposite outcome. The point is the admin bypass
+    // works through the widget's static helper, not just the SQL scope.
+    Bus::fake();
+
+    $userA = User::factory()->create(['is_admin' => false]);
+    $admin = User::factory()->create(['is_admin' => true]);
+    [$playlistA, $groupA] = seedUserVodSetup($userA);
+    Channel::factory()->for($playlistA)->create([
+        'is_vod' => true, 'tmdb_id' => 701, 'url' => 'http://example.com/m.mp4',
+    ]);
+
+    $file = CachedContentFile::factory()->failed()->create([
+        'content_type' => 'movie', 'tmdb_id' => '701',
+    ]);
+    $file->dynamicGroups()->attach($groupA);
+
+    $this->actingAs($admin);
+    $result = VodDynamicGroupCacheActivityWidget::retryCachedFile($file);
+
+    expect($result)->toBeTrue();
+    Bus::assertDispatched(DownloadCachedContentFile::class);
+});
+
+it('deleteCachedFile() refuses to delete rows the caller does not own', function () {
+    Storage::fake('local');
+    config()->set('filesystems.default', 'local');
+
+    $userA = User::factory()->create(['is_admin' => false]);
+    $userB = User::factory()->create(['is_admin' => false]);
+    [$playlistA, $groupA] = seedUserVodSetup($userA);
+
+    $fileA = CachedContentFile::factory()->completed()->create([
+        'content_type' => 'movie', 'tmdb_id' => '800',
+        'file_path' => 'cache/movie:800::::.mp4',
+    ]);
+    Storage::disk('local')->put('cache/movie:800::::.mp4', 'bytes');
+    $fileA->dynamicGroups()->attach($groupA);
+
+    $this->actingAs($userB);
+    VodDynamicGroupCacheActivityWidget::deleteCachedFile($fileA);
+
+    // Row + file both untouched: the helper no-ops on non-owned rows.
+    expect(CachedContentFile::find($fileA->id))->not->toBeNull()
+        ->and(Storage::disk('local')->exists('cache/movie:800::::.mp4'))->toBeTrue();
+});
+
+it('deleteCachedFile() acts on rows when the caller is an admin', function () {
+    Storage::fake('local');
+    config()->set('filesystems.default', 'local');
+
+    $userA = User::factory()->create(['is_admin' => false]);
+    $admin = User::factory()->create(['is_admin' => true]);
+    [$playlistA, $groupA] = seedUserVodSetup($userA);
+
+    $file = CachedContentFile::factory()->completed()->create([
+        'content_type' => 'movie', 'tmdb_id' => '801',
+        'file_path' => 'cache/movie:801::::.mp4',
+    ]);
+    Storage::disk('local')->put('cache/movie:801::::.mp4', 'bytes');
+    $file->dynamicGroups()->attach($groupA);
+
+    $this->actingAs($admin);
+    VodDynamicGroupCacheActivityWidget::deleteCachedFile($file);
+
+    expect(CachedContentFile::find($file->id))->toBeNull()
+        ->and(Storage::disk('local')->exists('cache/movie:801::::.mp4'))->toBeFalse();
+});
+
+it('bulkRetry only acts on the caller\'s own Failed rows; other users\' rows are skipped', function () {
+    // Selecting a mix of own + other-user rows in a single bulk action
+    // must result in jobs dispatched only for own Failed rows. The
+    // other-user rows silently no-op (no throw, no dispatch, no
+    // notification saying "skipped" — the operator selected rows the
+    // widget shouldn't have shown them in the first place; the action
+    // handler's filter just drops them).
+    Bus::fake();
+
+    $userA = User::factory()->create(['is_admin' => false]);
+    $userB = User::factory()->create(['is_admin' => false]);
+    [$playlistA, $groupA] = seedUserVodSetup($userA);
+    [$playlistB, $groupB] = seedUserVodSetup($userB);
+    Channel::factory()->for($playlistA)->create([
+        'is_vod' => true, 'tmdb_id' => 900, 'url' => 'http://example.com/a.mp4',
+    ]);
+    Channel::factory()->for($playlistB)->create([
+        'is_vod' => true, 'tmdb_id' => 901, 'url' => 'http://example.com/b.mp4',
+    ]);
+
+    $ownFailed = CachedContentFile::factory()->failed()->create([
+        'content_type' => 'movie', 'tmdb_id' => '900',
+    ]);
+    $otherFailed = CachedContentFile::factory()->failed()->create([
+        'content_type' => 'movie', 'tmdb_id' => '901',
+    ]);
+    $ownFailed->dynamicGroups()->attach($groupA);
+    $otherFailed->dynamicGroups()->attach($groupB);
+
+    $this->actingAs($userA);
+    Livewire::test(VodDynamicGroupCacheActivityWidget::class)
+        ->assertOk()
+        ->loadTable()
+        ->callTableBulkAction('bulkRetry', [$ownFailed, $otherFailed]);
+
+    // Exactly one job dispatched — for the caller-owned Failed row.
+    // The other user's row was silently filtered out before the
+    // dispatch loop, so retryCachedFile() never even got called for it.
+    Bus::assertDispatchedTimes(DownloadCachedContentFile::class, 1);
+    Bus::assertDispatched(
+        DownloadCachedContentFile::class,
+        fn (DownloadCachedContentFile $job) => $job->tmdbId === '900',
+    );
+});
+
+it('bulkDelete only acts on the caller\'s own rows; other users\' rows are untouched', function () {
+    Storage::fake('local');
+    config()->set('filesystems.default', 'local');
+
+    $userA = User::factory()->create(['is_admin' => false]);
+    $userB = User::factory()->create(['is_admin' => false]);
+    [$playlistA, $groupA] = seedUserVodSetup($userA);
+    [$playlistB, $groupB] = seedUserVodSetup($userB);
+
+    $own = CachedContentFile::factory()->completed()->create([
+        'content_type' => 'movie', 'tmdb_id' => '950',
+        'file_path' => 'cache/movie:950::::.mp4',
+    ]);
+    $other = CachedContentFile::factory()->completed()->create([
+        'content_type' => 'movie', 'tmdb_id' => '951',
+        'file_path' => 'cache/movie:951::::.mp4',
+    ]);
+    Storage::disk('local')->put('cache/movie:950::::.mp4', 'a');
+    Storage::disk('local')->put('cache/movie:951::::.mp4', 'b');
+    $own->dynamicGroups()->attach($groupA);
+    $other->dynamicGroups()->attach($groupB);
+
+    $this->actingAs($userA);
+    Livewire::test(VodDynamicGroupCacheActivityWidget::class)
+        ->assertOk()
+        ->loadTable()
+        ->callTableBulkAction('bulkDelete', [$own, $other]);
+
+    expect(CachedContentFile::find($own->id))->toBeNull()
+        ->and(Storage::disk('local')->exists('cache/movie:950::::.mp4'))->toBeFalse()
+        // Other user's row + file untouched.
+        ->and(CachedContentFile::find($other->id))->not->toBeNull()
+        ->and(Storage::disk('local')->exists('cache/movie:951::::.mp4'))->toBeTrue();
+});
+
+it('hasCacheActivity() returns false for a non-admin when only another user has rows', function () {
+    // Mirrors canView() at the helper level — the section's
+    // default-collapsed state should follow the same ownership filter.
+    $otherUser = User::factory()->create(['is_admin' => false]);
+    $me = User::factory()->create(['is_admin' => false]);
+    $playlist = Playlist::factory()->for($otherUser)->create([
+        'enable_proxy' => true, 'available_streams' => 0,
+    ]);
+    $group = DynamicGroup::create([
+        'playlist_id' => $playlist->id, 'user_id' => $otherUser->id,
+        'type' => 'vod', 'source' => 'trending', 'name' => 'Other',
+    ]);
+    $file = CachedContentFile::factory()->completed()->create([
+        'content_type' => 'movie', 'tmdb_id' => '550',
+    ]);
+    $file->dynamicGroups()->attach($group);
+
+    $this->actingAs($me);
+    $has = (new ReflectionMethod(VodDynamicGroupCacheActivityWidget::class, 'hasCacheActivity'))
+        ->invoke(app(VodDynamicGroupCacheActivityWidget::class));
+
+    expect($has)->toBeFalse();
+});
+
+/**
+ * Seed a VOD-type DynamicGroup + Playlist for the given user, return
+ * [$playlist, $group]. Used by the ownership tests above.
+ *
+ * @return array{0: Playlist, 1: DynamicGroup}
+ */
+function seedUserVodSetup(User $user): array
+{
+    $playlist = Playlist::factory()->for($user)->create([
+        'enable_proxy' => true, 'available_streams' => 0,
+    ]);
+    $group = DynamicGroup::create([
+        'playlist_id' => $playlist->id, 'user_id' => $user->id,
+        'type' => 'vod', 'source' => 'trending', 'name' => 'Group',
+    ]);
+
+    return [$playlist, $group];
+}

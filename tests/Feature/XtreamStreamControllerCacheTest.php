@@ -41,6 +41,18 @@ beforeEach(function () {
     // false when the owning user can't use proxy. Make admin user + enable
     // the global proxy feature so the accessor returns the DB value.
     config(['proxy.proxy_integration_enabled' => true]);
+
+    // The cache-hit + lazy-dispatch branch in XtreamStreamController is
+    // gated on the `enable_dynamic_group_cache` setting (Bug 1 fix —
+    // previously only the lazy trigger was gated, so cached files kept
+    // streaming after the feature was turned off). Mutate the in-memory
+    // singleton directly: the controller reads from `app(GeneralSettings::class)`
+    // on every request, so persisting to disk isn't required for the
+    // request-scoped test path. (`save()` here would also force a write
+    // of every other property on the singleton, which spatie validates
+    // against a fully-loaded state and rejects mid-test.)
+    app(GeneralSettings::class)->enable_dynamic_group_cache = true;
+
     $this->user = User::factory()->create(['is_admin' => true]);
     $this->playlist = Playlist::factory()->for($this->user)->create([
         'enable_proxy' => true,
@@ -196,6 +208,78 @@ it('does not dispatch when the channel has no tmdb_id (lazy can\'t fingerprint w
 
     $this->get("/movie/{$this->user->name}/{$this->playlist->uuid}/{$this->channel->id}.ts");
 
+    Bus::assertNotDispatched(DownloadCachedContentFile::class);
+});
+
+it('does not serve a cache hit when enable_dynamic_group_cache is disabled (VOD)', function () {
+    // Regression for PR #1500 Bug 1: the cache-hit read in handleVod()
+    // ran before the enable_dynamic_group_cache check, so disabling the
+    // setting left playback still serving stale cached files. Now the
+    // gate wraps both the cache check and the lazy trigger — with the
+    // feature off, a Completed row is ignored and the request falls
+    // through to the normal proxy/direct branch (or, with no proxy, a
+    // 403 from the standard auth gate).
+    app(GeneralSettings::class)->enable_dynamic_group_cache = false;
+
+    $file = CachedContentFile::factory()->completed()->create([
+        'content_type' => 'movie',
+        'tmdb_id' => '550',
+        'quality' => null,
+    ]);
+
+    $response = $this->get("/movie/{$this->user->name}/{$this->playlist->uuid}/{$this->channel->id}.ts");
+
+    $location = $response->headers->get('Location') ?? '';
+    expect($location)->not->toContain($file->uuid)
+        ->and($location)->not->toContain('cached-content');
+    Bus::assertNotDispatched(DownloadCachedContentFile::class);
+});
+
+it('does not serve a cache hit when enable_dynamic_group_cache is disabled (episode)', function () {
+    // Same regression as the VOD test, but exercised through
+    // handleSeries() so the second copy of the gate is also covered.
+    $series = Series::factory()->for($this->playlist)->create([
+        'enabled' => true,
+        'tmdb_id' => 1399,
+    ]);
+    $seriesGroup = DynamicGroup::create([
+        'playlist_id' => $this->playlist->id,
+        'user_id' => $this->user->id,
+        'type' => 'series',
+        'source' => 'tmdb',
+        'name' => 'Top Series',
+    ]);
+    $series->dynamicGroups()->attach($seriesGroup->id);
+
+    $this->playlist->update([
+        'dynamic_groups_config' => [
+            ['name' => 'Top Series', 'cache_enabled' => true],
+        ],
+    ]);
+
+    $season = Season::factory()->for($this->playlist)->for($series)->create([
+        'season_number' => 1,
+    ]);
+    $episode = Episode::factory()->for($this->playlist)->for($series)->for($season)->create([
+        'season' => 1,
+        'episode_num' => 1,
+    ]);
+
+    // Feature off, but a Completed cache row exists.
+    app(GeneralSettings::class)->enable_dynamic_group_cache = false;
+
+    $file = CachedContentFile::factory()->completed()->create([
+        'content_type' => 'episode',
+        'tmdb_id' => '1399',
+        'season_number' => 1,
+        'episode_number' => 1,
+    ]);
+
+    $response = $this->get("/series/{$this->user->name}/{$this->playlist->uuid}/{$episode->id}.mp4");
+
+    $location = $response->headers->get('Location') ?? '';
+    expect($location)->not->toContain($file->uuid)
+        ->and($location)->not->toContain('cached-content');
     Bus::assertNotDispatched(DownloadCachedContentFile::class);
 });
 

@@ -296,6 +296,13 @@ class ChannelsRelationManager extends RelationManager
      * and the same action's handler. tmdb_id-only on purpose: any quality
      * variant of the cache row counts as "the cache for this movie".
      *
+     * Scoped to the parent DynamicGroup's playlist's owner. Without this
+     * filter, a tmdb_id collision (two users caching the same movie)
+     * would let either side cancel/delete the other's cached row. The
+     * relation manager's parent record is already a single DynamicGroup,
+     * so the playlist and its user_id uniquely identify which user's
+     * cache row to read — no admin-bypass needed here.
+     *
      * ponytail: one query per row render; if page scale grows, switch to
      * a single WHERE IN over the visible page's tmdb_ids.
      */
@@ -306,9 +313,19 @@ class ChannelsRelationManager extends RelationManager
             return null;
         }
 
+        $playlist = $this->ownerRecord->playlist;
+        $ownerId = $playlist?->user_id;
+
         return CachedContentFile::query()
             ->where('content_type', 'movie')
             ->where('tmdb_id', (string) $tmdbId)
+            ->when(
+                $ownerId !== null,
+                fn ($q) => $q->whereHas(
+                    'dynamicGroups.playlist',
+                    fn ($pq) => $pq->where('user_id', $ownerId),
+                ),
+            )
             ->first();
     }
 }

@@ -18,14 +18,14 @@ use Illuminate\Support\Facades\Log;
  *  - Content already completed in CachedContentFile (dedup)
  *  - Content with a Failed row in cooldown
  *  - cache_content_selection='select' with no IDs picked yet (treated as
- *    "user hasn't picked anything" — better to skip than silently cache all)
+ *    "user hasn't picked anything" - better to skip than silently cache all)
  *
  * Run on a tight Laravel schedule (every 2 min via routes/console.php); the
  * command itself checks the user-configurable cron string via CronExpression::isDue().
  *
  * Dedup, fingerprint, dispatch, and quality resolution are owned by
  * DynamicGroupCacheDispatchService so the playback-time lazy trigger
- * (Phase 3 — `XtreamStreamController`) shares the same implementation.
+ * (Phase 3 - `XtreamStreamController`) shares the same implementation.
  * This command retains only the scheduled-dispatch-specific orchestration:
  * the cron gate, the cursor-over-playlists loop, the recency-window
  * filter (`cache_content_selection === 'recent'`), and the
@@ -66,7 +66,7 @@ class CacheDynamicGroupContent extends Command
         $count = 0;
         $skipped = 0;
 
-        // Cursor, never ->all()/->get() — playlist table grows with users.
+        // Cursor, never ->all()/->get() - playlist table grows with users.
         Playlist::query()
             ->where('enable_proxy', true)
             ->whereNotNull('dynamic_groups_config')
@@ -85,7 +85,7 @@ class CacheDynamicGroupContent extends Command
 
                     $selection = $rule['cache_content_selection'] ?? 'all';
                     if ($selection === 'select') {
-                        // Phase 4: when 'select' is chosen, we DO iterate — but only the
+                        // Phase 4: when 'select' is chosen, we DO iterate - but only the
                         // membership subset the user picked in the picker
                         // (`cache_selected_content_ids`). An empty array means "the user
                         // hasn't picked anything yet" → skip the rule entirely rather
@@ -119,7 +119,7 @@ class CacheDynamicGroupContent extends Command
      * row(s) and dispatch a DownloadCachedContentFile job for each eligible item.
      *
      * The recency filter (`cache_content_selection === 'recent'`) is
-     * scheduled-dispatch-specific — the playback-time lazy trigger does
+     * scheduled-dispatch-specific - the playback-time lazy trigger does
      * not apply it (the user is explicitly watching the content, so
      * "within X days" doesn't apply).
      *
@@ -147,7 +147,7 @@ class CacheDynamicGroupContent extends Command
         $days = (int) ($rule['cache_content_days'] ?? 30);
 
         // Normalize selection to an int-keyed set for cheap `in_array` lookups
-        // — string IDs sneak in if a user hand-edited the JSON column.
+        // - string IDs sneak in if a user hand-edited the JSON column.
         $selectedSet = $selectedIds === null
             ? null
             : array_fill_keys(array_map('intval', $selectedIds), true);
@@ -193,7 +193,7 @@ class CacheDynamicGroupContent extends Command
 
     /**
      * True when `$releaseDate` parses and falls within the last `$days` days.
-     * Returns false for null / unparseable — the recency filter is opt-in via
+     * Returns false for null / unparseable - the recency filter is opt-in via
      * `cache_content_selection === 'recent'`, and a missing release date for
      * a "recent only" rule means "exclude" (no evidence it actually aired
      * within the window).
