@@ -84,7 +84,7 @@ class MergeChannels implements ShouldQueue
      * Transient VOD resolution cache keyed by channel id. Each entry records the
      * resolved vertical resolution (2160/1440/1080/720/576/480) and its source
      * ('probed' from stored stream_stats, or 'title'/'name'/'url' from filename
-     * parsing). In-memory only — never persisted to the database.
+     * parsing). In-memory only; never persisted to the database.
      *
      * @var array<int, array{resolution: int, source: string}>
      */
@@ -229,8 +229,11 @@ class MergeChannels implements ShouldQueue
             return;
         }
 
+        // Note: this is independent of the playlist-level auto_probe_vod_streams toggle.
+        // The user has explicitly opted in to filename-resolution verification, so we
+        // dispatch the probe regardless of the bulk probe setting.
         $playlist = Playlist::find($this->playlistId);
-        if (! $playlist || ! $playlist->auto_probe_vod_streams) {
+        if (! $playlist) {
             return;
         }
 
@@ -255,7 +258,7 @@ class MergeChannels implements ShouldQueue
 
             Log::info('MergeChannels: Queued VOD resolution verification probe for '.count($channelIds).' channel(s).');
         } catch (Throwable $e) {
-            Log::warning("MergeChannels: Failed to queue VOD resolution verification probe — {$e->getMessage()}");
+            Log::warning("MergeChannels: Failed to queue VOD resolution verification probe - {$e->getMessage()}");
         }
     }
 
@@ -551,6 +554,13 @@ class MergeChannels implements ShouldQueue
      */
     protected function selectMasterChannel(Collection $group, array $playlistPriority): ?Channel
     {
+        // Hydrate resolutions for the FULL unfiltered group so any later failover
+        // candidate excluded from master selection (disabled-group / scrubber-dead)
+        // still has a cache entry and ranks correctly when it becomes a failover.
+        if ($this->vodResolutionPriorityEnabled()) {
+            $this->hydrateVodResolutions($group);
+        }
+
         // Filter out channels from disabled groups if enabled.
         // When the user opted in to exclude_disabled_groups, we must NOT fall back
         // to the unfiltered group: that would silently pick (and later re-enable)
@@ -700,9 +710,9 @@ class MergeChannels implements ShouldQueue
             }
         }
 
-        if ($this->vodResolutionPriorityEnabled()) {
-            $this->hydrateVodResolutions($group);
-        }
+        // hydrateVodResolutions is invoked by selectMasterChannel() on the full
+        // (unfiltered) group, so failover candidates excluded from master selection
+        // still get a cache entry. Do not re-hydrate here.
 
         $scoredChannels = $group->map(function ($channel) use ($playlistPriority) {
             return [

@@ -234,11 +234,11 @@ class SyncListener
             deactivateFailoverChannels: $deactivateFailover,
             forceCompleteRemerge: $forceCompleteRemerge,
             preferCatchupAsPrimary: $preferCatchupAsPrimary,
-            weightedConfig: self::buildWeightedConfig($config, ($config['merge_key'] ?? 'stream_id') === 'tmdb_id' ? 'vod' : 'live'),
+            weightedConfig: self::buildWeightedConfig($config, PlaylistService::vodContentTypeForMergeConfig($config)),
             newChannelsOnly: $newChannelsOnly,
             regexPatterns: ! empty($config['regex_patterns'] ?? []) ? $config['regex_patterns'] : null,
             fallbackMergeConfig: PlaylistService::buildMergeFallbackConfig($config),
-            contentType: ($config['merge_key'] ?? 'stream_id') === 'tmdb_id' ? 'vod' : 'live',
+            contentType: PlaylistService::vodContentTypeForMergeConfig($config),
             mergeKey: $config['merge_key'] ?? 'stream_id',
             scrubberAwareMasterSelection: $scrubberAwareMasterSelection,
         );
@@ -250,7 +250,7 @@ class SyncListener
     private static function buildWeightedConfig(array $config, string $contentType = 'live'): ?array
     {
         $isVod = $contentType === 'vod';
-        $vodResolutionPriorityEnabled = $isVod && ($config['vod_resolution_priority_enabled'] ?? true);
+        $vodResolutionPriorityEnabled = $isVod && ($config['vod_resolution_priority_enabled'] ?? false);
 
         $hasWeightedOptions = ! empty($config['priority_attributes'])
             || ! empty($config['group_priorities'])

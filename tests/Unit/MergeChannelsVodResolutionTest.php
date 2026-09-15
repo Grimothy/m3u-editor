@@ -3,6 +3,7 @@
 use App\Jobs\MergeChannels;
 use App\Jobs\ProbeStreamsChunk;
 use App\Models\Channel;
+use App\Models\Group;
 use App\Models\Playlist;
 use App\Models\User;
 use App\Services\PlaylistService;
@@ -225,4 +226,111 @@ it('does not queue an ffprobe for filename-derived resolution by default', funct
     ]), $playlist1->id, $weightedConfig);
 
     Bus::assertNotDispatched(ProbeStreamsChunk::class);
+});
+
+it('queues a verification probe even when the playlist-level auto_probe_vod_streams is disabled', function () {
+    // Regression: the user has explicitly opted in to filename-resolution
+    // verification, so the probe must run regardless of the bulk auto-probe
+    // setting. Only the vod_verify_filename_via_probe toggle should gate it.
+    $user = User::factory()->create();
+    $playlist1 = Playlist::factory()->for($user)->createQuietly(['auto_probe_vod_streams' => false]);
+    $playlist2 = Playlist::factory()->for($user)->createQuietly(['auto_probe_vod_streams' => false]);
+
+    $sevenTwentyP = Channel::factory()->create([
+        'is_vod' => true,
+        'tmdb_id' => 12345,
+        'stream_id' => 'provider-a-1',
+        'name' => 'Movie.720p',
+        'user_id' => $user->id,
+        'playlist_id' => $playlist1->id,
+        'group_id' => null,
+        'enabled' => true,
+        'can_merge' => true,
+    ]);
+
+    $fourK = Channel::factory()->create([
+        'is_vod' => true,
+        'tmdb_id' => 12345,
+        'stream_id' => 'provider-b-2',
+        'name' => 'Movie.4K.UHD',
+        'user_id' => $user->id,
+        'playlist_id' => $playlist2->id,
+        'group_id' => null,
+        'enabled' => true,
+        'can_merge' => true,
+    ]);
+
+    $weightedConfig = PlaylistService::buildMergeWeightedConfig([
+        'vod_resolution_priority_enabled' => true,
+        'vod_use_filename_resolution' => true,
+        'vod_verify_filename_via_probe' => true,
+    ], 'vod');
+
+    runVodMerge($user, collect([
+        ['playlist_failover_id' => $playlist1->id],
+        ['playlist_failover_id' => $playlist2->id],
+    ]), $playlist1->id, $weightedConfig);
+
+    Bus::assertDispatched(ProbeStreamsChunk::class, function ($job) use ($sevenTwentyP, $fourK) {
+        return in_array($sevenTwentyP->id, $job->channelIds, true)
+            && in_array($fourK->id, $job->channelIds, true);
+    });
+});
+
+it('hydrates the VOD resolution cache for the full unfiltered group so failover candidates excluded from master selection still resolve', function () {
+    // Regression: a channel excluded by exclude_disabled_groups from master
+    // selection must still score correctly when it later becomes a failover.
+    $user = User::factory()->create();
+    $group = Group::factory()->for($user)->create([
+        'playlist_id' => Playlist::factory()->for($user)->createQuietly()->id,
+        'enabled' => true,
+    ]);
+    $playlist1 = Playlist::factory()->for($user)->createQuietly();
+    $playlist2 = Playlist::factory()->for($user)->createQuietly();
+
+    // Master candidate: in the disabled group.
+    $candidate = Channel::factory()->create([
+        'is_vod' => true,
+        'tmdb_id' => 99999,
+        'stream_id' => 'a',
+        'name' => 'Movie.720p',
+        'user_id' => $user->id,
+        'playlist_id' => $playlist1->id,
+        'group_id' => $group->id,
+        'enabled' => true,
+        'can_merge' => true,
+    ]);
+
+    // Failover candidate: in a separate (enabled) group, should still get a cache entry.
+    $failover = Channel::factory()->create([
+        'is_vod' => true,
+        'tmdb_id' => 99999,
+        'stream_id' => 'b',
+        'name' => 'Movie.4K.UHD',
+        'user_id' => $user->id,
+        'playlist_id' => $playlist2->id,
+        'group_id' => null,
+        'enabled' => true,
+        'can_merge' => true,
+    ]);
+
+    // Keep only the disabled-group candidate to force exclude_disabled_groups
+    // to drop it from master selection, leaving the 4K variant as the only master.
+    $weightedConfig = PlaylistService::buildMergeWeightedConfig([
+        'vod_resolution_priority_enabled' => true,
+        'vod_use_filename_resolution' => true,
+        'exclude_disabled_groups' => true,
+    ], 'vod');
+
+    runVodMerge($user, collect([
+        ['playlist_failover_id' => $playlist1->id],
+        ['playlist_failover_id' => $playlist2->id],
+    ]), $playlist1->id, $weightedConfig);
+
+    // The 4K failover should be the master, since the 720p is in a disabled group.
+    $this->assertDatabaseHas('channel_failovers', [
+        'channel_id' => $failover->id,
+        'channel_failover_id' => $candidate->id,
+        'sort' => 1,
+    ]);
 });

@@ -10,9 +10,13 @@ use App\Models\Channel;
  * Extracts a VOD channel's vertical resolution (2160/1440/1080/720/576/480)
  * for resolution-aware movie merge scoring.
  *
- * Priority: probed stream_stats → title → name → url. This never triggers a
- * live ffprobe — it only reads already-stored stream_stats and the channel's
+ * Priority: probed stream_stats -> title -> name -> url. This never triggers a
+ * live ffprobe; it only reads already-stored stream_stats and the channel's
  * title/name/url strings, so it is safe to call during the merge pass.
+ *
+ * Custom overrides (`title_custom`, `name_custom`, `url_custom`) are preferred
+ * over their base fields when non-empty, matching the resolver pattern used
+ * elsewhere in MergeChannels so user-edited metadata always wins.
  */
 class VodResolutionExtractor
 {
@@ -29,8 +33,8 @@ class VodResolutionExtractor
         $parser = app(AioStreamsQualityParser::class);
 
         foreach (['title', 'name', 'url'] as $field) {
-            $value = $channel->{$field};
-            if (! is_string($value) || trim($value) === '') {
+            $value = self::resolveFieldValue($channel, $field);
+            if ($value === null) {
                 continue;
             }
 
@@ -41,6 +45,24 @@ class VodResolutionExtractor
         }
 
         return null;
+    }
+
+    /**
+     * Pick the user-edited ("custom") override when it is set; otherwise fall back
+     * to the base field. Returns null for empty/whitespace strings so callers can
+     * skip the parser instead of asking it to parse an empty value.
+     */
+    private static function resolveFieldValue(Channel $channel, string $field): ?string
+    {
+        $customKey = $field.'_custom';
+        $custom = $channel->{$customKey};
+        if (is_string($custom) && trim($custom) !== '') {
+            return $custom;
+        }
+
+        $value = $channel->{$field};
+
+        return is_string($value) && trim($value) !== '' ? $value : null;
     }
 
     /**

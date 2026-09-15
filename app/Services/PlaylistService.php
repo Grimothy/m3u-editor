@@ -1238,7 +1238,7 @@ class PlaylistService
                     Toggle::make('vod_resolution_priority_enabled')
                         ->label(__('Promote higher-resolution duplicate when same TMDB ID found'))
                         ->inline(false)
-                        ->default(true)
+                        ->default(false)
                         ->helperText(__('When enabled, the higher-resolution duplicate becomes the master when the same TMDB ID appears at multiple resolutions.')),
                     Toggle::make('vod_use_filename_resolution')
                         ->label(__('Parse resolution from title/URL when ffprobe data is missing'))
@@ -1439,7 +1439,7 @@ class PlaylistService
             ->toArray();
 
         $isVod = $contentType === 'vod';
-        $vodResolutionPriorityEnabled = $isVod && ($data['vod_resolution_priority_enabled'] ?? true);
+        $vodResolutionPriorityEnabled = $isVod && ($data['vod_resolution_priority_enabled'] ?? false);
 
         if ($vodResolutionPriorityEnabled) {
             $priorityAttributes = self::vodPriorityAttributes($priorityAttributes);
@@ -1465,6 +1465,16 @@ class PlaylistService
         }
 
         return null;
+    }
+
+    /**
+     * Resolve whether a given merge form config is operating on VOD content
+     * (i.e. merge_key === 'tmdb_id'). Centralized so SyncListener and
+     * PlaylistController stop duplicating the ternary.
+     */
+    public static function vodContentTypeForMergeConfig(array $config): string
+    {
+        return ($config['merge_key'] ?? 'stream_id') === 'tmdb_id' ? 'vod' : 'live';
     }
 
     /**

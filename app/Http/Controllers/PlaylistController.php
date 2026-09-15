@@ -527,7 +527,7 @@ class PlaylistController extends Controller
         $preferCatchupAsPrimary = (bool) ($config['prefer_catchup_as_primary'] ?? false);
         $newChannelsOnly = (bool) ($config['new_channels_only'] ?? true);
         $groupId = array_key_exists('group_id', $validated) ? $validated['group_id'] : null;
-        $weightedConfig = $this->buildMergeWeightedConfig($config, ($config['merge_key'] ?? 'stream_id') === 'tmdb_id' ? 'vod' : 'live');
+        $weightedConfig = $this->buildMergeWeightedConfig($config, PlaylistService::vodContentTypeForMergeConfig($config));
 
         dispatch(new MergeChannels(
             user: $user,
@@ -542,7 +542,7 @@ class PlaylistController extends Controller
             newChannelsOnly: $newChannelsOnly,
             regexPatterns: ! empty($config['regex_patterns']) ? $config['regex_patterns'] : null,
             fallbackMergeConfig: $this->buildMergeFallbackConfig($config),
-            contentType: ($config['merge_key'] ?? 'stream_id') === 'tmdb_id' ? 'vod' : 'live',
+            contentType: PlaylistService::vodContentTypeForMergeConfig($config),
             mergeKey: $config['merge_key'] ?? 'stream_id',
         ));
 
@@ -621,7 +621,7 @@ class PlaylistController extends Controller
             : null;
 
         $isVod = $contentType === 'vod';
-        $vodResolutionPriorityEnabled = $isVod && ($config['vod_resolution_priority_enabled'] ?? true);
+        $vodResolutionPriorityEnabled = $isVod && ($config['vod_resolution_priority_enabled'] ?? false);
 
         if ($vodResolutionPriorityEnabled) {
             $priorityAttributes = PlaylistService::vodPriorityAttributes($priorityAttributes);
