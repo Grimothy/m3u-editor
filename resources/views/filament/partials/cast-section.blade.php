@@ -6,16 +6,15 @@
 
     When $filmographyPage is passed, each tile is wrapped in an <a> that
     navigates to the ActorFilmography page for that actor, optionally
-    scoped to $playlistId (admin) or $playlistUuid (guest) so the page shows
-    only films/shows available in that playlist.
+    scoped to $playlistId (the guest ActorFilmography page derives its own
+    playlist scope from the route/session instead, so it has no equivalent
+    param here) so the page shows only films/shows available in that playlist.
 --}}
 @php
     $castMembers = collect($cast ?? [])
         ->filter(fn ($member) => is_array($member) && filled($member['name'] ?? null))
         ->values();
     $collapsed ??= false;
-    $currentPanel = \Filament\Facades\Filament::getCurrentPanel();
-    $isGuestPanel = $currentPanel !== null && $currentPanel->getId() !== 'admin';
     $filmographyPageClass = $filmographyPage ?? null;
 @endphp
 
@@ -41,15 +40,14 @@
                             $filmographyParams = array_filter([
                                 'personId' => $personId,
                                 'name' => $actorName,
-                                'playlistId' => $isGuestPanel ? null : ($playlistId ?? null),
-                                'playlistUuid' => $isGuestPanel ? ($playlistUuid ?? null) : null,
+                                'playlistId' => $playlistId ?? null,
                             ], fn ($v) => $v !== null && $v !== '');
                             $filmographyUrl = $filmographyPageClass::getUrl($filmographyParams);
                         @endphp
                         <a
                             href="{{ $filmographyUrl }}"
                             class="group {{ $tileClasses }} transition-opacity hover:opacity-80"
-                            title="{{ __('View filmography') }} — {{ $actorName }}"
+                            title="{{ __('View filmography') }} - {{ $actorName }}"
                         >
                             @include('filament.partials.cast-section-tile', [
                                 'photo' => $photo,

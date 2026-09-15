@@ -1,5 +1,5 @@
 {{--
-    Single tile body shared by cast-section.blade.php — avatar image (or
+    Single tile body shared by cast-section.blade.php - avatar image (or
     user-icon placeholder) + actor name + character. Renders nothing
     besides the body; the parent controls the link wrapper.
 --}}

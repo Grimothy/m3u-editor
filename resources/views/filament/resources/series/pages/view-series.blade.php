@@ -248,7 +248,6 @@
             ? \App\Filament\Pages\ActorFilmography::class
             : \App\Filament\GuestPanel\Pages\GuestActorFilmography::class,
         'playlistId' => $isAdminPanel ? ($record->playlist_id ?? null) : null,
-        'playlistUuid' => ! $isAdminPanel ? ($record->playlist?->uuid ?? null) : null,
     ])
 
     {{-- Probed Stream Info (aggregated across episodes) --}}

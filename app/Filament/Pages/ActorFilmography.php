@@ -79,7 +79,7 @@ class ActorFilmography extends Page
 
             return;
         }
-        // No local match (or no playlist scope) — fall through to existing ArrSearch
+        // No local match (or no playlist scope) - fall through to existing ArrSearch
         // dispatch so the item is still reachable via the ArrIntegration request flow.
         $title = null;
         foreach ($this->filmography as $item) {
@@ -95,7 +95,7 @@ class ActorFilmography extends Page
     /**
      * Validate the playlist_id param against the authenticated user. Admins
      * can scope to any playlist; non-admins only to their own. Returns 0 when
-     * ownership fails or the playlist doesn't exist — in which case the trait
+     * ownership fails or the playlist doesn't exist - in which case the trait
      * falls back to global TMDB filmography (the safe default).
      */
     protected function filmographyPlaylistId(): int

@@ -11,9 +11,9 @@ use App\Models\Series;
  *
  * The using class must implement three abstract accessors that supply the
  * panel-specific context the trait cannot infer on its own:
- *  - filmographyPlaylistId() — the originating playlist id (0 = no scope)
- *  - filmographySeriesResource() — Filament resource class for Series URLs
- *  - filmographyVodResource() — Filament resource class for Vod URLs
+ *  - filmographyPlaylistId() - the originating playlist id (0 = no scope)
+ *  - filmographySeriesResource() - Filament resource class for Series URLs
+ *  - filmographyVodResource() - Filament resource class for Vod URLs
  *
  * The filter and local-item resolver use cursor() + array_flip lookups so
  * memory stays flat regardless of playlist size.
@@ -104,7 +104,7 @@ trait FiltersFilmographyByPlaylist
         if ($mediaType === 'tv') {
             $series = Series::query()
                 ->where('playlist_id', $playlistId)
-                ->where('tmdb_id', $tmdbId)
+                ->where('tmdb_id', (string) $tmdbId)
                 ->first();
             if ($series) {
                 return $this->filmographySeriesResource()::getUrl('view', ['record' => $series->id]);
@@ -113,7 +113,7 @@ trait FiltersFilmographyByPlaylist
             $vod = Channel::query()
                 ->where('playlist_id', $playlistId)
                 ->where('is_vod', true)
-                ->where('tmdb_id', $tmdbId)
+                ->where('tmdb_id', (string) $tmdbId)
                 ->first();
             if ($vod) {
                 return $this->filmographyVodResource()::getUrl('view', ['record' => $vod->id]);
