@@ -29,9 +29,11 @@ use App\Models\Group;
 use App\Models\Playlist;
 use App\Models\StreamProfile;
 use App\Rules\CheckIfUrlOrLocalPath;
+use App\Services\CachedContentDispatchService;
 use App\Services\DateFormatService;
 use App\Services\LogoCacheService;
 use App\Services\PlaylistService;
+use App\Services\PlaylistUrlService;
 use App\Services\TmdbService;
 use App\Settings\GeneralSettings;
 use App\Traits\HasUserFiltering;
@@ -248,6 +250,18 @@ class VodResource extends Resource implements CopilotResource
                 ->label(__('Metadata'))
                 ->icon(fn ($record): string => $record->has_metadata ? 'heroicon-o-check-circle' : 'heroicon-o-minus')
                 ->color(fn ($record): string => $record->has_metadata ? 'success' : 'gray'),
+            IconColumn::make('is_cached')
+                ->label(__('Cached'))
+                ->getStateUsing(fn (Channel $record): bool => $record->isCached())
+                ->boolean()
+                ->trueIcon('heroicon-o-circle-stack')
+                ->falseIcon('heroicon-o-circle-stack')
+                ->trueColor('info')
+                ->falseColor('gray')
+                ->tooltip(fn (Channel $record): string => $record->isCached()
+                    ? __('Cached file available. Playback will use the local cache.')
+                    : __('Not cached. Use "Cache Now" to download the file for offline playback.'))
+                ->toggleable(),
             ToggleColumn::make('probe_enabled')
                 ->label(__('Probe Enabled'))
                 ->disabled(fn (Channel $record): bool => (bool) $record->aio_integration_id)
@@ -510,10 +524,44 @@ class VodResource extends Resource implements CopilotResource
         ];
     }
 
+    public static function getCacheNowAction(): Action
+    {
+        return Action::make('cache_now')
+            ->label(__('Cache Now'))
+            ->icon('heroicon-o-arrow-down-tray')
+            ->color('info')
+            ->visible(fn (Channel $record): bool => self::canCacheNow($record))
+            ->requiresConfirmation()
+            ->modalHeading(__('Cache this VOD?'))
+            ->modalDescription(fn (Channel $record): string => self::cacheNowDescription($record))
+            ->modalSubmitActionLabel(__('Cache now'))
+            ->action(function (Channel $record): void {
+                $result = self::dispatchCacheNowForChannel($record);
+                if ($result['queued']) {
+                    Notification::make()
+                        ->success()
+                        ->title($result['already'] ? __('Already cached or queued') : __('Cache download queued'))
+                        ->body($result['already']
+                            ? __('A pending or completed cached file already exists for this VOD.')
+                            : __('Track progress on the Cached Downloads page.'))
+                        ->send();
+
+                    return;
+                }
+
+                Notification::make()
+                    ->danger()
+                    ->title(__('Could not queue cache'))
+                    ->body($result['error'] ?? __('Unknown error.'))
+                    ->send();
+            });
+    }
+
     public static function getTableActions(): array
     {
         return [
             ActionGroup::make([
+                self::getCacheNowAction(),
                 Action::make('fetch_tmdb_ids')
                     ->label(__('Fetch TMDB Metadata'))
                     ->icon('heroicon-o-film')
@@ -2303,5 +2351,63 @@ class VodResource extends Resource implements CopilotResource
         }
 
         return $channel;
+    }
+
+    /**
+     * Whether the "Cache Now" action should be visible on this row.
+     *  - Global cache feature must be enabled.
+     *  - The row must have a resolvable source URL.
+     *  - The row must not be a custom channel with no URL.
+     */
+    public static function canCacheNow(Channel $record): bool
+    {
+        if (! (bool) (app(GeneralSettings::class)->enable_cache ?? false)) {
+            return false;
+        }
+
+        $playlist = $record->playlist;
+        if (! $playlist) {
+            return false;
+        }
+
+        $url = PlaylistUrlService::getChannelUrl($record, $playlist);
+
+        return $url !== '' && $url !== null;
+    }
+
+    /**
+     * Confirmation modal description text for the "Cache Now" action.
+     */
+    public static function cacheNowDescription(Channel $record): string
+    {
+        $title = $record->title_custom ?: $record->title ?: $record->name;
+
+        return __('Dispatch a background job to download ":title" to local storage for offline playback.', ['title' => $title]);
+    }
+
+    /**
+     * Run the cache dispatch for a single VOD channel row. Returns a
+     * normalized shape so the action handler can pick a notification
+     * without re-checking conditions.
+     *
+     * @return array{queued: bool, already?: bool, error?: string}
+     */
+    public static function dispatchCacheNowForChannel(Channel $record): array
+    {
+        if (! self::canCacheNow($record)) {
+            return ['queued' => false, 'error' => __('This VOD has no resolvable source URL.')];
+        }
+
+        if ($record->isCached()) {
+            return ['queued' => true, 'already' => true];
+        }
+
+        $service = app(CachedContentDispatchService::class);
+        $jobs = $service->dispatchForChannel($record);
+
+        return [
+            'queued' => $jobs->isNotEmpty(),
+            'already' => $jobs->isEmpty(),
+        ];
     }
 }

@@ -2,6 +2,7 @@
 
 namespace App\Models;
 
+use App\Enums\CachedContentFileStatus;
 use App\Models\Scopes\ExcludeAioFailoverClonesScope;
 use App\Services\PlaylistService;
 use App\Settings\GeneralSettings;
@@ -96,6 +97,38 @@ class Episode extends Model
     public function playlist(): BelongsTo
     {
         return $this->belongsTo(Playlist::class);
+    }
+
+    /**
+     * Whether this episode has a Completed CachedContentFile matching
+     * its source playlist and content fingerprint. Identity inputs come
+     * from the parent Series (tmdb_id/tvdb_id) plus the episode's own
+     * season/episode numbers - mirrors CachedContentDispatchService::
+     * fingerprintForEpisode() so the lookup matches the live dispatch path
+     * exactly (PR #1500 mismatched these inputs, causing cache-delete-
+     * redownload loops).
+     */
+    public function isCached(): bool
+    {
+        if (! $this->playlist_id) {
+            return false;
+        }
+
+        $series = $this->series;
+
+        $fingerprint = CachedContentFile::fingerprintFor([
+            'content_type' => 'episode',
+            'tmdb_id' => ($series && $series->tmdb_id !== null) ? (string) $series->tmdb_id : ($this->tmdb_id !== null ? (string) $this->tmdb_id : null),
+            'tvdb_id' => ($series && $series->tvdb_id !== null) ? (string) $series->tvdb_id : null,
+            'season_number' => $this->season,
+            'episode_number' => $this->episode_num,
+        ]);
+
+        return CachedContentFile::query()
+            ->ownedByPlaylist((int) $this->playlist_id)
+            ->where('content_fingerprint', $fingerprint)
+            ->where('status', CachedContentFileStatus::Completed->value)
+            ->exists();
     }
 
     /**
