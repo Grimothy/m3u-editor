@@ -177,7 +177,37 @@ class SyncDynamicGroups implements ShouldQueue
             ->all();
 
         if ($staleIds !== []) {
-            DynamicGroup::whereIn('id', $staleIds)->delete();
+            // Phase 2 / PR E: SOFT-UNSHARE instead of hard-delete.
+            //
+            // PR #1500 hard-deleted the stale DynamicGroup rows here, which
+            // cascade-deleted the pivot rows in cached_content_file_dynamic_groups
+            // BEFORE the retention sweep could see them. The retention sweep
+            // would then look at any file the stale group had pinned, see zero
+            // pivot references, and hard-delete the file (regardless of
+            // per-rule retention modes / never_expire on the file itself).
+            //
+            // PR E's fix: stamp `dropped_at = now()` on the pivot rows for
+            // each stale group, then mark the DynamicGroup row as
+            // enabled=false (tombstoned). The pivot rows SURVIVE so the next
+            // retention sweep sees them and applies the correct per-rule mode
+            // (or the match_group_lifetime fallback). never_expire on the
+            // CachedContentFile row is independent of pivot state and remains
+            // honored regardless.
+            //
+            // We deliberately don't DELETE the DynamicGroup row: the FK
+            // cascade would wipe the (now-soft-unshared) pivot rows, defeating
+            // the soft-unshare entirely. Leaving the DG row as a tombstone
+            // (enabled=false) costs one row per stale rule — bounded by how
+            // many times operators rename rules.
+            DB::table('cached_content_file_dynamic_groups')
+                ->whereIn('dynamic_group_id', $staleIds)
+                ->whereNull('dropped_at')
+                ->update([
+                    'dropped_at' => now(),
+                    'updated_at' => now(),
+                ]);
+
+            DynamicGroup::whereIn('id', $staleIds)->update(['enabled' => false]);
         }
     }
 

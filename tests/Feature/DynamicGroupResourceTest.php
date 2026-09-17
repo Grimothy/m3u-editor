@@ -9,6 +9,7 @@ use App\Filament\Resources\DynamicGroups\RelationManagers\ChannelsRelationManage
 use App\Filament\Resources\DynamicGroups\RelationManagers\SeriesRelationManager;
 use App\Filament\Resources\VodGroups\VodGroupResource;
 use App\Filament\Resources\Vods\VodResource;
+use App\Models\CachedContentFile;
 use App\Models\Channel;
 use App\Models\DynamicGroup;
 use App\Models\DynamicGroupItemSnapshot;
@@ -16,6 +17,7 @@ use App\Models\Playlist;
 use App\Models\Series;
 use App\Models\SyncRun;
 use App\Models\User;
+use App\Settings\GeneralSettings;
 use Illuminate\Foundation\Testing\RefreshDatabase;
 use Illuminate\Support\Facades\Bus;
 use Illuminate\Support\Facades\Cache;
@@ -277,6 +279,49 @@ it('lists the real synced dynamic_group_items members on the Movies relation man
         ->loadTable()
         ->assertCanSeeTableRecords([$attached])
         ->assertCanNotSeeTableRecords([$notAttached]);
+});
+
+it('shows Cache Now for synced VOD members on the Movies relation manager', function () {
+    $settings = Mockery::mock(GeneralSettings::class);
+    $settings->enable_cache = true;
+    app()->instance(GeneralSettings::class, $settings);
+
+    $group = DynamicGroup::create([
+        'playlist_id' => $this->playlist->id,
+        'user_id' => $this->user->id,
+        'type' => 'vod', 'source' => 'trending', 'name' => 'Trending Now',
+    ]);
+    $channel = Channel::factory()->for($this->user)->for($this->playlist)->create([
+        'is_vod' => true,
+        'title' => 'Cacheable Movie',
+        'url' => 'https://example.com/cacheable.mp4',
+    ]);
+    CachedContentFile::factory()->completed()->create([
+        'user_id' => $this->user->id,
+        'playlist_id' => $this->playlist->id,
+        'content_type' => 'movie',
+        'tmdb_id' => $channel->tmdb_id,
+        'tvdb_id' => $channel->tvdb_id,
+        'content_fingerprint' => CachedContentFile::fingerprintFor([
+            'content_type' => 'movie',
+            'tmdb_id' => $channel->tmdb_id,
+            'tvdb_id' => $channel->tvdb_id,
+        ]),
+    ]);
+    DB::table('dynamic_group_items')->insert([
+        'dynamic_group_id' => $group->id,
+        'item_type' => Channel::class,
+        'item_id' => $channel->id,
+    ]);
+
+    Livewire::test(ChannelsRelationManager::class, [
+        'ownerRecord' => $group,
+        'pageClass' => ViewDynamicGroup::class,
+    ])
+        ->assertTableColumnExists('cache_progress')
+        ->assertTableActionVisible('cache_now', $channel)
+        ->assertTableActionVisible('delete_cache_record', $channel)
+        ->assertTableActionDoesNotExist('edit');
 });
 
 it('lists the real synced dynamic_group_items members on the Series relation manager table', function () {

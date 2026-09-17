@@ -55,6 +55,7 @@ use App\Services\ProfileService;
 use App\Services\SyncPipelineService;
 use App\Services\TmdbService;
 use App\Services\XtreamService;
+use App\Settings\GeneralSettings;
 use App\Tables\Columns\ProgressColumn;
 use App\Traits\HasUserFiltering;
 use Carbon\Carbon;
@@ -3430,6 +3431,29 @@ class PlaylistResource extends Resource implements CopilotResource
                                         ->placeholder(__('e.g. Bearer abc123')),
                                 ]),
                         ])->hidden(fn (Get $get): bool => ! $get('enable_proxy')),
+                ]),
+            Section::make(__('Cache'))
+                ->description(__('Per-playlist cache overrides for the standalone per-Channel / per-Episode content cache. The global toggle in Settings > Integrations > Cache must be enabled for any of these to take effect.'))
+                ->columnSpanFull()
+                ->collapsible()
+                ->collapsed($creating)
+                ->columns(2)
+                ->schema([
+                    Toggle::make('share_cache_across_playlists')
+                        ->label(__('Share cache across playlists'))
+                        ->inline(false)
+                        ->live()
+                        ->helperText(__('When enabled, a cached file owned by this playlist is reused by other playlists pointing at the same content (subject to the source playlist also having sharing enabled). Disabling this hides this playlist\'s cached files from the cross-playlist dedup lookup.'))
+                        ->default(false),
+                    Select::make('cache_retention_mode')
+                        ->label(__('Cache retention mode'))
+                        ->options([
+                            'never-expire' => __('Never expire'),
+                            'time-based' => __('Time-based'),
+                            'manual' => __('Manual'),
+                        ])
+                        ->placeholder(__('Use global default (:mode)', ['mode' => __(($globalDefault = app(GeneralSettings::class)->cache_retention_mode ?? 'time-based'))]))
+                        ->helperText(__('Override the global retention mode (set in Settings > Integrations > Cache) for this playlist. Leave empty to fall back to the global setting.')),
                 ]),
             Section::make(__('EPG Output'))
                 ->description(__('EPG output options'))

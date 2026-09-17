@@ -7,6 +7,7 @@ use App\Filament\Clusters\PlaylistAliases\PlaylistAliasesCluster;
 use App\Filament\Clusters\Settings\SettingsCluster;
 use App\Filament\Pages\Backups;
 use App\Filament\Pages\BrowseShows;
+use App\Filament\Pages\CachedDownloadsPage;
 use App\Filament\Pages\CreatePlugin;
 use App\Filament\Pages\CustomDashboard;
 use App\Filament\Pages\LogViewer;
@@ -44,6 +45,7 @@ use App\Filament\Resources\StreamProfiles\StreamProfileResource;
 use App\Filament\Resources\Users\UserResource;
 use App\Filament\Resources\VodGroups\VodGroupResource;
 use App\Filament\Resources\Vods\VodResource;
+use App\Settings\GeneralSettings;
 use Filament\Navigation\NavigationItem;
 
 /**
@@ -113,6 +115,12 @@ final class AdminNavigationSchema
                     'playlist_auths' => ['resolve' => fn () => PlaylistAuthResource::getNavigationItems()],
                     'stream_file_settings' => ['resolve' => fn () => StreamFileSettingResource::getNavigationItems()],
                     'channel_scrubbers' => ['resolve' => fn () => ChannelScrubberResource::getNavigationItems()],
+                    'cached_downloads' => [
+                        // Hide the entry when the feature is off so the
+                        // sidebar matches the page's own canAccess() gate.
+                        'available' => fn () => (bool) (app(GeneralSettings::class)->enable_cache ?? false),
+                        'resolve' => fn () => CachedDownloadsPage::getNavigationItems(),
+                    ],
                 ],
             ],
             'dvr' => [

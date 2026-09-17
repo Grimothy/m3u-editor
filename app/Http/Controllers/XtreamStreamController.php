@@ -2,7 +2,9 @@
 
 namespace App\Http\Controllers;
 
+use App\Enums\CachedContentFileStatus;
 use App\Http\Controllers\Api\M3uProxyApiController;
+use App\Models\CachedContentFile;
 use App\Models\Channel;
 use App\Models\CustomPlaylist;
 use App\Models\Episode;
@@ -13,9 +15,11 @@ use App\Models\PlaylistAlias;
 use App\Models\PlaylistAuth;
 use App\Services\PlaylistService;
 use App\Services\PlaylistUrlService;
+use App\Settings\GeneralSettings;
 use Carbon\Carbon;
 use Illuminate\Database\Eloquent\Model;
 use Illuminate\Database\Eloquent\ModelNotFoundException;
+use Illuminate\Http\RedirectResponse;
 use Illuminate\Http\Request;
 use Illuminate\Support\Facades\Log;
 use Illuminate\Support\Facades\Redirect;
@@ -344,6 +348,15 @@ class XtreamStreamController extends Controller
         $format = $format ?? 'ts'; // Default to 'ts' if no format provided
         [$playlist, $channel, $playlistAuth] = $this->findAuthenticatedPlaylistAndStreamModel($username, $password, $streamId, 'vod');
         if ($channel instanceof Channel) {
+            // Cache-hit gate (PR C): if a Completed CachedContentFile exists for this
+            // channel's content fingerprint, redirect to the cache stream URL. The
+            // gate respects `enable_cache` on BOTH serve and dispatch (PR #1500 review
+            // constraint #3) so disabling after caching stops serving. Lazy-dispatch
+            // (caching on first watch) is left to PR D and is currently off by default.
+            if ($cacheRedirect = $this->resolveCacheHit($channel, $playlist, $username, $password, $format)) {
+                return $cacheRedirect;
+            }
+
             // See handleLive(): pooled-provider playlists must use the proxy path so
             // profile selection and pool distribution are applied.
             $needsProxy = Channel::needsProxy(
@@ -390,6 +403,13 @@ class XtreamStreamController extends Controller
         $format = $format ?? 'mp4'; // Default to 'mp4' if no format provided
         [$playlist, $episode, $playlistAuth] = $this->findAuthenticatedPlaylistAndStreamModel($username, $password, $streamId, 'episode');
         if ($episode instanceof Episode) {
+            // Cache-hit gate (PR C): see handleVod() for full rationale. Same gate
+            // applied to episodes, keyed by content_type=episode and the season/episode
+            // numbers in the fingerprint input.
+            if ($cacheRedirect = $this->resolveCacheHit($episode, $playlist, $username, $password, $format)) {
+                return $cacheRedirect;
+            }
+
             if (($playlist->enable_proxy || $request->input('proxy') === 'true') && $playlist->user->canUseProxy()) {
                 // Add username and PlaylistAuth ID to request for proxy traceability and per-auth enforcement
                 $request->merge(['username' => $username]);
@@ -516,6 +536,67 @@ class XtreamStreamController extends Controller
         }
 
         return $streamUrl;
+    }
+
+    /**
+     * Cache-hit gate (PR C). Returns a Redirect to the cache stream URL if a
+     * Completed `CachedContentFile` exists for the given Channel/Episode, or
+     * null to fall through to the existing redirect/proxy logic.
+     *
+     * Per PR #1500 review constraint #3 the `enable_cache` toggle gates
+     * BOTH serve and dispatch. When the toggle is off, even with a Completed
+     * row present, the method returns null - disabling after caching must
+     * stop serving (PR #1500 only gated lazy-dispatch, not serve).
+     *
+     * Lazy-dispatch (caching on first watch) is intentionally not wired
+     * here; it stays off by default and ships with PR D when the UI
+     * exposes the opt-in toggle.
+     *
+     * The fingerprint uses `CachedContentFile::fingerprintFor()` with the
+     * same inputs the dispatcher uses, so a cache row written by
+     * `CachedContentDispatchService` matches this lookup exactly (no
+     * `tvdb_id` mismatch - PR #1500 bug).
+     */
+    private function resolveCacheHit(Channel|Episode $item, Playlist $playlist, string $username, string $password, string $routeFormat): ?RedirectResponse
+    {
+        // Constraint #3 (PR #1500 review): the toggle gates BOTH serve and dispatch.
+        // When `enable_cache = false`, even with a Completed row present, fall through
+        // to the existing redirect - disable-after-cache must stop serving.
+        if (! (app(GeneralSettings::class)->enable_cache ?? false)) {
+            return null;
+        }
+
+        // The Episode model exposes `season` and `episode_num` columns (not
+        // `season_number` / `episode_number`). The fingerprint is computed via
+        // CachedContentFile::fingerprintFor() which accepts the season/episode
+        // inputs directly - identical shape that the dispatcher uses for new
+        // rows, so a cache written by CachedContentDispatchService matches
+        // this lookup exactly.
+        $fingerprint = CachedContentFile::fingerprintFor([
+            'content_type' => $item instanceof Channel ? 'movie' : 'episode',
+            'tmdb_id' => $item->tmdb_id ?? null,
+            'tvdb_id' => $item->tvdb_id ?? null,
+            'season_number' => $item instanceof Episode ? ($item->season ?? null) : null,
+            'episode_number' => $item instanceof Episode ? ($item->episode_num ?? null) : null,
+            'quality' => null, // Phase 1: no quality preference
+        ]);
+
+        $cached = CachedContentFile::query()
+            ->ownedByPlaylist($playlist->id)
+            ->where('content_fingerprint', $fingerprint)
+            ->where('status', CachedContentFileStatus::Completed->value)
+            ->first();
+
+        if ($cached === null || ! $cached->hasFilePath()) {
+            return null;
+        }
+
+        return Redirect::to(route('dynamic-group-cache.stream', [
+            'username' => $username,
+            'password' => $password,
+            'uuid' => $cached->uuid,
+            'format' => $routeFormat,
+        ]));
     }
 
     /**

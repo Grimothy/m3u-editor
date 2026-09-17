@@ -2,6 +2,7 @@
 
 namespace App\Models;
 
+use App\Enums\CachedContentFileStatus;
 use App\Enums\ChannelLogoType;
 use App\Enums\PlaylistChannelId;
 use App\Enums\PlaylistSourceType;
@@ -205,6 +206,36 @@ class Channel extends Model
     public function dynamicGroups(): MorphToMany
     {
         return $this->morphToMany(DynamicGroup::class, 'item', 'dynamic_group_items');
+    }
+
+    /**
+     * Whether this channel has a Completed CachedContentFile matching
+     * its source playlist and content fingerprint.
+     *
+     * Filament IconColumn calls this per row via getStateUsing(); we
+     * keep the lookup cost bounded (one indexed query against
+     * cached_content_files) and let the widget's existing columnSpan +
+     * pagination keep the overall table bounded too. The full standalone
+     * widget (CachedContentActivityWidget) provides the live activity
+     * view; this IconColumn is a quick yes/no indicator on the row.
+     */
+    public function isCached(): bool
+    {
+        if (! $this->playlist_id) {
+            return false;
+        }
+
+        $fingerprint = CachedContentFile::fingerprintFor([
+            'content_type' => 'movie',
+            'tmdb_id' => $this->tmdb_id !== null ? (string) $this->tmdb_id : null,
+            'tvdb_id' => $this->tvdb_id !== null ? (string) $this->tvdb_id : null,
+        ]);
+
+        return CachedContentFile::query()
+            ->ownedByPlaylist((int) $this->playlist_id)
+            ->where('content_fingerprint', $fingerprint)
+            ->where('status', CachedContentFileStatus::Completed->value)
+            ->exists();
     }
 
     public function streamFileSetting(): BelongsTo
