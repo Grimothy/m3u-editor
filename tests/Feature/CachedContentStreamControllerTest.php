@@ -3,6 +3,7 @@
 use App\Models\CachedContentFile;
 use App\Models\Playlist;
 use App\Models\User;
+use App\Settings\GeneralSettings;
 use Illuminate\Foundation\Testing\RefreshDatabase;
 use Illuminate\Support\Facades\Bus;
 use Illuminate\Support\Facades\Storage;
@@ -14,6 +15,9 @@ beforeEach(function () {
     // Bus::fake() catches it; nothing reaches Redis during tests.
     Bus::fake();
     Storage::fake('cache');
+    $settings = Mockery::mock(GeneralSettings::class);
+    $settings->enable_cache = true;
+    app()->instance(GeneralSettings::class, $settings);
 });
 
 it('returns 401 with invalid credentials', function () {
@@ -40,6 +44,25 @@ it('serves a cached file when credentials resolve and the file belongs to the pl
 
     $response->assertOk();
     expect((string) $response->streamedContent())->toContain('fake-bytes-for-testing');
+});
+
+it('does not serve cached files when caching is disabled', function () {
+    app(GeneralSettings::class)->enable_cache = false;
+    $user = User::factory()->create();
+    $playlist = Playlist::factory()->for($user)->create();
+    Storage::disk('cache')->put('cache/movie-disabled.mp4', 'bytes');
+
+    $file = CachedContentFile::factory()->completed()->create([
+        'user_id' => $user->id,
+        'playlist_id' => $playlist->id,
+        'content_type' => 'movie',
+        'tmdb_id' => '551',
+        'file_path' => 'cache/movie-disabled.mp4',
+    ]);
+
+    $response = $this->get("/cached-content/{$user->name}/{$playlist->uuid}/{$file->uuid}.mp4");
+
+    $response->assertNotFound();
 });
 
 it('returns 404 when the file belongs to a different playlist (no info leak)', function () {
