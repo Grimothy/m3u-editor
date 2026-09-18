@@ -106,6 +106,25 @@ class ChannelsRelationManager extends RelationManager
             ], position: RecordActionsPosition::BeforeCells)
             ->toolbarActions([]);
 
+        // Filament's recordActions() resets the visible record-actions list but
+        // leaves the flat-actions cache (Table::getAction()'s source) populated
+        // with everything VodResource::setupTable() wired up: edit, play, view,
+        // fetch_tmdb_ids, sync, probe. None of those belong on this read-only
+        // membership surface, and Livewire::getAction('edit') still resolves to
+        // the inherited EditAction until they're stripped. Drop them by name so
+        // assertTableActionDoesNotExist('edit') holds.
+        $flatActions = (function (): array {
+            return $this->flatActions;
+        })->call($table);
+
+        foreach (['edit', 'play', 'view', 'fetch_tmdb_ids', 'sync', 'probe'] as $excluded) {
+            unset($flatActions[$excluded]);
+        }
+
+        (function (array $actions): void {
+            $this->flatActions = $actions;
+        })->call($table, $flatActions);
+
         $columns = array_values($table->getColumns());
         $metadataKey = array_search('has_metadata', array_map(
             fn ($column): string => $column->getName(),
