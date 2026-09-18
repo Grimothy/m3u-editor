@@ -209,15 +209,24 @@ class Channel extends Model
     }
 
     /**
+     * Deterministic content fingerprint for this channel. The single source
+     * of truth for movie identity - the dispatcher, the retention sweep, the
+     * cache-hit gate, and Channel::isCached() all derive their `content_fingerprint`
+     * from this method so a row written by the dispatcher matches every read.
+     */
+    public function cacheFingerprint(): string
+    {
+        return CachedContentFile::fingerprintFor([
+            'content_type' => 'movie',
+            'tmdb_id' => $this->tmdb_id !== null ? (string) $this->tmdb_id : null,
+            'tvdb_id' => $this->tvdb_id !== null ? (string) $this->tvdb_id : null,
+        ]);
+    }
+
+    /**
      * Whether this channel has a Completed CachedContentFile matching
-     * its source playlist and content fingerprint.
-     *
-     * Filament IconColumn calls this per row via getStateUsing(); we
-     * keep the lookup cost bounded (one indexed query against
-     * cached_content_files) and let the widget's existing columnSpan +
-     * pagination keep the overall table bounded too. The full standalone
-     * widget (CachedContentActivityWidget) provides the live activity
-     * view; this IconColumn is a quick yes/no indicator on the row.
+     * its source playlist and content fingerprint. Single indexed query
+     * against cached_content_files.
      */
     public function isCached(): bool
     {
@@ -225,15 +234,9 @@ class Channel extends Model
             return false;
         }
 
-        $fingerprint = CachedContentFile::fingerprintFor([
-            'content_type' => 'movie',
-            'tmdb_id' => $this->tmdb_id !== null ? (string) $this->tmdb_id : null,
-            'tvdb_id' => $this->tvdb_id !== null ? (string) $this->tvdb_id : null,
-        ]);
-
         return CachedContentFile::query()
             ->ownedByPlaylist((int) $this->playlist_id)
-            ->where('content_fingerprint', $fingerprint)
+            ->where('content_fingerprint', $this->cacheFingerprint())
             ->where('status', CachedContentFileStatus::Completed->value)
             ->exists();
     }
