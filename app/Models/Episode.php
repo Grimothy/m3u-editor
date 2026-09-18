@@ -100,13 +100,35 @@ class Episode extends Model
     }
 
     /**
+     * Deterministic content fingerprint for this episode. Identity inputs
+     * come from the parent Series (tmdb_id/tvdb_id) plus the episode's own
+     * season/episode numbers. This is the single source of truth - the
+     * dispatcher, the retention sweep, the cache-hit gate, and
+     * Episode::isCached() all derive their `content_fingerprint` from this
+     * method so a row written by the dispatcher matches every read.
+     *
+     * Episode rows don't have their own `tvdb_id` column - the parent's
+     * `tvdb_id` (via `series.tvdb_id`) is folded in so the cached row
+     * matches the live fingerprint (PR #1500 missed this, causing
+     * cache-delete-redownload loops for series with a tvdb_id set).
+     */
+    public function cacheFingerprint(): string
+    {
+        $series = $this->series;
+
+        return CachedContentFile::fingerprintFor([
+            'content_type' => 'episode',
+            'tmdb_id' => ($series && $series->tmdb_id !== null) ? (string) $series->tmdb_id : ($this->tmdb_id !== null ? (string) $this->tmdb_id : null),
+            'tvdb_id' => ($series && $series->tvdb_id !== null) ? (string) $series->tvdb_id : null,
+            'season_number' => $this->season,
+            'episode_number' => $this->episode_num,
+        ]);
+    }
+
+    /**
      * Whether this episode has a Completed CachedContentFile matching
-     * its source playlist and content fingerprint. Identity inputs come
-     * from the parent Series (tmdb_id/tvdb_id) plus the episode's own
-     * season/episode numbers - mirrors CachedContentDispatchService::
-     * fingerprintForEpisode() so the lookup matches the live dispatch path
-     * exactly (PR #1500 mismatched these inputs, causing cache-delete-
-     * redownload loops).
+     * its source playlist and content fingerprint. Single indexed query
+     * against cached_content_files.
      */
     public function isCached(): bool
     {
@@ -114,19 +136,9 @@ class Episode extends Model
             return false;
         }
 
-        $series = $this->series;
-
-        $fingerprint = CachedContentFile::fingerprintFor([
-            'content_type' => 'episode',
-            'tmdb_id' => ($series && $series->tmdb_id !== null) ? (string) $series->tmdb_id : ($this->tmdb_id !== null ? (string) $this->tmdb_id : null),
-            'tvdb_id' => ($series && $series->tvdb_id !== null) ? (string) $series->tvdb_id : null,
-            'season_number' => $this->season,
-            'episode_number' => $this->episode_num,
-        ]);
-
         return CachedContentFile::query()
             ->ownedByPlaylist((int) $this->playlist_id)
-            ->where('content_fingerprint', $fingerprint)
+            ->where('content_fingerprint', $this->cacheFingerprint())
             ->where('status', CachedContentFileStatus::Completed->value)
             ->exists();
     }
