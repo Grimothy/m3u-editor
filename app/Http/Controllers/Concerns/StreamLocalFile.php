@@ -1,0 +1,198 @@
+<?php
+
+namespace App\Http\Controllers\Concerns;
+
+use Symfony\Component\HttpFoundation\StreamedResponse;
+
+/**
+ * Shared HTTP Range + full-stream serving loop for controllers that
+ * hand a local file back to the browser. Used by CachedContentStreamController
+ * (cached content) and DvrStreamController (DVR recordings).
+ *
+ * Returned responses are streamed (`StreamedResponse`), not buffered -
+ * multi-MB DVR recordings and GB-class cached movies never sit in PHP
+ * memory. Symmetric with the `Action::streamDownload()` antipattern
+ * (Filament Action::streamDownload buffers and base64-encodes through
+ * Livewire; this helper bypasses Livewire entirely and goes through a
+ * plain controller route).
+ *
+ * Range semantics (RFC 7233):
+ *  - No Range header  -> 200, full body
+ *  - Unparseable Range -> 200, full body (spec: ignore malformed Range)
+ *  - Out-of-bounds range -> 416 with Content-Range: bytes wildcard slash size
+ *  - Valid range -> 206 with Content-Range: bytes start dash end slash size
+ */
+class StreamLocalFile
+{
+    /**
+     * Read/write chunk size. 8 KiB matches fread's default chunk and is
+     * small enough to keep memory bounded while still hitting PHP's
+     * output buffer in a single call most of the time. Bumping this
+     * trades memory for syscalls - keep it modest.
+     */
+    public const CHUNK_SIZE = 8192;
+
+    /**
+     * HTTP Range header regex. Accepts `bytes=N-` (open-ended) and
+     * `bytes=N-M` (closed). The spec form `bytes=N-M,P-Q` (multi-range)
+     * is rejected by this single-pass regex; callers asking for a
+     * multi-range response should compose a multipart/byteranges
+     * response themselves.
+     */
+    public const RANGE_PATTERN = '/bytes=(\d+)-(\d*)/';
+
+    /**
+     * Serve a local file with HTTP Range support.
+     *
+     * Returns a 206 StreamedResponse for a valid Range request,
+     * a 416 StreamedResponse for a Range request that's syntactically
+     * valid but out-of-bounds, and a 200 StreamedResponse when no
+     * Range header was sent (or it was unparseable).
+     *
+     * @param  string  $fullPath  Absolute filesystem path to the file to serve.
+     * @param  int  $fileSize  Size in bytes.
+     * @param  string  $mimeType  Content-Type header value.
+     * @param  string  $filename  Filename for the Content-Disposition header
+     *                            (no path components - pass `basename($path)`).
+     * @param  string|null  $range  Raw `Range` request header. Null/empty
+     *                              -> serve the whole file (200). Malformed
+     *                              -> also serve the whole file (200).
+     *                              Out-of-bounds -> 416.
+     */
+    public static function serve(
+        string $fullPath,
+        int $fileSize,
+        string $mimeType,
+        string $filename,
+        ?string $range,
+    ): StreamedResponse {
+        if ($range !== null && $range !== '' && preg_match(self::RANGE_PATTERN, $range) === 1) {
+            try {
+                [$start, $end, $length] = static::parseRangeOrThrow($range, $fileSize);
+
+                $headers = [
+                    'Content-Type' => $mimeType,
+                    'Content-Length' => $length,
+                    'Content-Range' => "bytes {$start}-{$end}/{$fileSize}",
+                    'Accept-Ranges' => 'bytes',
+                    'Content-Disposition' => 'inline; filename="'.$filename.'"',
+                ];
+
+                return response()->stream(static function () use ($fullPath, $start, $length): void {
+                    $handle = fopen($fullPath, 'rb');
+                    if ($handle === false) {
+                        return;
+                    }
+                    fseek($handle, $start);
+                    $remaining = $length;
+
+                    while (! feof($handle) && $remaining > 0) {
+                        $chunkSize = min(self::CHUNK_SIZE, $remaining);
+                        echo fread($handle, $chunkSize);
+                        $remaining -= $chunkSize;
+                    }
+
+                    fclose($handle);
+                }, 206, $headers);
+            } catch (InvalidRangeException) {
+                return static::rangeNotSatisfiableResponse($fileSize, $mimeType, $filename);
+            }
+        }
+
+        $headers = [
+            'Content-Type' => $mimeType,
+            'Content-Length' => $fileSize,
+            'Accept-Ranges' => 'bytes',
+            'Content-Disposition' => 'inline; filename="'.$filename.'"',
+        ];
+
+        return response()->stream(static function () use ($fullPath): void {
+            $handle = fopen($fullPath, 'rb');
+            if ($handle === false) {
+                return;
+            }
+
+            while (! feof($handle)) {
+                echo fread($handle, self::CHUNK_SIZE);
+                flush();
+            }
+
+            fclose($handle);
+        }, 200, $headers);
+    }
+
+    /**
+     * Parse an HTTP Range header into [start, end, length], or null when
+     * the header is malformed / absent. Exposed for testability - the
+     * direct unit tests cover the "syntactically OK but not Range" case.
+     *
+     * Per RFC 7233 an unparseable Range header is treated as if the
+     * header was absent - we return null so the caller falls through to
+     * the 200 full-body path.
+     *
+     * @return array{0: int, 1: int, 2: int}|null
+     */
+    public static function parseRange(string $range, int $fileSize): ?array
+    {
+        if (! preg_match(self::RANGE_PATTERN, $range, $matches)) {
+            return null;
+        }
+
+        try {
+            return static::parseRangeOrThrow($range, $fileSize);
+        } catch (InvalidRangeException) {
+            return null;
+        }
+    }
+
+    /**
+     * Parse a Range header strictly. Throws `InvalidRangeException` when
+     * the parsed range is out-of-bounds, so the caller can return a
+     * proper 416 instead of silently clamping to the file size.
+     *
+     * @return array{0: int, 1: int, 2: int}
+     */
+    public static function parseRangeOrThrow(string $range, int $fileSize): array
+    {
+        if ($fileSize <= 0) {
+            throw new InvalidRangeException('Empty file cannot be ranged.');
+        }
+
+        if (! preg_match(self::RANGE_PATTERN, $range, $matches)) {
+            throw new InvalidRangeException("Malformed Range header: {$range}");
+        }
+
+        $start = (int) $matches[1];
+        // Open-ended (bytes=N-) -> end = fileSize - 1 per RFC 7233 §2.1.
+        $end = isset($matches[2]) && $matches[2] !== '' ? (int) $matches[2] : $fileSize - 1;
+
+        if ($start < 0 || $start >= $fileSize) {
+            throw new InvalidRangeException("Range start {$start} outside 0..".($fileSize - 1));
+        }
+        if ($end < $start) {
+            throw new InvalidRangeException("Range end {$end} precedes start {$start}");
+        }
+        $end = min($end, $fileSize - 1);
+
+        return [$start, $end, $end - $start + 1];
+    }
+
+    /**
+     * Build a 416 Range Not Satisfiable response. Empty body per the
+     * spec - the client learns the file size from the Content-Range
+     * header (bytes wildcard, then slash, then total size).
+     */
+    private static function rangeNotSatisfiableResponse(int $fileSize, string $mimeType, string $filename): StreamedResponse
+    {
+        $headers = [
+            'Content-Type' => $mimeType,
+            'Content-Range' => "bytes */{$fileSize}",
+            'Accept-Ranges' => 'bytes',
+            'Content-Disposition' => 'inline; filename="'.$filename.'"',
+        ];
+
+        return response()->stream(static function (): void {
+            // 416 has no body per RFC 7233.
+        }, 416, $headers);
+    }
+}

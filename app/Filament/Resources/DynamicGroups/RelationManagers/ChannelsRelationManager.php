@@ -3,8 +3,16 @@
 namespace App\Filament\Resources\DynamicGroups\RelationManagers;
 
 use App\Filament\Resources\Vods\VodResource;
+use App\Filament\Widgets\CachedContentActivityWidget;
+use App\Models\CachedContentFile;
+use App\Models\Channel;
+use Filament\Actions\Action;
+use Filament\Actions\ActionGroup;
+use Filament\Notifications\Notification;
 use Filament\Resources\RelationManagers\RelationManager;
 use Filament\Schemas\Components\Tabs\Tab;
+use Filament\Tables\Columns\TextColumn;
+use Filament\Tables\Enums\RecordActionsPosition;
 use Filament\Tables\Table;
 use Illuminate\Database\Eloquent\Model;
 
@@ -14,8 +22,9 @@ use Illuminate\Database\Eloquent\Model;
  * (matching their `dynamic_groups_config` rule row), so a series-type parent
  * has zero channels to show and the tab is hidden.
  *
- * Strictly read-only - no `recordActions()`, no `toolbarActions()`. Membership
- * is computed by `SyncDynamicGroups` from the parent playlist's
+ * Strictly read-only for membership edits - exposes only the Cache Now and
+ * Delete Cache row actions, with no bulk actions. Membership is computed by
+ * `SyncDynamicGroups` from the parent playlist's
  * `dynamic_groups_config`; this manager is a transparency window, not an edit
  * surface.
  */
@@ -52,14 +61,91 @@ class ChannelsRelationManager extends RelationManager
         // showPlaylist: false` before), not to scope the query - Filament's relation
         // manager machinery already scopes via the `channels` relationship.
         //
-        // setupTable() also wires up VodResource's full record/bulk actions
-        // (edit, delete, fetch metadata, sync, ...), which would break this
-        // manager's "strictly read-only" contract (see class docblock) - strip
-        // them back out rather than exposing mutation actions on a computed,
-        // read-only membership view.
-        return VodResource::setupTable($table, $this->ownerRecord->id)
+        // setupTable() wires up VodResource's full record/bulk actions
+        // (edit, delete, fetch metadata, sync, ...). Replace those with the
+        // cache-only kebab menu so computed membership stays read-only.
+        $cacheColumn = TextColumn::make('cache_progress')
+            ->label(__('Cache'))
+            ->badge()
+            ->getStateUsing(fn (Channel $record): ?CachedContentFile => $this->cachedFileForChannel($record))
+            ->formatStateUsing(fn (?CachedContentFile $state): ?string => $state
+                ? CachedContentActivityWidget::getProgressLabel($state)
+                : null)
+            ->color(fn (?CachedContentFile $state): ?string => $state?->status?->getColor())
+            ->icon(fn (?CachedContentFile $state): ?string => $state?->status?->getIcon())
+            ->placeholder(__('Not cached'));
+
+        $table = VodResource::setupTable($table, $this->ownerRecord->id)
             ->recordTitleAttribute('title')
-            ->recordActions([])
+            ->recordActions([
+                ActionGroup::make([
+                    VodResource::getCacheNowAction(),
+                    Action::make('delete_cache_record')
+                        ->label(__('Delete cache'))
+                        ->icon('heroicon-o-trash')
+                        ->color('danger')
+                        ->visible(fn (Channel $record): bool => $this->cachedFileForChannel($record) !== null)
+                        ->requiresConfirmation()
+                        ->modalHeading(__('Delete cached file for this movie?'))
+                        ->modalDescription(__('Removes the cached file from Storage and deletes the cached_content_files row. Playback will fall back to the live source.'))
+                        ->modalSubmitActionLabel(__('Yes, delete cache'))
+                        ->action(function (Channel $record): void {
+                            $cachedFile = $this->cachedFileForChannel($record);
+                            if (! $cachedFile) {
+                                return;
+                            }
+
+                            CachedContentActivityWidget::deleteCachedFile($cachedFile);
+
+                            Notification::make()
+                                ->success()
+                                ->title(__('Deleted 1 cached file'))
+                                ->send();
+                        }),
+                ])->button()->hiddenLabel()->size('sm'),
+            ], position: RecordActionsPosition::BeforeCells)
             ->toolbarActions([]);
+
+        // Filament's recordActions() resets the visible record-actions list but
+        // leaves the flat-actions cache (Table::getAction()'s source) populated
+        // with everything VodResource::setupTable() wired up: edit, play, view,
+        // fetch_tmdb_ids, sync, probe. None of those belong on this read-only
+        // membership surface, and Livewire::getAction('edit') still resolves to
+        // the inherited EditAction until they're stripped. Drop them by name so
+        // assertTableActionDoesNotExist('edit') holds.
+        $flatActions = (function (): array {
+            return $this->flatActions;
+        })->call($table);
+
+        foreach (['edit', 'play', 'view', 'fetch_tmdb_ids', 'sync', 'probe'] as $excluded) {
+            unset($flatActions[$excluded]);
+        }
+
+        (function (array $actions): void {
+            $this->flatActions = $actions;
+        })->call($table, $flatActions);
+
+        $columns = array_values($table->getColumns());
+        $metadataKey = array_search('has_metadata', array_map(
+            fn ($column): string => $column->getName(),
+            $columns,
+        ), true);
+
+        if ($metadataKey !== false) {
+            array_splice($columns, $metadataKey, 0, [$cacheColumn]);
+        } else {
+            $columns[] = $cacheColumn;
+        }
+
+        return $table->columns($columns);
+    }
+
+    private function cachedFileForChannel(Channel $channel): ?CachedContentFile
+    {
+        return CachedContentFile::query()
+            ->where('content_type', 'movie')
+            ->where('content_fingerprint', $channel->cacheFingerprint())
+            ->where('playlist_id', $channel->playlist_id)
+            ->first();
     }
 }

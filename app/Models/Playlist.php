@@ -97,6 +97,7 @@ class Playlist extends Model
         'enable_series' => 'boolean',
         'auto_retry_503_count' => 'integer',
         'auto_retry_503_last_at' => 'datetime',
+        'share_cache_across_playlists' => 'boolean',
     ];
 
     public function getFolderPathAttribute(): string

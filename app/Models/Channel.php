@@ -2,6 +2,7 @@
 
 namespace App\Models;
 
+use App\Enums\CachedContentFileStatus;
 use App\Enums\ChannelLogoType;
 use App\Enums\PlaylistChannelId;
 use App\Enums\PlaylistSourceType;
@@ -205,6 +206,39 @@ class Channel extends Model
     public function dynamicGroups(): MorphToMany
     {
         return $this->morphToMany(DynamicGroup::class, 'item', 'dynamic_group_items');
+    }
+
+    /**
+     * Deterministic content fingerprint for this channel. The single source
+     * of truth for movie identity - the dispatcher, the retention sweep, the
+     * cache-hit gate, and Channel::isCached() all derive their `content_fingerprint`
+     * from this method so a row written by the dispatcher matches every read.
+     */
+    public function cacheFingerprint(): string
+    {
+        return CachedContentFile::fingerprintFor([
+            'content_type' => 'movie',
+            'tmdb_id' => $this->tmdb_id !== null ? (string) $this->tmdb_id : null,
+            'tvdb_id' => $this->tvdb_id !== null ? (string) $this->tvdb_id : null,
+        ]);
+    }
+
+    /**
+     * Whether this channel has a Completed CachedContentFile matching
+     * its source playlist and content fingerprint. Single indexed query
+     * against cached_content_files.
+     */
+    public function isCached(): bool
+    {
+        if (! $this->playlist_id) {
+            return false;
+        }
+
+        return CachedContentFile::query()
+            ->ownedByPlaylist((int) $this->playlist_id)
+            ->where('content_fingerprint', $this->cacheFingerprint())
+            ->where('status', CachedContentFileStatus::Completed->value)
+            ->exists();
     }
 
     public function streamFileSetting(): BelongsTo

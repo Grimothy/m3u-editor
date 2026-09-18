@@ -6,6 +6,7 @@ use Illuminate\Database\Eloquent\Builder;
 use Illuminate\Database\Eloquent\Factories\HasFactory;
 use Illuminate\Database\Eloquent\Model;
 use Illuminate\Database\Eloquent\Relations\BelongsTo;
+use Illuminate\Database\Eloquent\Relations\BelongsToMany;
 use Illuminate\Database\Eloquent\Relations\MorphToMany;
 
 /**
@@ -75,6 +76,23 @@ class DynamicGroup extends Model
     public function series(): MorphToMany
     {
         return $this->morphedByMany(Series::class, 'item', 'dynamic_group_items');
+    }
+
+    /**
+     * CachedContentFile rows this DynamicGroup requested be cached
+     * (Phase 2 / PR E). Inverse of `CachedContentFile::dynamicGroups()`.
+     *
+     * `withPivot('dropped_at')` exposes the soft-unshare timestamp so
+     * callers can distinguish live (`dropped_at IS NULL`) from
+     * stale (`dropped_at IS NOT NULL`) memberships without a separate
+     * pivot query.
+     */
+    public function cachedContentFiles(): BelongsToMany
+    {
+        return $this->belongsToMany(
+            CachedContentFile::class,
+            'cached_content_file_dynamic_groups',
+        )->withPivot('dropped_at')->withTimestamps();
     }
 
     /**

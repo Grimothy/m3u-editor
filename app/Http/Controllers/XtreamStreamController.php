@@ -2,7 +2,9 @@
 
 namespace App\Http\Controllers;
 
+use App\Enums\CachedContentFileStatus;
 use App\Http\Controllers\Api\M3uProxyApiController;
+use App\Models\CachedContentFile;
 use App\Models\Channel;
 use App\Models\CustomPlaylist;
 use App\Models\Episode;
@@ -13,9 +15,11 @@ use App\Models\PlaylistAlias;
 use App\Models\PlaylistAuth;
 use App\Services\PlaylistService;
 use App\Services\PlaylistUrlService;
+use App\Settings\GeneralSettings;
 use Carbon\Carbon;
 use Illuminate\Database\Eloquent\Model;
 use Illuminate\Database\Eloquent\ModelNotFoundException;
+use Illuminate\Http\RedirectResponse;
 use Illuminate\Http\Request;
 use Illuminate\Support\Facades\Log;
 use Illuminate\Support\Facades\Redirect;
@@ -344,6 +348,15 @@ class XtreamStreamController extends Controller
         $format = $format ?? 'ts'; // Default to 'ts' if no format provided
         [$playlist, $channel, $playlistAuth] = $this->findAuthenticatedPlaylistAndStreamModel($username, $password, $streamId, 'vod');
         if ($channel instanceof Channel) {
+            // Cache-hit gate (PR C): if a Completed CachedContentFile exists for this
+            // channel's content fingerprint, redirect to the cache stream URL. The
+            // gate respects `enable_cache` on BOTH serve and dispatch (PR #1500 review
+            // constraint #3) so disabling after caching stops serving. Lazy-dispatch
+            // (caching on first watch) is left to PR D and is currently off by default.
+            if ($cacheRedirect = $this->resolveCacheHit($channel, $playlist, $username, $password, $format)) {
+                return $cacheRedirect;
+            }
+
             // See handleLive(): pooled-provider playlists must use the proxy path so
             // profile selection and pool distribution are applied.
             $needsProxy = Channel::needsProxy(
@@ -390,6 +403,13 @@ class XtreamStreamController extends Controller
         $format = $format ?? 'mp4'; // Default to 'mp4' if no format provided
         [$playlist, $episode, $playlistAuth] = $this->findAuthenticatedPlaylistAndStreamModel($username, $password, $streamId, 'episode');
         if ($episode instanceof Episode) {
+            // Cache-hit gate (PR C): see handleVod() for full rationale. Same gate
+            // applied to episodes, keyed by content_type=episode and the season/episode
+            // numbers in the fingerprint input.
+            if ($cacheRedirect = $this->resolveCacheHit($episode, $playlist, $username, $password, $format)) {
+                return $cacheRedirect;
+            }
+
             if (($playlist->enable_proxy || $request->input('proxy') === 'true') && $playlist->user->canUseProxy()) {
                 // Add username and PlaylistAuth ID to request for proxy traceability and per-auth enforcement
                 $request->merge(['username' => $username]);
@@ -516,6 +536,56 @@ class XtreamStreamController extends Controller
         }
 
         return $streamUrl;
+    }
+
+    /**
+     * Cache-hit gate. Returns a Redirect to the cache stream URL if a
+     * Completed `CachedContentFile` exists for the given Channel/Episode,
+     * or null to fall through to the existing redirect/proxy logic.
+     *
+     * The `enable_cache` toggle gates BOTH serve and dispatch. When off,
+     * even with a Completed row present, returns null so disabling after
+     * caching stops serving.
+     *
+     * The fingerprint is `Channel::cacheFingerprint()` or
+     * `Episode::cacheFingerprint()` - the single source of truth shared
+     * with the dispatcher and retention sweep.
+     *
+     * Numeric-id collision guard: `cached_content_files.playlist_id` is
+     * a FK into `playlists` (not polymorphic). When the caller passes a
+     * CustomPlaylist / MergedPlaylist / PlaylistAlias, their numeric
+     * `id` could collide with a real Playlist id. Reject non-Playlist
+     * types here so the cache-hit gate never matches a row that belongs
+     * to an unrelated plain Playlist.
+     */
+    private function resolveCacheHit(Channel|Episode $item, Playlist|CustomPlaylist|MergedPlaylist|PlaylistAlias $playlist, string $username, string $password, string $routeFormat): ?RedirectResponse
+    {
+        if (! (app(GeneralSettings::class)->enable_cache ?? false)) {
+            return null;
+        }
+
+        if (! $playlist instanceof Playlist) {
+            return null;
+        }
+
+        $fingerprint = $item->cacheFingerprint();
+
+        $cached = CachedContentFile::query()
+            ->ownedByPlaylist($playlist->id)
+            ->where('content_fingerprint', $fingerprint)
+            ->where('status', CachedContentFileStatus::Completed->value)
+            ->first();
+
+        if ($cached === null || ! $cached->hasFilePath()) {
+            return null;
+        }
+
+        return Redirect::to(route('dynamic-group-cache.stream', [
+            'username' => $username,
+            'password' => $password,
+            'uuid' => $cached->uuid,
+            'format' => $routeFormat,
+        ]));
     }
 
     /**

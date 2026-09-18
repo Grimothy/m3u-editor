@@ -67,6 +67,26 @@ Schedule::command('app:logo-cleanup --force')
 Schedule::command('queue:prune-failed --hours=48')
     ->daily();
 
+// Cache content dispatch - dry-run hourly so operators see what WOULD be
+// queued without burning dispatch slots. The non-dry-run path is for ad-hoc
+// `php artisan cache:content --playlist=N` kicks (PR B).
+Schedule::command('cache:content --dry-run')
+    ->hourly()
+    ->withoutOverlapping();
+
+// Cache retention cleanup - daily at 03:00. Identifies + deletes cached files
+// whose fingerprints are no longer in any live (user, playlist) scope.
+Schedule::command('cache:cleanup')
+    ->dailyAt('03:00')
+    ->withoutOverlapping();
+
+// Cache orphan cleanup - daily at 03:30, after retention. Targets abandoned
+// rows (file_path IS NULL) older than 7 days that retention deliberately
+// skips (no file on disk to clean, but the row itself is dead).
+Schedule::command('cache:cleanup-orphans')
+    ->dailyAt('03:30')
+    ->withoutOverlapping();
+
 // Prune old notifications
 Schedule::command('app:prune-old-notifications --days=7')
     ->daily();

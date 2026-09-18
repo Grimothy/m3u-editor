@@ -6,6 +6,9 @@ use App\Filament\Tables\ProbeStatusColumn;
 use App\Jobs\ProbeStreamsChunk;
 use App\Jobs\ProbeStreamsComplete;
 use App\Models\Episode;
+use App\Services\CachedContentDispatchService;
+use App\Services\PlaylistUrlService;
+use App\Settings\GeneralSettings;
 use Filament\Actions;
 use Filament\Actions\Action;
 use Filament\Actions\ViewAction;
@@ -16,6 +19,7 @@ use Filament\Resources\RelationManagers\RelationManager;
 use Filament\Schemas\Components\Grid;
 use Filament\Schemas\Components\Section;
 use Filament\Schemas\Schema;
+use Filament\Tables\Columns\IconColumn;
 use Filament\Tables\Columns\ImageColumn;
 use Filament\Tables\Columns\TextColumn;
 use Filament\Tables\Columns\ToggleColumn;
@@ -143,6 +147,18 @@ class EpisodesRelationManager extends RelationManager
                     ->tooltip(fn ($record): ?string => $record->aio_item_id ? __('AIOStreams-added episodes cannot be probed.') : null)
                     ->toggleable()
                     ->sortable(),
+                IconColumn::make('is_cached')
+                    ->label(__('Cached'))
+                    ->getStateUsing(fn (Episode $record): bool => $record->isCached())
+                    ->boolean()
+                    ->trueIcon('heroicon-o-circle-stack')
+                    ->falseIcon('heroicon-o-circle-stack')
+                    ->trueColor('info')
+                    ->falseColor('gray')
+                    ->tooltip(fn (Episode $record): string => $record->isCached()
+                        ? __('Cached file available. Playback will use the local cache.')
+                        : __('Not cached. Use "Cache Now" to download the file for offline playback.'))
+                    ->toggleable(),
 
                 ProbeStatusColumn::make(),
             ])
@@ -153,6 +169,35 @@ class EpisodesRelationManager extends RelationManager
                 //
             ])
             ->recordActions([
+                Action::make('cache_now')
+                    ->label(__('Cache Now'))
+                    ->icon('heroicon-o-arrow-down-tray')
+                    ->color('info')
+                    ->visible(fn (Episode $record): bool => self::canCacheNow($record))
+                    ->requiresConfirmation()
+                    ->modalHeading(__('Cache this episode?'))
+                    ->modalDescription(fn (Episode $record): string => self::cacheNowDescription($record))
+                    ->modalSubmitActionLabel(__('Cache now'))
+                    ->action(function (Episode $record): void {
+                        $result = self::dispatchCacheNowForEpisode($record);
+                        if ($result['queued']) {
+                            Notification::make()
+                                ->success()
+                                ->title($result['already'] ? __('Already cached or queued') : __('Cache download queued'))
+                                ->body($result['already']
+                                    ? __('A pending or completed cached file already exists for this episode.')
+                                    : __('Track progress on the Cached Downloads page.'))
+                                ->send();
+
+                            return;
+                        }
+
+                        Notification::make()
+                            ->danger()
+                            ->title(__('Could not queue cache'))
+                            ->body($result['error'] ?? __('Unknown error.'))
+                            ->send();
+                    }),
                 Action::make('play')
                     ->tooltip(__('Play Episode'))
                     ->action(function ($record, $livewire) {
@@ -408,5 +453,59 @@ class EpisodesRelationManager extends RelationManager
     public function getTabs(): array
     {
         return [];
+    }
+
+    /**
+     * Whether the "Cache Now" action should be visible on this row.
+     * Mirrors VodResource::canCacheNow().
+     */
+    public static function canCacheNow(Episode $record): bool
+    {
+        if (! (bool) (app(GeneralSettings::class)->enable_cache ?? false)) {
+            return false;
+        }
+
+        $playlist = $record->playlist;
+        if (! $playlist) {
+            return false;
+        }
+
+        $url = PlaylistUrlService::getEpisodeUrl($record, $playlist);
+
+        return $url !== '' && $url !== null;
+    }
+
+    /**
+     * Confirmation modal description text for the episode "Cache Now" action.
+     */
+    public static function cacheNowDescription(Episode $record): string
+    {
+        $title = $record->title ?: __('Episode :seasonx:episode', [
+            'season' => (int) ($record->season ?? 0),
+            'episode' => (int) ($record->episode_num ?? 0),
+        ]);
+
+        return __('Dispatch a background job to download ":title" to local storage for offline playback.', ['title' => $title]);
+    }
+
+    /**
+     * @return array{queued: bool, already?: bool, error?: string}
+     */
+    public static function dispatchCacheNowForEpisode(Episode $record): array
+    {
+        if (! self::canCacheNow($record)) {
+            return ['queued' => false, 'error' => __('This episode has no resolvable source URL.')];
+        }
+
+        if ($record->isCached()) {
+            return ['queued' => true, 'already' => true];
+        }
+
+        $jobs = app(CachedContentDispatchService::class)->dispatchForEpisode($record);
+
+        return [
+            'queued' => $jobs->isNotEmpty(),
+            'already' => $jobs->isEmpty(),
+        ];
     }
 }
