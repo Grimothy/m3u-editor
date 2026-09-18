@@ -125,11 +125,7 @@ class ChannelsRelationManager extends RelationManager
     {
         return CachedContentFile::query()
             ->where('content_type', 'movie')
-            ->where('content_fingerprint', CachedContentFile::fingerprintFor([
-                'content_type' => 'movie',
-                'tmdb_id' => $channel->tmdb_id,
-                'tvdb_id' => $channel->tvdb_id,
-            ]))
+            ->where('content_fingerprint', $channel->cacheFingerprint())
             ->where('playlist_id', $channel->playlist_id)
             ->first();
     }

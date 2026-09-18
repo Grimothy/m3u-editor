@@ -9,6 +9,7 @@ use App\Models\MergedPlaylist;
 use App\Models\Playlist;
 use App\Models\PlaylistAlias;
 use App\Models\PlaylistAuth;
+use App\Settings\GeneralSettings;
 use Illuminate\Database\Eloquent\ModelNotFoundException;
 use Illuminate\Http\Request;
 use Illuminate\Support\Facades\Storage;
@@ -23,29 +24,36 @@ use Illuminate\Support\Facades\Storage;
  *  - Method 1: PlaylistAuth credentials (returns the assigned playlist)
  *  - Method 2: password = playlist UUID, username = playlist owner's name
  *
- * Phase 1 only supports caching for plain `Playlist` rows - the
- * `cached_content_files.playlist_id` column is a foreign key into the
- * `playlists` table, so files owned by `CustomPlaylist` /
- * `MergedPlaylist` / `PlaylistAlias` rows are not currently cached.
- * Auth still resolves those types (so the route stays compatible with
- * existing client URLs), but the ownership lookup returns 404 for them
- * which is the correct "no cache for this playlist type" answer.
+ * Phase 1 only supports caching for plain `Playlist` rows. The
+ * `cached_content_files.playlist_id` column is a FK into the `playlists`
+ * table, so files owned by `CustomPlaylist` / `MergedPlaylist` /
+ * `PlaylistAlias` rows are not currently cached. We still resolve those
+ * types in the auth step (so the route stays compatible with existing
+ * client URLs), but we reject them at the ownership check with 404 -
+ * the correct "no cache for this playlist type" answer without leaking
+ * whether the uuid exists.
+ *
+ * The 404 gate also prevents a numeric `id` collision between
+ * `playlists.id` and `custom_playlists.id` / `merged_playlists.id` /
+ * `playlist_aliases.id` (all are independent auto-incrementing
+ * sequences). Without the type guard, a CustomPlaylist with id=5
+ * could pass `ownedByPlaylist(5)` and accidentally serve a row that
+ * actually belongs to a plain Playlist id=5.
  *
  * Range serving reuses `StreamLocalFile::serve()` so the 8 KiB chunk
- * size, 200/206 status split, and Content-Range header construction are
- * shared with `DvrStreamController::stream()`.
+ * size, 200/206 status split, and Content-Range header construction
+ * are shared with `DvrStreamController::stream()`.
  */
 class CachedContentStreamController extends Controller
 {
     /**
-     * Returns [$playlist, $playlistAuth, $isGuestCredential] where:
-     *  - $playlist is null when credentials do not resolve,
-     *  - $playlistAuth is non-null only when auth resolved via PlaylistAuth, and
-     *  - $isGuestCredential mirrors `DvrStreamController::resolveUser()`'s same flag.
-     *
-     * @return array{0: Playlist|CustomPlaylist|MergedPlaylist|PlaylistAlias|null, 1: PlaylistAuth|null, 2: bool}
+     * Resolve the authenticated playlist. Returns null when credentials
+     * do not resolve. The returned model is one of Playlist /
+     * MergedPlaylist / CustomPlaylist / PlaylistAlias depending on which
+     * table the uuid (or PlaylistAuth assignment) maps to; the caller is
+     * responsible for narrowing to Playlist before reading the cache.
      */
-    private function resolvePlaylist(string $username, string $password): array
+    private function resolvePlaylist(string $username, string $password): Playlist|CustomPlaylist|MergedPlaylist|PlaylistAlias|null
     {
         // Method 1: PlaylistAuth credentials
         $playlistAuth = PlaylistAuth::where('username', $username)
@@ -56,7 +64,7 @@ class CachedContentStreamController extends Controller
         if ($playlistAuth && ! $playlistAuth->isExpired()) {
             $playlist = $playlistAuth->getAssignedModel();
             if ($playlist) {
-                return [$playlist, $playlistAuth, true];
+                return $playlist;
             }
         }
 
@@ -68,29 +76,39 @@ class CachedContentStreamController extends Controller
                 $playlist = $type::with('user')->where('uuid', $password)->firstOrFail();
 
                 if ($playlist->user && $playlist->user->name === $username) {
-                    return [$playlist, null, false];
+                    return $playlist;
                 }
             } catch (ModelNotFoundException) {
                 // Try next type
             }
         }
 
-        return [null, null, false];
+        return null;
     }
 
     public function stream(Request $request, string $username, string $password, string $uuid)
     {
-        [$playlist, $playlistAuth, $isGuestCredential] = $this->resolvePlaylist($username, $password);
+        $playlist = $this->resolvePlaylist($username, $password);
         if (! $playlist) {
             abort(401, 'Invalid credentials');
         }
 
-        // Ownership check: the file's `playlist_id` must equal the resolved
-        // playlist's id. Phase 1 only stores Playlist-owned files (the FK
-        // is into `playlists`), so non-Playlist auth types (CustomPlaylist,
-        // MergedPlaylist, PlaylistAlias) fall through to 404 here - which is
-        // the correct answer for "no cache for this playlist type" without
-        // leaking whether the uuid exists.
+        if (! (app(GeneralSettings::class)->enable_cache ?? false)) {
+            abort(404, 'Cached file not found');
+        }
+
+        // Type guard: only plain Playlist rows own cached files. The
+        // `cached_content_files.playlist_id` column is a FK into the
+        // `playlists` table, so any other type falls through to 404.
+        // This also blocks a numeric `id` collision with custom /
+        // merged / alias tables (all are independent auto-incrementing
+        // sequences). Returning 404 here matches the "no cache for
+        // this playlist type" answer and avoids leaking whether the
+        // uuid exists in another table.
+        if (! $playlist instanceof Playlist) {
+            abort(404, 'Cached file not found');
+        }
+
         $file = CachedContentFile::query()
             ->ownedByPlaylist($playlist->id)
             ->where('uuid', $uuid)

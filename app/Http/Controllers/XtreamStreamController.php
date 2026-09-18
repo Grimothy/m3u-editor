@@ -539,47 +539,36 @@ class XtreamStreamController extends Controller
     }
 
     /**
-     * Cache-hit gate (PR C). Returns a Redirect to the cache stream URL if a
-     * Completed `CachedContentFile` exists for the given Channel/Episode, or
-     * null to fall through to the existing redirect/proxy logic.
+     * Cache-hit gate. Returns a Redirect to the cache stream URL if a
+     * Completed `CachedContentFile` exists for the given Channel/Episode,
+     * or null to fall through to the existing redirect/proxy logic.
      *
-     * Per PR #1500 review constraint #3 the `enable_cache` toggle gates
-     * BOTH serve and dispatch. When the toggle is off, even with a Completed
-     * row present, the method returns null - disabling after caching must
-     * stop serving (PR #1500 only gated lazy-dispatch, not serve).
+     * The `enable_cache` toggle gates BOTH serve and dispatch. When off,
+     * even with a Completed row present, returns null so disabling after
+     * caching stops serving.
      *
-     * Lazy-dispatch (caching on first watch) is intentionally not wired
-     * here; it stays off by default and ships with PR D when the UI
-     * exposes the opt-in toggle.
+     * The fingerprint is `Channel::cacheFingerprint()` or
+     * `Episode::cacheFingerprint()` - the single source of truth shared
+     * with the dispatcher and retention sweep.
      *
-     * The fingerprint uses `CachedContentFile::fingerprintFor()` with the
-     * same inputs the dispatcher uses, so a cache row written by
-     * `CachedContentDispatchService` matches this lookup exactly (no
-     * `tvdb_id` mismatch - PR #1500 bug).
+     * Numeric-id collision guard: `cached_content_files.playlist_id` is
+     * a FK into `playlists` (not polymorphic). When the caller passes a
+     * CustomPlaylist / MergedPlaylist / PlaylistAlias, their numeric
+     * `id` could collide with a real Playlist id. Reject non-Playlist
+     * types here so the cache-hit gate never matches a row that belongs
+     * to an unrelated plain Playlist.
      */
-    private function resolveCacheHit(Channel|Episode $item, Playlist $playlist, string $username, string $password, string $routeFormat): ?RedirectResponse
+    private function resolveCacheHit(Channel|Episode $item, Playlist|CustomPlaylist|MergedPlaylist|PlaylistAlias $playlist, string $username, string $password, string $routeFormat): ?RedirectResponse
     {
-        // Constraint #3 (PR #1500 review): the toggle gates BOTH serve and dispatch.
-        // When `enable_cache = false`, even with a Completed row present, fall through
-        // to the existing redirect - disable-after-cache must stop serving.
         if (! (app(GeneralSettings::class)->enable_cache ?? false)) {
             return null;
         }
 
-        // The Episode model exposes `season` and `episode_num` columns (not
-        // `season_number` / `episode_number`). The fingerprint is computed via
-        // CachedContentFile::fingerprintFor() which accepts the season/episode
-        // inputs directly - identical shape that the dispatcher uses for new
-        // rows, so a cache written by CachedContentDispatchService matches
-        // this lookup exactly.
-        $fingerprint = CachedContentFile::fingerprintFor([
-            'content_type' => $item instanceof Channel ? 'movie' : 'episode',
-            'tmdb_id' => $item->tmdb_id ?? null,
-            'tvdb_id' => $item->tvdb_id ?? null,
-            'season_number' => $item instanceof Episode ? ($item->season ?? null) : null,
-            'episode_number' => $item instanceof Episode ? ($item->episode_num ?? null) : null,
-            'quality' => null, // Phase 1: no quality preference
-        ]);
+        if (! $playlist instanceof Playlist) {
+            return null;
+        }
+
+        $fingerprint = $item->cacheFingerprint();
 
         $cached = CachedContentFile::query()
             ->ownedByPlaylist($playlist->id)
