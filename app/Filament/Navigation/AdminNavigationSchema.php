@@ -39,9 +39,11 @@ use App\Filament\Resources\Plugins\PluginResource;
 use App\Filament\Resources\PostProcesses\PostProcessResource;
 use App\Filament\Resources\QueueMonitor\QueueMonitorResource;
 use App\Filament\Resources\Series\SeriesResource;
+use App\Filament\Resources\SeriesDynamicGroups\SeriesDynamicGroupResource;
 use App\Filament\Resources\StreamFileSettings\StreamFileSettingResource;
 use App\Filament\Resources\StreamProfiles\StreamProfileResource;
 use App\Filament\Resources\Users\UserResource;
+use App\Filament\Resources\VodDynamicGroups\VodDynamicGroupResource;
 use App\Filament\Resources\VodGroups\VodGroupResource;
 use App\Filament\Resources\Vods\VodResource;
 use Filament\Navigation\NavigationItem;
@@ -152,6 +154,7 @@ final class AdminNavigationSchema
                 'icon' => 'heroicon-m-film',
                 'available' => fn () => true,
                 'items' => [
+                    'vod_dynamic_groups' => ['resolve' => fn () => VodDynamicGroupResource::getNavigationItems()],
                     'vod_groups' => ['resolve' => fn () => VodGroupResource::getNavigationItems()],
                     'vods' => ['resolve' => fn () => VodResource::getNavigationItems()],
                 ],
@@ -161,6 +164,7 @@ final class AdminNavigationSchema
                 'icon' => 'heroicon-m-play',
                 'available' => fn () => true,
                 'items' => [
+                    'series_dynamic_groups' => ['resolve' => fn () => SeriesDynamicGroupResource::getNavigationItems()],
                     'categories' => ['resolve' => fn () => CategoryResource::getNavigationItems()],
                     'series' => ['resolve' => fn () => SeriesResource::getNavigationItems()],
                 ],
