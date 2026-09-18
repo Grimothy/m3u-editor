@@ -6,9 +6,13 @@ use App\Enums\CachedContentFileStatus;
 use App\Models\CachedContentFile;
 use App\Models\Channel;
 use App\Models\Episode;
+use App\Support\PrivateNetworkGuard;
 use GuzzleHttp\Psr7\Stream;
+use GuzzleHttp\Psr7\UriResolver;
+use GuzzleHttp\Psr7\Utils;
 use Illuminate\Bus\Queueable;
 use Illuminate\Contracts\Queue\ShouldQueue;
+use Illuminate\Database\QueryException;
 use Illuminate\Foundation\Bus\Dispatchable;
 use Illuminate\Http\Client\ConnectionException;
 use Illuminate\Http\Client\RequestException;
@@ -20,41 +24,37 @@ use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Facades\Http;
 use Illuminate\Support\Facades\Log;
 use Illuminate\Support\Facades\Storage;
+use InvalidArgumentException;
 use Throwable;
 
 /**
  * Cache a single Channel or Episode's source URL onto the local `cache` disk
- * with full progress reporting, cancellation, and failure persistence.
+ * with full progress reporting, cancellation, SSRF protection, and failure
+ * persistence.
  *
- * Production-ready upgrade of the PR B minimal skeleton. Adds:
- *
+ * Behavior:
  *  - Byte-level progress reporting (1 MiB throttle) into
  *    `bytes_downloaded` / `bytes_per_second` / `last_progress_at`.
  *  - Atomic Failed -> Downloading reclaim for retries, gated by
- *    `DB::transaction(... lockForUpdate())` so two concurrent workers never
- *    both download the same row.
+ *    `DB::transaction(... lockForUpdate())`.
  *  - Pending-cancellation flag consumed at job start (covers the
  *    "operator cancelled before a worker ever picked up the job" window).
  *  - Mid-flight cancellation via `cancellationCacheKey` polled on every
  *    progress tick (time-throttled so a multi-GB download does not hammer
  *    the cache store on every 64 KiB read).
- *  - `last_error_message` persisted on the row by `markFailed()` so the
- *    activity widget can show WHY a download failed. PR #1500 silently
- *    dropped this; PR A put the column in `$fillable`, PR C makes sure
- *    the field actually gets written (and is regression-tested in
- *    `DownloadCachedContentFileTest`).
+ *  - `last_error_message` persisted on the row by `markFailed()`.
  *  - Three retries with exponential backoff via the framework's standard
  *    `tries` + `backoff()` mechanism.
+ *  - SSRF protection: validates the initial URL scheme/host via
+ *    `PrivateNetworkGuard::assertUrlSafe()`, then disables Guzzle's
+ *    automatic redirect following and re-validates every `Location`
+ *    header so a malicious upstream can't redirect to internal
+ *    services.
+ *  - Storage write is validated (`put()` return + post-write `exists()`)
+ *    before stamping `Completed`, so a failed disk write doesn't mark a
+ *    row as ready when the bytes never made it.
  *
- * Queue assignment is fixed at construction time (`onQueue('cache')`) so the
- * Horizon supervisor `cache-queue` owns these jobs exclusively, isolated
- * from the `default` / `import` / `file_sync` traffic.
- *
- * The dispatch path lives in `CachedContentDispatchService::dispatchForChannel()`
- * and `dispatchForEpisode()`. That service creates the `cached_content_files`
- * row in `Pending` status before queueing this job, so `handle()` operates on
- * a row that is expected to exist and may be in any of Pending / Failed /
- * (rarely) Downloading state.
+ * Queue: `cache` (Horizon supervisor `cache-queue`).
  */
 class DownloadCachedContentFile implements ShouldQueue
 {
@@ -67,9 +67,9 @@ class DownloadCachedContentFile implements ShouldQueue
     public int $tries = 3;
 
     /**
-     * Generous timeout - movie files can be multi-GB. Aligns with the existing
-     * `dvr.playlist_download_timeout` knob so cache + DVR share a single
-     * operator-facing ceiling.
+     * Generous timeout - movie files can be multi-GB. Aligns with the
+     * existing `dvr.playlist_download_timeout` knob so cache + DVR share
+     * a single operator-facing ceiling.
      */
     public int $timeout = 3600;
 
@@ -83,29 +83,32 @@ class DownloadCachedContentFile implements ShouldQueue
 
     /**
      * 1 MiB throttle boundary for byte-level progress writes. Progress is
-     * advisory; updating the row on every 64 KiB chunk would hammer Postgres
-     * and is not what the polling widget needs.
+     * advisory; updating the row on every 64 KiB chunk would hammer
+     * Postgres and is not what the polling widget needs.
      */
     private int $progressThreshold = 1_048_576;
 
     /**
      * Time-based throttle for cancellation checks (separate from the
      * byte-based progress throttle). 2s means a sub-1-MiB download still
-     * gets at least one cancellation check, while a multi-GB one does not
-     * hit the cache store on every chunk.
+     * gets at least one cancellation check, while a multi-GB one does
+     * not hit the cache store on every chunk.
      */
     private int $cancellationCheckIntervalSeconds = 2;
 
     /**
-     * 64 KiB read chunk for the streamed response body. Larger than the
-     * progress threshold divisor so we get a handful of progress writes
-     * per MiB even on slow connections.
+     * 64 KiB read chunk for the streamed response body.
      */
     private int $readChunkSize = 65_536;
 
     /**
-     * Transient per-handle() progress state. Horizon forks per job, so
-     * instance state is safe across the lifetime of a single execution.
+     * Hard cap on how many HTTP redirects we'll follow. Real upstream
+     * mirrors rarely need more than 2-3; anything beyond that is suspect.
+     */
+    private int $maxRedirects = 5;
+
+    /**
+     * Transient per-handle() progress state.
      */
     private ?int $bytesExpected = null;
 
@@ -120,8 +123,7 @@ class DownloadCachedContentFile implements ShouldQueue
     /**
      * Set when `checkCancellation()` flips on. `streamResponseToFile()`'s
      * read loop breaks on this flag, closing the PSR-7 stream and
-     * dropping the underlying connection immediately rather than
-     * reading the rest of the transfer.
+     * dropping the underlying connection immediately.
      */
     private bool $cancelled = false;
 
@@ -136,26 +138,19 @@ class DownloadCachedContentFile implements ShouldQueue
      * Orchestrate the download end to end:
      *
      *  1. Find the row (operator-deleted rows log + return without throw).
-     *  2. Consume any pending-cancel flag for this fingerprint. Early-exit
-     *     without an HTTP call if the operator cancelled the job before it
-     *     ever started.
+     *  2. Consume any pending-cancel flag for this fingerprint.
      *  3. Atomic Failed -> Downloading (or Pending -> Downloading) reclaim
-     *     inside a `lockForUpdate()` transaction so two concurrent workers
-     *     can never both proceed against the same row.
-     *  4. Resolve the source URL + extension + storage path.
-     *  5. Stream the GET to a temp file with 64 KiB chunks, throttling
-     *     progress writes to the row at the 1 MiB boundary.
-     *  6. Move temp file -> `cache` disk via Storage writeStream (bounded
-     *     memory, same as `ProcessM3uImport.php`).
-     *  7. Stamp Completed with `disk`, `file_path`, `file_size_bytes`,
-     *     `bytes_downloaded`, `bytes_expected`, `bytes_per_second`,
-     *     `last_progress_at`, `last_verified_at`.
+     *     inside a `lockForUpdate()` transaction.
+     *  4. Validate the source URL against PrivateNetworkGuard (SSRF guard).
+     *  5. Stream the GET with redirect-disabled Guzzle, manually following
+     *     each redirect through the guard.
+     *  6. Move temp file -> `cache` disk via Storage::put and validate
+     *     the write succeeded.
+     *  7. Stamp Completed with file size + progress metadata.
      *
-     * On any failure (HTTP client exception, ConnectionException,
-     * RequestException, IO error) we move the row to Failed and persist
-     * `last_error_message` via `markFailed()` (regression target for PR #1500
-     * which silently dropped this field). The exception is re-thrown so
-     * Horizon marks the attempt failed and applies `backoff()`.
+     * On any failure (HTTP exception, ConnectionException, RequestException,
+     * SSRF rejection, IO error) the row moves to Failed via `markFailed()`
+     * and the exception is re-thrown so Horizon applies backoff.
      */
     public function handle(): void
     {
@@ -168,28 +163,17 @@ class DownloadCachedContentFile implements ShouldQueue
 
         $fingerprint = $file->content_fingerprint;
 
-        // Step 2: consume a pre-pending cancel. Keyed by fingerprint because
-        // the row itself is already gone by the time the worker arrives.
-        // Cache::pull() so the flag is consumed here and a later, unrelated
-        // legitimate dispatch for the same fingerprint is not suppressed.
         if (Cache::pull(CachedContentFile::pendingCancellationCacheKey($fingerprint))) {
             Log::info("DownloadCachedContentFile: fingerprint={$fingerprint} cancelled before start.");
 
             return;
         }
 
-        // Step 3: atomic Failed -> Downloading reclaim. Two concurrent workers
-        // for the same row would otherwise both download. lockForUpdate() is
-        // portable across cache drivers (Cache::lock would have required the
-        // configured cache store to support locks, which the array driver used
-        // in some test setups does not).
         $file = $this->atomicReclaim($file);
         if ($file === null) {
             return;
         }
 
-        // A queued job may be picked up after its row was cancelled but
-        // before the worker observed the cancellation marker.
         $this->progressFile = $file;
         $this->checkCancellation();
         if ($this->cancelled) {
@@ -200,11 +184,19 @@ class DownloadCachedContentFile implements ShouldQueue
 
         $url = $this->resolveSourceUrl();
         if ($url === '') {
-            // Empty URL is a configuration bug, not a transient failure -
-            // don't throw, Horizon would only retry and spam failed_jobs.
-            // markFailed() persists last_error_message so the activity
-            // widget surfaces the misconfiguration.
             $this->markFailed($file, 'Source URL is empty.');
+
+            return;
+        }
+
+        // SSRF guard: validate the initial URL (scheme + private/reserved
+        // destination) before issuing any HTTP request. A rejection here
+        // fails the row without throwing so Horizon doesn't retry a known-
+        // to-be-bad URL.
+        try {
+            PrivateNetworkGuard::assertUrlSafe($url);
+        } catch (InvalidArgumentException $e) {
+            $this->markFailed($file, 'Source URL rejected (SSRF guard): '.$e->getMessage());
 
             return;
         }
@@ -213,9 +205,6 @@ class DownloadCachedContentFile implements ShouldQueue
         $relativePath = $this->resolveStorageRelativePath($fingerprint, $extension);
         $disk = 'cache';
 
-        // Step 5/6: stream into a temp file (bounded memory), then move to
-        // Storage via writeStream (also bounded memory). Multi-GB downloads
-        // would OOM against `file_get_contents()` or a buffered Response body.
         $tempPath = tempnam(sys_get_temp_dir(), 'dccf_');
         $this->progressFile = $file;
         $this->bytesExpected = null;
@@ -225,18 +214,19 @@ class DownloadCachedContentFile implements ShouldQueue
         $this->cancelled = false;
 
         try {
-            $response = Http::withUserAgent('m3u-editor/'.config('app.version', '0.0'))
-                ->timeout($this->timeout)
-                ->withOptions(['stream' => true])
-                ->throw()
-                ->get($url);
-
+            $response = $this->fetchWithSafeRedirects($url);
             $this->streamResponseToFile($response, $tempPath);
         } catch (RequestException|ConnectionException $e) {
             @unlink($tempPath);
             $this->markFailed($file, 'HTTP error: '.$e->getMessage());
 
             throw $e;
+        } catch (InvalidArgumentException $e) {
+            // A redirect target violated the SSRF guard.
+            @unlink($tempPath);
+            $this->markFailed($file, 'Redirect rejected (SSRF guard): '.$e->getMessage());
+
+            return;
         } catch (Throwable $e) {
             @unlink($tempPath);
             $this->markFailed($file, 'Unexpected error: '.$e->getMessage());
@@ -246,11 +236,6 @@ class DownloadCachedContentFile implements ShouldQueue
 
         $this->checkCancellation();
 
-        // Cancellation landed between the last chunk read and Step 6's
-        // Storage write. Real mid-transfer aborts already broke out of the
-        // chunk loop in streamResponseToFile(); this catches the narrow
-        // tail. Discard the bytes and let handle() return normally so
-        // JobProcessed fires as usual.
         if ($this->cancelled) {
             Cache::forget(CachedContentFile::cancellationCacheKey($file->id));
             Log::info("DownloadCachedContentFile: fingerprint={$fingerprint} cancelled mid-download.");
@@ -259,14 +244,15 @@ class DownloadCachedContentFile implements ShouldQueue
             return;
         }
 
-        // Step 6: move temp -> Storage via writeStream so peak memory stays
-        // bounded regardless of file size.
+        // Validate the Storage write BEFORE stamping Completed. Storage::put
+        // returns bool but a disk-full / permission failure may surface as
+        // an exception; either way we want the row to reflect the truth.
         try {
             $stream = fopen($tempPath, 'rb');
             if ($stream === false) {
                 throw new \RuntimeException("Unable to open temp file for reading: {$tempPath}");
             }
-            Storage::disk($disk)->put($relativePath, $stream);
+            $putResult = Storage::disk($disk)->put($relativePath, $stream);
         } catch (Throwable $e) {
             @unlink($tempPath);
             $this->markFailed($file, 'Failed to move downloaded file: '.$e->getMessage());
@@ -278,13 +264,15 @@ class DownloadCachedContentFile implements ShouldQueue
             }
         }
 
+        if ($putResult !== true || ! Storage::disk($disk)->exists($relativePath)) {
+            @unlink($tempPath);
+            $this->markFailed($file, 'Storage write returned false or file missing on disk.');
+
+            return;
+        }
+
         @unlink($tempPath);
 
-        // Step 7: stamp Completed. Use Storage::size() rather than filesize()
-        // so the call works against Storage::fake() in tests. Re-stamp
-        // `bytes_downloaded` from the same source in case the last 1 MiB
-        // progress window never crossed the throttle boundary (a 200 KB
-        // clip, for example).
         $size = null;
         try {
             $size = Storage::disk($disk)->size($relativePath) ?: null;
@@ -307,9 +295,6 @@ class DownloadCachedContentFile implements ShouldQueue
                 'last_error_message' => null,
             ])->save();
         } catch (Throwable $e) {
-            // The bytes are on Storage but the row update failed - roll back
-            // the storage write so retention can clean up later. Without
-            // this the file would orphan because file_path is still null.
             try {
                 Storage::disk($disk)->delete($relativePath);
             } catch (Throwable $deleteError) {
@@ -320,10 +305,6 @@ class DownloadCachedContentFile implements ShouldQueue
             throw $e;
         }
 
-        // Cancellation landed after Step 7 stamped Completed but before
-        // handle() returned. Restore Failed so the operator sees what
-        // happened. The bytes are now correctly on disk, but the row
-        // status reflects the operator's intent.
         if ($this->cancelled) {
             Cache::forget(CachedContentFile::cancellationCacheKey($file->id));
             $file->forceFill([
@@ -342,13 +323,16 @@ class DownloadCachedContentFile implements ShouldQueue
      * (or the row has been deleted).
      *
      * Allowed transitions:
-     *  - Pending     -> Downloading   (common case)
-     *  - Failed      -> Downloading   (retry after cooldown passed at dispatch)
+     *  - Pending -> Downloading (common case)
+     *  - Failed -> Downloading (retry after cooldown passed at dispatch)
      *
      * Rejected transitions (return null without throw):
      *  - Downloading -> another worker is plausibly on it
-     *  - Completed   -> dispatcher should have skipped; defensive
-     *  - missing row -> operator cleaned it up between dispatch and run
+     *  - Completed -> dispatcher should have skipped; defensive
+     *
+     * DB-specific failures (QueryException) propagate so an actual outage
+     * is visible to Horizon. We only swallow the narrow "row missing"
+     * case where the operator deleted the row between dispatch and run.
      */
     private function atomicReclaim(CachedContentFile $file): ?CachedContentFile
     {
@@ -369,9 +353,6 @@ class DownloadCachedContentFile implements ShouldQueue
                     return null;
                 }
 
-                // Pending or Failed -> Downloading. Failed is a retry case -
-                // reset failure_count and last_failed_at on the way through
-                // so the new attempt starts from a clean slate.
                 $update = [
                     'status' => CachedContentFileStatus::Downloading->value,
                     'updated_at' => now(),
@@ -393,10 +374,13 @@ class DownloadCachedContentFile implements ShouldQueue
 
                 return $file->fresh();
             });
-        } catch (Throwable $e) {
-            Log::warning("DownloadCachedContentFile: atomic reclaim failed for row {$file->id}: {$e->getMessage()}");
+        } catch (QueryException $e) {
+            // Genuine DB failure - rethrow so Horizon marks the attempt
+            // failed and applies backoff(). Swallowing this would let
+            // a transient outage look like a successful no-op.
+            Log::error("DownloadCachedContentFile: atomic reclaim DB failure for row {$file->id}: {$e->getMessage()}");
 
-            return null;
+            throw $e;
         }
 
         if ($reclaimed === null) {
@@ -409,18 +393,57 @@ class DownloadCachedContentFile implements ShouldQueue
     }
 
     /**
+     * Issue the GET with Guzzle's redirect-following disabled, then
+     * manually walk the Location header chain with each hop re-validated
+     * by the SSRF guard. A redirect to a private/reserved destination
+     * throws so the caller's catch marks the row Failed without
+     * downloading bytes from an unintended host.
+     */
+    private function fetchWithSafeRedirects(string $url): Response
+    {
+        $current = $url;
+        for ($i = 0; $i <= $this->maxRedirects; $i++) {
+            $resolvedIp = PrivateNetworkGuard::assertUrlSafe($current);
+            $parts = parse_url($current);
+            $host = (string) $parts['host'];
+            $port = (int) ($parts['port'] ?? (strtolower((string) $parts['scheme']) === 'https' ? 443 : 80));
+            $resolveHost = str_contains($host, ':') ? "[{$host}]" : $host;
+
+            $response = Http::withUserAgent('m3u-editor/'.config('app.version', '0.0'))
+                ->timeout($this->timeout)
+                ->withOptions([
+                    'stream' => true,
+                    'allow_redirects' => false,
+                    'curl' => [
+                        CURLOPT_RESOLVE => ["{$resolveHost}:{$port}:{$resolvedIp}"],
+                    ],
+                ])
+                ->throw()
+                ->get($current);
+
+            $status = $response->status();
+            if ($status < 300 || $status >= 400) {
+                return $response;
+            }
+
+            $location = $response->header('Location');
+            if (! $location) {
+                return $response;
+            }
+
+            // Resolve relative redirects against the current URL.
+            $current = (string) UriResolver::resolve(
+                Utils::uriFor($current),
+                Utils::uriFor($location),
+            );
+        }
+
+        throw new \RuntimeException("Exceeded {$this->maxRedirects} redirects while fetching {$url}.");
+    }
+
+    /**
      * Read the response body in 64 KiB chunks into the temp file, reporting
-     * progress and polling cancellation between chunks. This is what makes
-     * mid-flight cancellation a real abort instead of a cooperative
-     * discard-after-completion.
-     *
-     * The Laravel HTTP client + Guzzle stream transport gives us a PSR-7
-     * body stream; breaking out of the read loop and closing it is ordinary
-     * control flow that drops the underlying connection immediately. (An
-     * earlier curl-based approach aborted downloads by throwing from inside
-     * `CURLOPT_PROGRESSFUNCTION`, which doesn't unwind as a normal PHP
-     * exception - confirmed via a real Horizon run that left the queue
-     * reservation stuck.)
+     * progress and polling cancellation between chunks.
      */
     private function streamResponseToFile(Response $response, string $tempPath): void
     {
@@ -444,8 +467,11 @@ class DownloadCachedContentFile implements ShouldQueue
                     break;
                 }
 
-                fwrite($out, $chunk);
-                $downloaded += strlen($chunk);
+                $written = fwrite($out, $chunk);
+                if ($written === false || $written !== strlen($chunk)) {
+                    throw new \RuntimeException("Temp file write failed at {$downloaded} bytes (returned ".var_export($written, true).').');
+                }
+                $downloaded += $written;
 
                 $this->reportDownloadProgress($this->bytesExpected ?? -1, $downloaded);
 
@@ -454,13 +480,9 @@ class DownloadCachedContentFile implements ShouldQueue
                 }
             }
 
-            // Persist the final chunk even when the response is smaller than
-            // the normal 1 MiB throttle boundary.
             $this->reportDownloadProgress($this->bytesExpected ?? -1, $downloaded, force: true);
         } finally {
             fclose($out);
-            // Body is a PSR-7 Stream - close() drops the underlying
-            // connection immediately instead of waiting for GC.
             if ($body instanceof Stream) {
                 $body->close();
             }
@@ -513,12 +535,7 @@ class DownloadCachedContentFile implements ShouldQueue
 
     /**
      * Check whether an operator cancelled this row mid-flight and, if so,
-     * set the cancelled flag. streamResponseToFile()'s read loop checks
-     * the flag after every chunk and breaks immediately.
-     *
-     * Time-throttled (not byte-throttled like the progress threshold) so a
-     * sub-64 KiB file still gets at least one check, while a multi-GB one
-     * isn't hitting the cache store on every chunk.
+     * set the cancelled flag. Time-throttled.
      */
     private function checkCancellation(): void
     {
@@ -540,10 +557,6 @@ class DownloadCachedContentFile implements ShouldQueue
 
     /**
      * Compute bytes/second for the just-completed progress window.
-     *
-     * Returns null on the first event (no previous timestamp to subtract
-     * from) or when the rate collapses to zero (defensive - would
-     * otherwise produce an "infinite" ETA).
      */
     private function computeBytesPerSecond(int $downloaded, Carbon $now): ?int
     {
@@ -562,12 +575,7 @@ class DownloadCachedContentFile implements ShouldQueue
     /**
      * Move the row to Failed and bump `failure_count`. Persists
      * `last_error_message` so the activity widget can surface WHY a
-     * download failed. PR #1500 silently dropped this column because it
-     * was missing from `$fillable`; PR A put it in `$fillable` and this
-     * method actually writes it. `forceFill()` here is defensive - the
-     * column IS fillable now, but forceFill makes the regression
-     * ("markFailed itself drops the message") fail loudly if a future
-     * change removes it from $fillable by mistake.
+     * download failed.
      *
      * `last_error_message` is truncated to 8000 chars to fit reasonable
      * Postgres row-size budgets while still capturing the meaningful
@@ -584,21 +592,12 @@ class DownloadCachedContentFile implements ShouldQueue
             ])->save();
             Log::warning("DownloadCachedContentFile failed for row {$file->id} (fp={$file->content_fingerprint}): {$reason}");
         } catch (Throwable $e) {
-            // markFailed itself failing is the worst-case scenario - log and
-            // continue so the outer throwForFailure() still runs (otherwise
-            // Horizon would never see the failure and the job would silently
-            // succeed with a stale row).
             Log::error("DownloadCachedContentFile: markFailed itself failed for {$file->id}: {$e->getMessage()}");
         }
     }
 
     /**
      * Resolve the source URL string from the constructor's union.
-     *
-     * Both `Channel` and `Episode` expose the stream URL via the top-level
-     * `url` column (no `info['url']` indirection). Returns an empty string
-     * when the row's URL is missing so `handle()` can fail-fast without
-     * throwing.
      */
     private function resolveSourceUrl(): string
     {
@@ -607,9 +606,7 @@ class DownloadCachedContentFile implements ShouldQueue
 
     /**
      * Sniff a container extension off the source URL so the cached file
-     * keeps its type (`.mp4`, `.mkv`, `.ts`). Falls back to `.mp4` when
-     * the URL has no extension - matches the default `resolveMimeType()`
-     * contract on the model.
+     * keeps its type. Falls back to `.mp4` when the URL has no extension.
      */
     private function resolveExtensionFromUrl(string $url): string
     {
@@ -620,9 +617,7 @@ class DownloadCachedContentFile implements ShouldQueue
     }
 
     /**
-     * Build the relative storage path under the `cache` disk: the row's
-     * fingerprint plus the sniffed extension. Mirrors the model's
-     * `resolveStorageDisk()` / `resolveMimeType()` defaults.
+     * Build the relative storage path under the `cache` disk.
      */
     private function resolveStorageRelativePath(string $fingerprint, string $extension): string
     {
