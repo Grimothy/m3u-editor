@@ -65,15 +65,13 @@ class SeriesDynamicGroupResource extends Resource
     }
 
     /**
-     * Sits ABOVE Categories (sort 4) and Series (sort 4) within the
-     * Series group — Dynamic Groups is the operator's primary
-     * destination for "auto-grouped by TMDB" content, so it earns
-     * the top slot. Sort = 1 keeps it cleanly above the existing
-     * sort-4 items.
+     * Sits BELOW Categories (sort 4) and Series (sort 4) within the
+     * Series group. Sort = 5 keeps it in the next available position
+     * without changing existing navigation slots.
      */
     public static function getNavigationSort(): ?int
     {
-        return 1;
+        return 5;
     }
 
     public static function getModelLabel(): string

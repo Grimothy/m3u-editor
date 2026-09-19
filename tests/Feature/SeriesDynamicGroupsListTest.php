@@ -37,10 +37,10 @@ beforeEach(function () {
 
 // --- Resource-level visibility / nav registration ----------------------------
 
-it('registers the Series Dynamic Groups nav item at the TOP of the Series group', function () {
+it('registers the Series Dynamic Groups nav item below existing Series navigation items', function () {
     expect(SeriesDynamicGroupResource::shouldRegisterNavigation())->toBeTrue()
         ->and(SeriesDynamicGroupResource::getNavigationGroup())->toBe(__('Series'))
-        ->and(SeriesDynamicGroupResource::getNavigationSort())->toBeLessThanOrEqual(1);
+        ->and(SeriesDynamicGroupResource::getNavigationSort())->toBeGreaterThanOrEqual(5);
 });
 
 it('hides the sidebar entry when the experimental feature flag is disabled', function () {
