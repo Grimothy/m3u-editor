@@ -17,10 +17,10 @@ use Illuminate\Database\Eloquent\Builder;
  * of Categories and Series itself.
  *
  * The per-row view route is on the shared parent
- * `DynamicGroupResource` — the single detail page that both listings
+ * `DynamicGroupResource` - the single detail page that both listings
  * link into via their view action.
  *
- * Cache-related behavior is intentionally absent here — that lives in
+ * Cache-related behavior is intentionally absent here - that lives in
  * the cache pipeline branch and is excluded from this navigation refactor.
  */
 class SeriesDynamicGroupResource extends Resource

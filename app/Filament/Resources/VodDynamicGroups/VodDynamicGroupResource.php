@@ -49,7 +49,7 @@ class VodDynamicGroupResource extends Resource
     }
 
     /**
-     * Sidebar gate — same experimental-feature + TMDB-configured check
+     * Sidebar gate - same experimental-feature + TMDB-configured check
      * the old footer widgets used. Without TMDB the Sync pipeline is a
      * no-op and the page would render an empty list.
      */

@@ -11,6 +11,7 @@ use App\Models\Playlist;
 use App\Models\Series;
 use App\Models\User;
 use App\Services\TmdbService;
+use Filament\Forms\Components\Hidden;
 use Filament\Pages\Page;
 use Illuminate\Foundation\Testing\RefreshDatabase;
 use Illuminate\Support\Facades\Bus;
@@ -23,7 +24,7 @@ beforeEach(function () {
     // ships disabled. Enable it so the listing page renders under test.
     config()->set('feature.playlist_tmdb_dynamic_groups', true);
 
-    // Also gated behind a configured TMDB integration — without TMDB
+    // Also gated behind a configured TMDB integration - without TMDB
     // the Sync pipeline is a no-op and there'd be nothing to show.
     $tmdb = Mockery::mock(TmdbService::class);
     $tmdb->shouldReceive('isConfigured')->andReturn(true);
@@ -86,12 +87,12 @@ it('shows only series-type Dynamic Groups for the authenticated user', function 
         'playlist_id' => $this->playlist->id, 'user_id' => $this->user->id,
         'type' => 'series', 'source' => 'trending', 'name' => 'My Series Trending',
     ]);
-    // Same-user: vod (must NOT show — wrong type for this listing).
+    // Same-user: vod (must NOT show - wrong type for this listing).
     DynamicGroup::create([
         'playlist_id' => $this->playlist->id, 'user_id' => $this->user->id,
         'type' => 'vod', 'source' => 'trending', 'name' => 'My VOD Trending',
     ]);
-    // Other-user: series (must NOT show — wrong owner).
+    // Other-user: series (must NOT show - wrong owner).
     $otherUser = User::factory()->create();
     DynamicGroup::create([
         'playlist_id' => $this->playlist->id, 'user_id' => $otherUser->id,
@@ -162,7 +163,7 @@ it('the Items column counts series', function () {
 
 it('per-playlist sub-tabs scope the table by playlist_id without breaking groupBy', function () {
     // Postgres-compat regression guard for the getEloquentQuery() +
-    // groupBy('playlist_id') interaction — see the VOD-side page's
+    // groupBy('playlist_id') interaction - see the VOD-side page's
     // sibling test for the full explanation. Mirror assertion: tabs
     // present + per-playlist count correct.
     $this->playlist->update(['name' => 'My Playlist']);
@@ -191,10 +192,36 @@ it('shows a New Series Dynamic Group header action on the listing', function () 
         ->assertActionExists('create');
 });
 
+it('keeps the Enabled toggle in the create schema alongside the playlist picker', function () {
+    // Regression guard: `[Select::make('playlist_id')] + getDynamicGroupRuleSchema()`
+    // silently dropped the Enabled toggle because PHP's `+` array-union
+    // operator lets the first array's numeric index win the collision
+    // (both arrays start at index 0). Verify both fields survive the merge.
+    Livewire::test(ListSeriesDynamicGroups::class)
+        ->mountAction('create')
+        ->assertSchemaComponentExists('playlist_id')
+        ->assertSchemaComponentExists('enabled')
+        ->assertSchemaComponentStateSet('enabled', true);
+});
+
+it('locks the create schema\'s type to series instead of exposing an editable Content Type selector', function () {
+    // The reused rule schema's Content Type Select is replaced with a
+    // Hidden field so a user can't pick vod-only `source` options while
+    // the closure still forces `type` to 'series' on submit.
+    Livewire::test(ListSeriesDynamicGroups::class)
+        ->mountAction('create')
+        ->assertSchemaComponentStateSet('type', 'series')
+        ->assertSchemaComponentExists('type', checkComponentUsing: fn ($component) => $component instanceof Hidden);
+});
+
 it('the playlist picker is prefilled with the active sub-tab when not on All', function () {
     $specific = Playlist::factory()->for($this->user)->create(['name' => 'Specific Playlist']);
 
-    Livewire::test(ListSeriesDynamicGroups::class, ['activePlaylistTab' => (string) $specific->id])
+    // `activeTab` is Filament's own tab-tracking property (bound to the
+    // `?tab=` URL param via #[Url(as: 'tab')] on ListRecords) - set it
+    // the same way a real tab click would, rather than a page-local
+    // property, so this test exercises the actual prefill path.
+    Livewire::test(ListSeriesDynamicGroups::class, ['activeTab' => (string) $specific->id])
         ->mountAction('create')
         ->assertSchemaComponentStateSet('playlist_id', $specific->id);
 });
@@ -203,7 +230,7 @@ it('the materializeRule helper appends the rule to the playlist and materializes
     // The CreateAction's data-routing through the mounted action schema
     // is brittle to nested field names (tmdb_params.*, cache_* sub-keys).
     // Drive the same flow the using() closure would, so the test focuses
-    // on the closure's logic — Filament's form-fill + dispatch is its
+    // on the closure's logic - Filament's form-fill + dispatch is its
     // job to test separately.
     $tmdb = Mockery::mock(TmdbService::class);
     $tmdb->shouldReceive('collectDynamicGroupResults')

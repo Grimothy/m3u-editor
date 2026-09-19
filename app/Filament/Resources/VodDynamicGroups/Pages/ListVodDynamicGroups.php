@@ -12,22 +12,23 @@ use App\Services\TmdbService;
 use Filament\Actions\Action;
 use Filament\Actions\CreateAction;
 use Filament\Actions\DeleteAction;
+use Filament\Forms\Components\Hidden;
 use Filament\Forms\Components\Select;
 use Filament\Notifications\Notification;
 use Filament\Resources\Pages\ListRecords;
 use Filament\Schemas\Components\Tabs\Tab;
+use Filament\Support\Exceptions\Halt;
 use Filament\Tables\Columns\IconColumn;
 use Filament\Tables\Columns\TextColumn;
 use Filament\Tables\Enums\RecordActionsPosition;
 use Filament\Tables\Table;
 use Illuminate\Database\Eloquent\Builder;
 use Illuminate\Support\Facades\Auth;
-use RuntimeException;
 
 /**
  * VOD-only listing surface for DynamicGroup rows.
  *
- * Sister page to `SeriesDynamicGroups\Pages\ListSeriesDynamicGroups` —
+ * Sister page to `SeriesDynamicGroups\Pages\ListSeriesDynamicGroups` -
  * the per-type "Dynamic Groups" sidebar listing that this refactor
  * splits out of the VOD Groups and Series Categories footer widgets.
  * Two Filament resources are backed by the same model so each one
@@ -38,7 +39,7 @@ use RuntimeException;
  * switch needed here.
  *
  * The row's "view" action links to the shared
- * `DynamicGroupResource::getUrl('view', ...)` route — single detail
+ * `DynamicGroupResource::getUrl('view', ...)` route - single detail
  * page keyed by record id, breadcrumb chains through the appropriate
  * per-type listing (see `Pages\ViewDynamicGroup`).
  *
@@ -48,13 +49,6 @@ use RuntimeException;
 class ListVodDynamicGroups extends ListRecords
 {
     protected static string $resource = VodDynamicGroupResource::class;
-
-    /**
-     * Active sub-tab. Filament's Tabs component manages this when a tab is
-     * selected (URL form `?tab={id}` or `?tab=all`). The CreateAction's
-     * playlist picker reads it to prefill the active playlist.
-     */
-    public ?string $activePlaylistTab = 'all';
 
     /**
      * Header action: a 'New VOD Dynamic Group' CreateAction that opens a
@@ -75,7 +69,11 @@ class ListVodDynamicGroups extends ListRecords
                 ->slideOver()
                 ->modalHeading(__('New VOD Dynamic Group'))
                 ->modalSubmitActionLabel(__('Create'))
-                ->schema([
+                // array_merge() (not the `+` operator) re-indexes numeric
+                // keys instead of letting the first array's index win the
+                // collision, which silently dropped the Enabled toggle here
+                // (both arrays are numerically indexed starting at 0).
+                ->schema(array_merge([
                     Select::make('playlist_id')
                         ->label(__('Playlist'))
                         ->required()
@@ -84,11 +82,21 @@ class ListVodDynamicGroups extends ListRecords
                             ->orderBy('name')
                             ->pluck('name', 'id')
                             ->all())
-                        ->default(fn (): ?int => $this->activePlaylistTab !== 'all'
-                            ? (int) $this->activePlaylistTab
+                        ->default(fn (): ?int => $this->activeTab !== null
+                            ? (int) $this->activeTab
                             : null)
                         ->helperText(__('The Dynamic Group rule will be appended to this playlist\'s Dynamic Groups (TMDB) configuration.')),
-                ] + PlaylistResource::getDynamicGroupRuleSchema())
+                    // The type is fixed by which listing page this action is
+                    // on, so the Content Type selector from the reused rule
+                    // schema is replaced with a locked Hidden field. Keeping
+                    // it visible/editable would let a user pick series-only
+                    // `source` options while the closure below still forces
+                    // `type` to 'vod' on submit, corrupting the saved rule.
+                    Hidden::make('type')->default('vod'),
+                ], array_values(array_filter(
+                    PlaylistResource::getDynamicGroupRuleSchema(),
+                    fn ($field): bool => $field->getName() !== 'type',
+                ))))
                 // Inject the implicit type INSIDE the using() closure rather
                 // than via Filament's mutateFormDataBeforeCreate hook (v5
                 // dropped that method). The data array is passed through;
@@ -124,11 +132,22 @@ class ListVodDynamicGroups extends ListRecords
                     );
 
                     if ($group === null) {
-                        // TMDB returned no ids and no pre-existing row —
+                        // TMDB returned no ids and no pre-existing row -
                         // remove the rule we just appended so the config
                         // doesn't carry an orphan.
                         $playlist->update(['dynamic_groups_config' => array_values(array_slice($config, 0, -1))]);
-                        throw new RuntimeException(__('No TMDB matches for this rule and no pre-existing Dynamic Group. Rule was not saved.'));
+
+                        // Halt is caught silently by Filament's action
+                        // pipeline (unlike a plain exception, which
+                        // surfaces as an unhandled crash), so the
+                        // notification below is sent explicitly first.
+                        Notification::make()
+                            ->danger()
+                            ->title(__('Dynamic Group not created'))
+                            ->body(__('No TMDB matches for this rule and no pre-existing Dynamic Group. Rule was not saved.'))
+                            ->send();
+
+                        throw new Halt;
                     }
 
                     return $group;
@@ -155,10 +174,10 @@ class ListVodDynamicGroups extends ListRecords
     {
         $base = static::getResource()::getEloquentQuery();
 
-        $allCount = (clone $base)->count();
-        // Build the per-playlist buckets via a single groupBy query
-        // (see VodDynamicGroupResource::getEloquentQuery() — no
-        // withCount attached so this combination is Postgres-safe).
+        // Build the per-playlist buckets via a single groupBy query (see
+        // VodDynamicGroupResource::getEloquentQuery() - no withCount
+        // attached so this combination is Postgres-safe). The "all" count
+        // is derived from this same result instead of a second COUNT(*).
         $playlistCounts = (clone $base)
             ->selectRaw('playlist_id, count(*) as aggregate')
             ->groupBy('playlist_id')
@@ -167,13 +186,13 @@ class ListVodDynamicGroups extends ListRecords
         $playlists = Playlist::query()
             ->whereIn('id', $playlistCounts->keys())
             ->orderBy('name')
-            ->get();
+            ->get(['id', 'name']);
 
         $tabs = [
             // `null` is the conventional "all" sentinel that
             // Filament's ListRecords treats as "no extra where".
             null => Tab::make(__('All Playlists'))
-                ->badge($allCount),
+                ->badge($playlistCounts->sum()),
         ];
         foreach ($playlists as $playlist) {
             $tabs[(string) $playlist->id] = Tab::make($playlist->name)
@@ -191,7 +210,7 @@ class ListVodDynamicGroups extends ListRecords
             // withCount('channels') attaches the channels pivot count as
             // a subquery column the TextColumn::make('channels_count')
             // reads from. Applied via modifyQueryUsing so it ONLY
-            // attaches when the table renders — getTabs() runs a
+            // attaches when the table renders - getTabs() runs a
             // separate groupBy('playlist_id') query against the
             // resource's getEloquentQuery() and that combination blows
             // up Postgres (subquery columns must be in GROUP BY).
