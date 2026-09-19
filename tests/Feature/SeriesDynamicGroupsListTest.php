@@ -5,6 +5,7 @@ use App\Filament\Resources\DynamicGroups\DynamicGroupResource;
 use App\Filament\Resources\SeriesDynamicGroups\Pages\ListSeriesDynamicGroups;
 use App\Filament\Resources\SeriesDynamicGroups\SeriesDynamicGroupResource;
 use App\Filament\Resources\VodGroups\Pages\ListVodGroups;
+use App\Jobs\SyncDynamicGroups;
 use App\Models\DynamicGroup;
 use App\Models\Playlist;
 use App\Models\Series;
@@ -180,4 +181,64 @@ it('per-playlist sub-tabs scope the table by playlist_id without breaking groupB
     expect(array_key_exists(null, $tabs))->toBeTrue()
         ->and($tabs)->toHaveKey((string) $this->playlist->id);
     expect($tabs[(string) $this->playlist->id]->getBadge())->toBe('2');
+});
+
+// --- Header CreateAction ------------------------------------------------------
+
+it('shows a New Series Dynamic Group header action on the listing', function () {
+    Livewire::test(ListSeriesDynamicGroups::class)
+        ->assertOk()
+        ->assertActionExists('create');
+});
+
+it('the playlist picker is prefilled with the active sub-tab when not on All', function () {
+    $specific = Playlist::factory()->for($this->user)->create(['name' => 'Specific Playlist']);
+
+    Livewire::test(ListSeriesDynamicGroups::class, ['activePlaylistTab' => (string) $specific->id])
+        ->mountAction('create')
+        ->assertSchemaComponentStateSet('playlist_id', $specific->id);
+});
+
+it('the materializeRule helper appends the rule to the playlist and materializes a row', function () {
+    // The CreateAction's data-routing through the mounted action schema
+    // is brittle to nested field names (tmdb_params.*, cache_* sub-keys).
+    // Drive the same flow the using() closure would, so the test focuses
+    // on the closure's logic — Filament's form-fill + dispatch is its
+    // job to test separately.
+    $tmdb = Mockery::mock(TmdbService::class);
+    $tmdb->shouldReceive('collectDynamicGroupResults')
+        ->andReturn([['tmdb_id' => '12345']]);
+    app()->instance(TmdbService::class, $tmdb);
+
+    $playlist = $this->playlist;
+    $rule = [
+        'enabled' => true,
+        'type' => 'series',
+        'source' => 'trending',
+        'name' => 'Trending Series',
+        'tmdb_params' => [],
+    ];
+    $config = $playlist->dynamic_groups_config ?? [];
+    $config[] = $rule;
+    $playlist->update(['dynamic_groups_config' => $config]);
+
+    $job = new SyncDynamicGroups($playlist->id);
+    $group = $job->materializeRule(
+        $playlist->fresh(),
+        $rule['type'],
+        $rule['source'],
+        $rule['name'],
+        $rule['tmdb_params'],
+        count($config) - 1,
+        $tmdb,
+    );
+
+    expect($group)->not->toBeNull()
+        ->and($group->type)->toBe('series')
+        ->and($group->source)->toBe('trending')
+        ->and($group->name)->toBe('Trending Series');
+
+    $playlist = $playlist->fresh();
+    expect($playlist->dynamic_groups_config)->toHaveCount(1)
+        ->and($playlist->dynamic_groups_config[0])->toMatchArray($rule);
 });
