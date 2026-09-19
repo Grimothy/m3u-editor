@@ -37,14 +37,10 @@ beforeEach(function () {
 
 // --- Resource-level visibility / nav registration ----------------------------
 
-it('registers the VOD Dynamic Groups nav item at the TOP of the VOD Channels group', function () {
-    // Sort = 1 puts Dynamic Groups ABOVE VOD Groups (sort 2) and
-    // VODs (sort 3). Dynamic Groups is the operator's primary
-    // surface for "auto-grouped by TMDB" content — the user
-    // explicitly asked for it to appear at the top of the section.
+it('registers the VOD Dynamic Groups nav item below existing VOD navigation items', function () {
     expect(VodDynamicGroupResource::shouldRegisterNavigation())->toBeTrue()
         ->and(VodDynamicGroupResource::getNavigationGroup())->toBe(__('VOD Channels'))
-        ->and(VodDynamicGroupResource::getNavigationSort())->toBeLessThanOrEqual(1);
+        ->and(VodDynamicGroupResource::getNavigationSort())->toBeGreaterThanOrEqual(4);
 });
 
 it('hides the sidebar entry when the experimental feature flag is disabled', function () {

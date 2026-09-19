@@ -69,16 +69,13 @@ class VodDynamicGroupResource extends Resource
     }
 
     /**
-     * Sits ABOVE VOD Groups (sort 2) and VODs (sort 3) within the
-     * VOD Channels group — Dynamic Groups is the operator's primary
-     * destination for "auto-grouped by TMDB" content, so it earns
-     * the top slot. Sort = 1 leaves room for future additions that
-     * would also need to appear above the existing items without
-     * reshuffling them.
+     * Sits BELOW VOD Groups (sort 2) and VODs (sort 3) within the
+     * VOD Channels group. Sort = 4 keeps it in the next available
+     * position without changing existing navigation slots.
      */
     public static function getNavigationSort(): ?int
     {
-        return 1;
+        return 4;
     }
 
     public static function getModelLabel(): string
