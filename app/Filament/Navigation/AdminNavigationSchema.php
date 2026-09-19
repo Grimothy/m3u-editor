@@ -154,8 +154,8 @@ final class AdminNavigationSchema
                 'icon' => 'heroicon-m-film',
                 'available' => fn () => true,
                 'items' => [
-                    'vod_dynamic_groups' => ['resolve' => fn () => VodDynamicGroupResource::getNavigationItems()],
                     'vod_groups' => ['resolve' => fn () => VodGroupResource::getNavigationItems()],
+                    'vod_dynamic_groups' => ['resolve' => fn () => VodDynamicGroupResource::getNavigationItems()],
                     'vods' => ['resolve' => fn () => VodResource::getNavigationItems()],
                 ],
             ],
@@ -164,8 +164,8 @@ final class AdminNavigationSchema
                 'icon' => 'heroicon-m-play',
                 'available' => fn () => true,
                 'items' => [
-                    'series_dynamic_groups' => ['resolve' => fn () => SeriesDynamicGroupResource::getNavigationItems()],
                     'categories' => ['resolve' => fn () => CategoryResource::getNavigationItems()],
+                    'series_dynamic_groups' => ['resolve' => fn () => SeriesDynamicGroupResource::getNavigationItems()],
                     'series' => ['resolve' => fn () => SeriesResource::getNavigationItems()],
                 ],
             ],
