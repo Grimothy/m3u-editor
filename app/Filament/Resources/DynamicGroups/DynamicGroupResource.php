@@ -25,7 +25,7 @@ use Illuminate\Support\Collection;
 /**
  * Read-only Filament resource for a DynamicGroup row. Rule config lives on
  * the Playlist form's Dynamic Groups (TMDB) repeater, not here. Only the
- * `view` route is registered — the per-type listing surfaces live on
+ * `view` route is registered - the per-type listing surfaces live on
  * `VodDynamicGroupResource` and `SeriesDynamicGroupResource` (each
  * scoped to one type in their own `getEloquentQuery()`). The breadcrumb
  * chain through the per-type Dynamic Groups listings is preserved here,
@@ -41,7 +41,7 @@ class DynamicGroupResource extends Resource
     }
 
     /**
-     * Always hide from Filament's nav and global search — drill-in is only
+     * Always hide from Filament's nav and global search - drill-in is only
      * reachable from the per-type listing pages, never as a top-level
      * entry. Access is intentionally permissive so the view route
      * resolves, just not advertised.
@@ -52,7 +52,7 @@ class DynamicGroupResource extends Resource
     }
 
     /**
-     * Hidden from the sidebar — the two per-type listing surfaces are
+     * Hidden from the sidebar - the two per-type listing surfaces are
      * registered as separate Filament resources (VodDynamicGroupResource
      * in the VOD Channels group, SeriesDynamicGroupResource in the Series
      * group). This resource stays only as the canonical "view one

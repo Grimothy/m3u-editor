@@ -3473,11 +3473,11 @@ class PlaylistResource extends Resource implements CopilotResource
     }
 
     /**
-     * Reusable Dynamic Groups (TMDB) rule schema — the field set used inside
+     * Reusable Dynamic Groups (TMDB) rule schema - the field set used inside
      * the `dynamic_groups_config` Repeater on the Playlist form, exposed as a
      * static method so other surfaces (notably the VOD / Series Dynamic
      * Groups listing pages' CreateAction) can build the same rule shape
-     * without re-declaring each field. Returns only the *rule* fields —
+     * without re-declaring each field. Returns only the *rule* fields -
      * cache_* fields intentionally live on the Playlist form only and are not
      * ported here as part of the creation-from-listing flow.
      *
@@ -3594,7 +3594,7 @@ class PlaylistResource extends Resource implements CopilotResource
                 ->label(__('Pages to Fetch'))
                 ->hintIcon(
                     'heroicon-m-question-mark-circle',
-                    tooltip: __('TMDB paginates results ~20 per page. Increase this if items you expect (e.g. a recent theatrical release) aren\'t showing up — they may simply be on a later page than the default covers. Applies to all paginated sources (Trending, Popular, Now Playing, Upcoming, Top Genre).')
+                    tooltip: __('TMDB paginates results ~20 per page. Increase this if items you expect (e.g. a recent theatrical release) aren\'t showing up - they may simply be on a later page than the default covers. Applies to all paginated sources (Trending, Popular, Now Playing, Upcoming, Top Genre).')
                 )
                 ->options([
                     1 => '1 (~20 items)',

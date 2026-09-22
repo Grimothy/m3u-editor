@@ -2,6 +2,7 @@
 
 namespace App\Http\Controllers;
 
+use App\Casts\UtcDateTime;
 use App\Enums\ChannelLogoType;
 use App\Enums\DvrMatchMode;
 use App\Enums\DvrRecordingStatus;
@@ -11,6 +12,7 @@ use App\Enums\PlaylistChannelId;
 use App\Events\ViewerFavoriteEvent;
 use App\Facades\PlaylistFacade;
 use App\Facades\ProxyFacade;
+use App\Jobs\FetchTmdbIds;
 use App\Jobs\RefreshMediaServerLibraryJob;
 use App\Models\ArrIntegration;
 use App\Models\Category;
@@ -1308,6 +1310,18 @@ class XtreamApiController extends Controller
                 }
             }
 
+            // On-demand TMDB enrichment: global opt-in (Settings > Integrations > TMDB >
+            // "Auto-enrichment on fetch"), for installs that don't run the bulk "Fetch TMDB
+            // Metadata" action. processSingleSeries() is self-gating on existing tmdb_id/
+            // plot/cover/etc., so once a series is enriched this is a cheap no-op on every
+            // later view - a one-time cost per series, persisted to $seriesItem.
+            if (! $isMediaServerSeries && app(GeneralSettings::class)->tmdb_auto_enrich_on_fetch) {
+                $tmdb = app(TmdbService::class);
+                if ($tmdb->isConfigured()) {
+                    app(FetchTmdbIds::class)->processSingleSeries($tmdb, $seriesItem);
+                }
+            }
+
             // Gate on an episode actually carrying a dvr_recording_id rather
             // than on $isDvrSeries: DvrVodIntegrationService::findOrCreateSeries
             // matches by tmdb/tvmaze id or name without filtering on
@@ -1839,6 +1853,18 @@ class XtreamApiController extends Controller
                 // shouldn't be re-triggered on every client request), and don't fail the
                 // request if the live call errors - fall back to the cached data instead.
                 $channel->fetchMetadata(refresh: true, skipTmdb: true);
+            }
+
+            // On-demand TMDB enrichment: global opt-in (Settings > Integrations > TMDB >
+            // "Auto-enrichment on fetch"), for installs that don't run the bulk "Fetch TMDB
+            // Metadata" action. processVodChannel() is self-gating on existing tmdb_id/
+            // cast_list/etc., so once a title is enriched this is a cheap no-op on every
+            // later view - a one-time cost per title, persisted to $channel.
+            if (app(GeneralSettings::class)->tmdb_auto_enrich_on_fetch) {
+                $tmdb = app(TmdbService::class);
+                if ($tmdb->isConfigured()) {
+                    app(FetchTmdbIds::class)->processVodChannel($tmdb, $channel);
+                }
             }
 
             // Build info section - use channel's info field if available, otherwise build from channel data
@@ -4731,6 +4757,30 @@ class XtreamApiController extends Controller
         // app.timezone's wall-clock before Eloquent formats them for storage, or the
         // round-trip re-read will reconstruct the wrong absolute instant.
         $appTz = config('app.timezone', 'UTC');
+        $manualStart = Carbon::parse($startTime)->setTimezone($appTz);
+        $manualEnd = Carbon::parse($endTime)->setTimezone($appTz);
+
+        // Duplicate guard: same dvr_setting, same channel, same auth, overlapping
+        // manual_start/manual_end window. Mirrors createDvrSeriesRule's pattern
+        // below so a double-tap or two devices scheduling the same airing return
+        // 409 + the existing rule's id instead of creating a second manual rule.
+        $existing = DvrRecordingRule::where('dvr_setting_id', $dvrSetting->id)
+            ->where('type', DvrRuleType::Manual)
+            ->where('enabled', true)
+            ->where('channel_id', $channelId)
+            ->where('manual_start', '<', UtcDateTime::forQuery($manualEnd))
+            ->where('manual_end', '>', UtcDateTime::forQuery($manualStart))
+            ->when($playlistAuth, fn ($q) => $q->where('playlist_auth_id', $playlistAuth->id))
+            ->first();
+
+        if ($existing) {
+            return response()->json([
+                'error' => 'A recording for this airing already exists',
+                'rule_id' => $existing->id,
+                'duplicate' => true,
+            ], 409);
+        }
+
         $rule = DvrRecordingRule::create([
             'user_id' => $dvrSetting->user_id,
             'dvr_setting_id' => $dvrSetting->id,
@@ -4739,8 +4789,8 @@ class XtreamApiController extends Controller
             'channel_id' => $channelId,
             'series_title' => $title,
             'match_mode' => DvrMatchMode::Exact,
-            'manual_start' => Carbon::parse($startTime)->setTimezone($appTz),
-            'manual_end' => Carbon::parse($endTime)->setTimezone($appTz),
+            'manual_start' => $manualStart,
+            'manual_end' => $manualEnd,
             'start_early_seconds' => (int) $request->input('start_early_seconds', $dvrSetting->default_start_early_seconds ?? 0),
             'end_late_seconds' => (int) $request->input('end_late_seconds', $dvrSetting->default_end_late_seconds ?? 0),
             'enabled' => true,

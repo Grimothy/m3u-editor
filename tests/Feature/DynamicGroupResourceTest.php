@@ -37,7 +37,7 @@ beforeEach(function () {
     // The two sibling listing resources (VodDynamicGroupResource and
     // SeriesDynamicGroupResource) gate their nav visibility on BOTH the
     // feature flag AND TmdbService::isConfigured(). Mock TMDB configured
-    // here so those sibling resources — not this view-only parent — would
+    // here so those sibling resources - not this view-only parent - would
     // advertise themselves in the sidebar if a test queried them.
     $tmdb = Mockery::mock(TmdbService::class);
     $tmdb->shouldReceive('isConfigured')->andReturn(true);
@@ -326,9 +326,12 @@ it('chains the View page breadcrumb through VodDynamicGroupResource for vod-type
 
     // The root segment points at the per-type Dynamic Groups
     // index (VodDynamicGroupResource for vod), not the older
-    // VOD Groups / Categories pages.
-    expect($breadcrumbs)->toHaveKey(VodDynamicGroupResource::getUrl('index'))
-        ->and($breadcrumbs[VodDynamicGroupResource::getUrl('index')])->toBe('Dynamic Groups')
+    // VOD Groups / Categories pages, and carries `?tab=` so the
+    // destination lands back on this record's playlist tab.
+    $indexUrl = VodDynamicGroupResource::getUrl('index').'?tab='.$this->playlist->id;
+
+    expect($breadcrumbs)->toHaveKey($indexUrl)
+        ->and($breadcrumbs[$indexUrl])->toBe('Dynamic Groups')
         ->and($breadcrumbs)->toContain('Dynamic')
         ->and($breadcrumbs)->toContain('Trending Now');
 });
@@ -347,9 +350,12 @@ it('chains the View page breadcrumb through SeriesDynamicGroupResource for serie
 
     // The root segment points at the per-type Dynamic Groups
     // index (SeriesDynamicGroupResource for series). Label is
-    // "Dynamic Groups" — same as the vod-side.
-    expect($breadcrumbs)->toHaveKey(SeriesDynamicGroupResource::getUrl('index'))
-        ->and($breadcrumbs[SeriesDynamicGroupResource::getUrl('index')])->toBe('Dynamic Groups')
+    // "Dynamic Groups" - same as the vod-side. Carries `?tab=` so
+    // the destination lands back on this record's playlist tab.
+    $indexUrl = SeriesDynamicGroupResource::getUrl('index').'?tab='.$this->playlist->id;
+
+    expect($breadcrumbs)->toHaveKey($indexUrl)
+        ->and($breadcrumbs[$indexUrl])->toBe('Dynamic Groups')
         ->and($breadcrumbs)->toContain('Dynamic')
         ->and($breadcrumbs)->toContain('Trending Series');
 });
@@ -366,22 +372,23 @@ it('the View page\'s back action points at the per-type Dynamic Groups index for
         'type' => 'series', 'source' => 'trending', 'name' => 'Series Group',
     ]);
 
-    // The back button label is the same for both types — the user
+    // The back button label is the same for both types - the user
     // goes back to the Dynamic Groups list (whichever per-type
-    // page they came from). The URL is per-type.
+    // page they came from). The URL is per-type and carries `?tab=`
+    // so the destination lands back on this record's playlist tab.
     Livewire::test(ViewDynamicGroup::class, ['record' => $vodGroup->id])
         ->assertOk()
         ->assertSee('Back to Dynamic Groups')
         ->assertDontSee('Back to Groups')
         ->assertDontSee('Back to Categories')
-        ->assertActionHasUrl('back_to_index', VodDynamicGroupResource::getUrl('index'));
+        ->assertActionHasUrl('back_to_index', VodDynamicGroupResource::getUrl('index').'?tab='.$this->playlist->id);
 
     Livewire::test(ViewDynamicGroup::class, ['record' => $seriesGroup->id])
         ->assertOk()
         ->assertSee('Back to Dynamic Groups')
         ->assertDontSee('Back to Groups')
         ->assertDontSee('Back to Categories')
-        ->assertActionHasUrl('back_to_index', SeriesDynamicGroupResource::getUrl('index'));
+        ->assertActionHasUrl('back_to_index', SeriesDynamicGroupResource::getUrl('index').'?tab='.$this->playlist->id);
 });
 
 it('uses the Dynamic Group title for both VOD and Series detail records', function () {
@@ -417,6 +424,28 @@ it('deletes the DynamicGroup and cascades its dynamic_group_items when the View 
 
     expect(DynamicGroup::find($group->id))->toBeNull()
         ->and(DB::table('dynamic_group_items')->where('dynamic_group_id', $group->id)->exists())->toBeFalse();
+});
+
+it('titles the View page "View Dynamic Group" for vod-type and "View Dynamic Category" for series-type', function () {
+    // Filament's default title is "View {getModelLabel()}", and the
+    // resource's model label is the type-mixed "Dynamic Group" - a
+    // series-type record's page was titled "View Dynamic Group" instead of
+    // "View Dynamic Category". getTitle() must branch on the record's type.
+    $vodGroup = DynamicGroup::create([
+        'playlist_id' => $this->playlist->id,
+        'user_id' => $this->user->id,
+        'type' => 'vod', 'source' => 'trending', 'name' => 'VOD Group',
+    ]);
+    $seriesGroup = DynamicGroup::create([
+        'playlist_id' => $this->playlist->id,
+        'user_id' => $this->user->id,
+        'type' => 'series', 'source' => 'trending', 'name' => 'Series Group',
+    ]);
+
+    expect(Livewire::test(ViewDynamicGroup::class, ['record' => $vodGroup->id])->instance()->getTitle())
+        ->toBe('View Dynamic Group');
+    expect(Livewire::test(ViewDynamicGroup::class, ['record' => $seriesGroup->id])->instance()->getTitle())
+        ->toBe('View Dynamic Group');
 });
 
 it('defaults the Movies relation manager sort to channels.created_at desc', function () {
@@ -491,26 +520,4 @@ it('defaults the Series relation manager sort to series.created_at desc', functi
         ->assertOk()
         ->loadTable()
         ->assertCanSeeTableRecords([$newest, $middle, $oldest], inOrder: true);
-});
-
-it('titles the View page "View Dynamic Group" for vod-type and "View Dynamic Category" for series-type', function () {
-    // Filament's default title is "View {getModelLabel()}", and the
-    // resource's model label is the type-mixed "Dynamic Group" - a
-    // series-type record's page was titled "View Dynamic Group" instead of
-    // "View Dynamic Category". getTitle() must branch on the record's type.
-    $vodGroup = DynamicGroup::create([
-        'playlist_id' => $this->playlist->id,
-        'user_id' => $this->user->id,
-        'type' => 'vod', 'source' => 'trending', 'name' => 'VOD Group',
-    ]);
-    $seriesGroup = DynamicGroup::create([
-        'playlist_id' => $this->playlist->id,
-        'user_id' => $this->user->id,
-        'type' => 'series', 'source' => 'trending', 'name' => 'Series Group',
-    ]);
-
-    expect(Livewire::test(ViewDynamicGroup::class, ['record' => $vodGroup->id])->instance()->getTitle())
-        ->toBe('View Dynamic Group');
-    expect(Livewire::test(ViewDynamicGroup::class, ['record' => $seriesGroup->id])->instance()->getTitle())
-        ->toBe('View Dynamic Group');
 });

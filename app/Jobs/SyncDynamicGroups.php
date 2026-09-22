@@ -185,7 +185,7 @@ class SyncDynamicGroups implements ShouldQueue
 
         if ($tmdbIds === []) {
             // TMDB returned no ids for this rule. TmdbService returns
-            // [] on any error (timeout, non-2xx, rate-limit — see its
+            // [] on any error (timeout, non-2xx, rate-limit - see its
             // catch blocks), so this is also the transient-failure
             // path. If we already have a DynamicGroup row for this
             // triple, treat the run as a no-op for it: keep the row
