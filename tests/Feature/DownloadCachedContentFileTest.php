@@ -688,3 +688,248 @@ it('handle returns cleanly without touching the row when enable_cache is off AND
     (new DownloadCachedContentFile($channel, 999999))->handle();
     expect(CachedContentFile::count())->toBe(0);
 });
+
+// ---------------------------------------------------------------------------
+// PR D: fetchWithSafeRedirects() redirect-walk tests
+// ---------------------------------------------------------------------------
+//
+// `fetchWithSafeRedirects()` disables Guzzle's automatic redirect-following
+// and walks the Location header chain manually, re-validating each hop
+// through `PrivateNetworkGuard::assertUrlSafe()`. The tests below pin
+// behaviour for: a clean public redirect chain, an SSRF-rejected redirect
+// target (no private-network request must fire), a relative Location
+// header that resolves against the current URL, exceeding the
+// `$maxRedirects` (5) cap, and a non-http scheme redirect target.
+
+it('redirect walk: public -> public -> 200 completes and lands the file on disk', function () {
+    Storage::fake('cache');
+
+    // First request: 302 to a second public IP. Second: the real 200.
+    // The job must follow the redirect without dropping bytes or
+    // marking the row Failed. Using IP-literal URLs (TEST-NET-2 range
+    // 198.51.100.0/24, public per PHP's filter flags) avoids DNS
+    // resolution in the test environment.
+    Http::fake([
+        'http://198.51.100.1/origin.mp4' => Http::response('', 302, [
+            'Location' => 'http://198.51.100.2/movie.mp4',
+        ]),
+        'http://198.51.100.2/movie.mp4' => Http::response('redirected bytes', 200, [
+            'Content-Length' => (string) strlen('redirected bytes'),
+        ]),
+    ]);
+
+    $user = User::factory()->create();
+    $playlist = Playlist::factory()->for($user)->create();
+    $channel = Channel::factory()->for($user)->for($playlist)->create([
+        'tmdb_id' => 570,
+        'url' => 'http://198.51.100.1/origin.mp4',
+    ]);
+
+    $row = CachedContentFile::factory()->create([
+        'content_type' => 'movie',
+        'tmdb_id' => '570',
+        'playlist_id' => $playlist->id,
+        'user_id' => $user->id,
+        'status' => CachedContentFileStatus::Pending,
+    ]);
+
+    (new DownloadCachedContentFile($channel, $row->id))->handle();
+
+    $fresh = $row->fresh();
+    expect($fresh->status)->toBe(CachedContentFileStatus::Completed)
+        ->and($fresh->file_path)->not->toBeNull()
+        ->and($fresh->file_size_bytes)->toBe(strlen('redirected bytes'))
+        ->and(Storage::disk('cache')->exists($fresh->file_path))->toBeTrue();
+
+    Http::assertSent(function ($request) {
+        return $request->url() === 'http://198.51.100.1/origin.mp4';
+    });
+    Http::assertSent(function ($request) {
+        return $request->url() === 'http://198.51.100.2/movie.mp4';
+    });
+});
+
+it('redirect walk: public -> http://127.0.0.1/... is rejected and no private request fires', function () {
+    Storage::fake('cache');
+    Http::preventStrayRequests();
+
+    Http::fake([
+        'http://198.51.100.1/payload.mp4' => Http::response('', 302, [
+            'Location' => 'http://127.0.0.1/admin',
+        ]),
+    ]);
+
+    $user = User::factory()->create();
+    $playlist = Playlist::factory()->for($user)->create();
+    $channel = Channel::factory()->for($user)->for($playlist)->create([
+        'tmdb_id' => 571,
+        'url' => 'http://198.51.100.1/payload.mp4',
+    ]);
+
+    $row = CachedContentFile::factory()->create([
+        'content_type' => 'movie',
+        'tmdb_id' => '571',
+        'playlist_id' => $playlist->id,
+        'user_id' => $user->id,
+        'status' => CachedContentFileStatus::Pending,
+        'failure_count' => 0,
+    ]);
+
+    (new DownloadCachedContentFile($channel, $row->id))->handle();
+
+    $fresh = $row->fresh();
+    // The job's catch(InvalidArgumentException) marks Failed with the
+    // "Redirect rejected" prefix so the activity widget can surface the
+    // SSRF rejection distinctly from a generic HTTP failure.
+    expect($fresh->status)->toBe(CachedContentFileStatus::Failed)
+        ->and($fresh->failure_count)->toBe(1)
+        ->and($fresh->last_failed_at)->not->toBeNull()
+        ->and($fresh->last_error_message)->not->toBeNull()
+        ->and($fresh->last_error_message)->toContain('Redirect rejected (SSRF guard)')
+        ->and($fresh->last_error_message)->toContain('127.0.0.1')
+        // No file_path - the abort happened before any bytes were written.
+        ->and($fresh->file_path)->toBeNull();
+
+    // Critical: Http::assertNotSent() against the private URL catches the
+    // failure mode the SSRF guard exists to prevent - a real outbound
+    // request reaching 127.0.0.1.
+    Http::assertNotSent(function ($request) {
+        return str_contains($request->url(), '127.0.0.1');
+    });
+});
+
+it('redirect walk: relative Location header resolves against the current URL', function () {
+    Storage::fake('cache');
+
+    // First request returns a relative Location "/movie.mp4"; the job
+    // must resolve that against the original URL via Guzzle's
+    // UriResolver to "http://198.51.100.1/movie.mp4".
+    Http::fake([
+        'http://198.51.100.1/origin' => Http::response('', 302, [
+            'Location' => '/movie.mp4',
+        ]),
+        'http://198.51.100.1/movie.mp4' => Http::response('relative-redirect bytes', 200, [
+            'Content-Length' => (string) strlen('relative-redirect bytes'),
+        ]),
+    ]);
+
+    $user = User::factory()->create();
+    $playlist = Playlist::factory()->for($user)->create();
+    $channel = Channel::factory()->for($user)->for($playlist)->create([
+        'tmdb_id' => 572,
+        'url' => 'http://198.51.100.1/origin',
+    ]);
+
+    $row = CachedContentFile::factory()->create([
+        'content_type' => 'movie',
+        'tmdb_id' => '572',
+        'playlist_id' => $playlist->id,
+        'user_id' => $user->id,
+        'status' => CachedContentFileStatus::Pending,
+    ]);
+
+    (new DownloadCachedContentFile($channel, $row->id))->handle();
+
+    $fresh = $row->fresh();
+    expect($fresh->status)->toBe(CachedContentFileStatus::Completed)
+        ->and($fresh->file_size_bytes)->toBe(strlen('relative-redirect bytes'))
+        ->and(Storage::disk('cache')->exists($fresh->file_path))->toBeTrue();
+
+    Http::assertSent(function ($request) {
+        // The resolved relative target must be on the SAME host as the
+        // original URL, not a fabricated host.
+        return $request->url() === 'http://198.51.100.1/movie.mp4';
+    });
+});
+
+it('redirect walk: more than $maxRedirects hops ends the row Failed with the redirect-limit error', function () {
+    Storage::fake('cache');
+
+    // Every request returns 302 -> /next-N. With $maxRedirects = 5 the
+    // loop exits after 6 iterations (i = 0..5) and the job throws
+    // RuntimeException with the "Exceeded N redirects" message. The
+    // outer catch (Throwable) in handle() routes it to "Unexpected error:"
+    // AND re-throws so Horizon applies backoff - same shape as the
+    // existing HTTP-error failure-path test.
+    Http::fake([
+        'http://198.51.100.1/*' => function () {
+            static $i = 0;
+            $i++;
+
+            return Http::response('', 302, ['Location' => '/next-'.$i]);
+        },
+    ]);
+
+    $user = User::factory()->create();
+    $playlist = Playlist::factory()->for($user)->create();
+    $channel = Channel::factory()->for($user)->for($playlist)->create([
+        'tmdb_id' => 573,
+        'url' => 'http://198.51.100.1/start',
+    ]);
+
+    $row = CachedContentFile::factory()->create([
+        'content_type' => 'movie',
+        'tmdb_id' => '573',
+        'playlist_id' => $playlist->id,
+        'user_id' => $user->id,
+        'status' => CachedContentFileStatus::Pending,
+        'failure_count' => 0,
+    ]);
+
+    try {
+        (new DownloadCachedContentFile($channel, $row->id))->handle();
+    } catch (RuntimeException) {
+        // Expected - handle() marks Failed via markFailed() and then
+        // re-throws so Horizon applies backoff (matching the existing
+        // HTTP-error failure path).
+    }
+
+    $fresh = $row->fresh();
+    expect($fresh->status)->toBe(CachedContentFileStatus::Failed)
+        ->and($fresh->failure_count)->toBe(1)
+        ->and($fresh->last_error_message)->not->toBeNull()
+        ->and($fresh->last_error_message)->toContain('redirects')
+        ->and($fresh->file_path)->toBeNull();
+});
+
+it('redirect walk: redirect to a non-http scheme (file:///etc/passwd) is rejected', function () {
+    Storage::fake('cache');
+    Http::preventStrayRequests();
+
+    // The guard rejects non-http(s) schemes regardless of destination,
+    // so this case uses a public first hop to keep the SSRF path
+    // distinct from the previous redirect tests.
+    Http::fake([
+        'http://198.51.100.1/payload.mp4' => Http::response('', 302, [
+            'Location' => 'file:///etc/passwd',
+        ]),
+    ]);
+
+    $user = User::factory()->create();
+    $playlist = Playlist::factory()->for($user)->create();
+    $channel = Channel::factory()->for($user)->for($playlist)->create([
+        'tmdb_id' => 574,
+        'url' => 'http://198.51.100.1/payload.mp4',
+    ]);
+
+    $row = CachedContentFile::factory()->create([
+        'content_type' => 'movie',
+        'tmdb_id' => '574',
+        'playlist_id' => $playlist->id,
+        'user_id' => $user->id,
+        'status' => CachedContentFileStatus::Pending,
+        'failure_count' => 0,
+    ]);
+
+    (new DownloadCachedContentFile($channel, $row->id))->handle();
+
+    $fresh = $row->fresh();
+    expect($fresh->status)->toBe(CachedContentFileStatus::Failed)
+        ->and($fresh->failure_count)->toBe(1)
+        ->and($fresh->last_error_message)->toContain('Redirect rejected (SSRF guard)')
+        ->and($fresh->file_path)->toBeNull();
+
+    // Pin the scheme rejection in the surfaced error - operators reading
+    // the activity widget should be able to tell WHY this was rejected.
+    expect($fresh->last_error_message)->toContain('file');
+});
