@@ -213,8 +213,15 @@ class XtreamCategoryService
      * category_id decodes to a dynamic group (see
      * DynamicGroup::idFromXtreamCategoryId()).
      *
-     * The `enabled` cut is left to the caller's base query, which already
-     * filters `enabled = true` on both the channels and series paths.
+     * The subquery enforces `dynamic_groups.enabled = true` so a tombstoned
+     * (renamed/removed) DynamicGroup stops serving its membership to clients
+     * even when the (type, source, name) triple still matches a row in
+     * `dynamic_groups`. SyncDynamicGroups hard-deletes `dynamic_group_items`
+     * for stale groups, but historically those rows were left behind — so this
+     * defense-in-depth check is required either way.
+     *
+     * The per-row `enabled` cut on channels/series is left to the caller's
+     * base query, which already filters `enabled = true` on both paths.
      *
      * @param  \Illuminate\Contracts\Database\Query\Builder|Builder|Relation  $query
      */
@@ -226,8 +233,10 @@ class XtreamCategoryService
         $query->whereIn("{$table}.id", function ($sub) use ($dynamicGroupId, $itemType): void {
             $sub->select('item_id')
                 ->from('dynamic_group_items')
-                ->where('dynamic_group_id', $dynamicGroupId)
-                ->where('item_type', $itemType);
+                ->join('dynamic_groups', 'dynamic_groups.id', '=', 'dynamic_group_items.dynamic_group_id')
+                ->where('dynamic_group_items.dynamic_group_id', $dynamicGroupId)
+                ->where('dynamic_groups.enabled', true)
+                ->where('dynamic_group_items.item_type', $itemType);
         });
     }
 

@@ -34,6 +34,26 @@ class ChannelsRelationManager extends RelationManager
 
     protected static ?string $title = 'Movies';
 
+    /**
+     * Names of the flat record actions this relation manager exposes itself.
+     * SetupTable() wires up VodResource's full action set; this whitelist is
+     * the ONLY list allowed to survive the strip pass below so that any
+     * destructive/mutating action added to VodResource later (delete, edit,
+     * fetch_tmdb_ids, sync, probe, manual_tmdb_search, process_vod, ...) does
+     * not silently leak onto this read-only membership surface. Filament's
+     * mountAction() only honors disabled/authorize (not visibility), so a
+     * crafted mountTableAction('delete', ...) call would otherwise still
+     * invoke the inherited DeleteAction even when the row action is hidden.
+     * The cache ActionGroup's children (cache_now, delete_cache_record) are
+     * the only ones this surface intentionally owns.
+     *
+     * @var array<int, string>
+     */
+    private const KEPT_FLAT_ACTION_NAMES = [
+        'cache_now',
+        'delete_cache_record',
+    ];
+
     public static function getNavigationLabel(): string
     {
         return __('Movies');
@@ -108,22 +128,28 @@ class ChannelsRelationManager extends RelationManager
 
         // Filament's recordActions() resets the visible record-actions list but
         // leaves the flat-actions cache (Table::getAction()'s source) populated
-        // with everything VodResource::setupTable() wired up: edit, play, view,
-        // fetch_tmdb_ids, sync, probe. None of those belong on this read-only
-        // membership surface, and Livewire::getAction('edit') still resolves to
-        // the inherited EditAction until they're stripped. Drop them by name so
-        // assertTableActionDoesNotExist('edit') holds.
+        // with everything VodResource::setupTable() wired up: edit, delete,
+        // play, view, fetch_tmdb_ids, manual_tmdb_search, sync, probe,
+        // process_vod, ... None of those belong on this read-only membership
+        // surface, and Livewire::getAction('delete') still resolves to the
+        // inherited DeleteAction until they're stripped. Use a whitelist (not a
+        // blacklist) so newly-added flat actions on VodResource don't leak
+        // through: assertTableActionDoesNotExist('delete', ...) /
+        // callTableAction('delete', $channel) must hold here.
         $flatActions = (function (): array {
             return $this->flatActions;
         })->call($table);
 
-        foreach (['edit', 'play', 'view', 'fetch_tmdb_ids', 'sync', 'probe'] as $excluded) {
-            unset($flatActions[$excluded]);
+        $kept = [];
+        foreach (self::KEPT_FLAT_ACTION_NAMES as $name) {
+            if (isset($flatActions[$name])) {
+                $kept[$name] = $flatActions[$name];
+            }
         }
 
         (function (array $actions): void {
             $this->flatActions = $actions;
-        })->call($table, $flatActions);
+        })->call($table, $kept);
 
         $columns = array_values($table->getColumns());
         $metadataKey = array_search('has_metadata', array_map(

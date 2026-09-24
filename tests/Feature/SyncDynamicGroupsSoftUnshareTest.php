@@ -2,9 +2,11 @@
 
 use App\Jobs\SyncDynamicGroups;
 use App\Models\CachedContentFile;
+use App\Models\Channel;
 use App\Models\DynamicGroup;
 use App\Models\Playlist;
 use App\Models\User;
+use App\Services\TmdbService;
 use Illuminate\Foundation\Testing\RefreshDatabase;
 use Illuminate\Support\Facades\Bus;
 use Illuminate\Support\Facades\DB;
@@ -142,7 +144,107 @@ it('does NOT stamp dropped_at on already-soft-unshared pivot rows (idempotent)',
     expect($pivot->dropped_at)->toBe($firstStamp->toDateTimeString());
 });
 
-// --- never_expire: Constraint 5 — never_expire files survive soft-unshare ---
+// --- PR #1524 review (item 10a): dynamic_group_items pivot is hard-deleted
+//     for stale groups so the Xtream category filter stops serving them. ---
+
+it('hard-deletes dynamic_group_items for stale groups so Xtream stops serving them', function () {
+    // Same stale-rule setup as the soft-unshare tests above. The CachedContentFile
+    // pivot is soft-unshared (dropped_at stamped); the dynamic_group_items
+    // membership pivot is hard-deleted. Without this, a client requesting the
+    // old xtreamCategoryId() would keep receiving the stale list.
+    $user = User::factory()->create();
+    $playlist = Playlist::factory()->for($user)->create([
+        'dynamic_groups_config' => [
+            ['name' => 'Renamed', 'enabled' => true, 'type' => 'vod', 'source' => 'trending'],
+        ],
+    ]);
+
+    $staleGroup = DynamicGroup::factory()->for($playlist)->for($user)->create([
+        'type' => 'vod',
+        'source' => 'trending',
+        'name' => 'Original',
+        'enabled' => true,
+    ]);
+
+    $file = CachedContentFile::factory()->completed()->create([
+        'playlist_id' => $playlist->id,
+        'user_id' => $user->id,
+    ]);
+    $file->dynamicGroups()->attach($staleGroup->id);
+
+    // Membership pivot that should be wiped on the next sync (the user wants
+    // the stale rule OUT of validKeys, so its members must not leak to Xtream).
+    DB::table('dynamic_group_items')->insert([
+        'dynamic_group_id' => $staleGroup->id,
+        'item_type' => Channel::class,
+        'item_id' => 99999,
+    ]);
+
+    runSyncWithoutTmdb($playlist->id);
+
+    expect(DB::table('dynamic_group_items')
+        ->where('dynamic_group_id', $staleGroup->id)
+        ->exists())->toBeFalse()
+        // Soft-unshare on the cache pivot is unchanged — see the tests above.
+        ->and(DB::table('cached_content_file_dynamic_groups')
+            ->where('dynamic_group_id', $staleGroup->id)
+            ->whereNull('dropped_at')
+            ->exists())->toBeFalse();
+});
+
+// --- PR #1524 review (item 10d): a stale rule re-created with the same
+//     (type, source, name) triple re-enables the tombstoned DG and rebuilds
+//     membership, instead of leaving it disabled. ---
+
+it('re-enables a tombstoned DynamicGroup row when the rule is re-created with the same triple', function () {
+    // TMDB is unconfigured in this helper, so the "what does the rule want"
+    // pass is bypassed and $validKeys ends up empty. We instead exercise the
+    // other branch of SyncDynamicGroups::runSync(): when a rule IS processed
+    // successfully, updateOrCreate() re-enables the tombstoned DG row and
+    // rebuilds its membership. Stub TmdbService to return ids for the rule so
+    // the membership path runs.
+    $user = User::factory()->create();
+    $playlist = Playlist::factory()->for($user)->create([
+        'dynamic_groups_config' => [
+            ['name' => 'Trending', 'enabled' => true, 'type' => 'vod', 'source' => 'trending'],
+        ],
+    ]);
+
+    // Tombstoned DG row from a previous soft-unshare pass.
+    $staleGroup = DynamicGroup::factory()->for($playlist)->for($user)->create([
+        'type' => 'vod',
+        'source' => 'trending',
+        'name' => 'Trending',
+        'enabled' => false,
+    ]);
+
+    $channel = Channel::factory()->create([
+        'user_id' => $user->id,
+        'playlist_id' => $playlist->id,
+        'is_vod' => true,
+        'enabled' => true,
+        'tmdb_id' => '42',
+    ]);
+
+    // Fake TmdbService so the rule-iteration loop finds a hit. We can't use
+    // Http::fake() alone — TmdbService is bound in the SyncDynamicGroupsTest
+    // beforeEach but this test file doesn't go through it. Instead, mock the
+    // underlying method that collectTmdbIds() calls.
+    $tmdb = Mockery::mock(TmdbService::class);
+    $tmdb->shouldReceive('isConfigured')->andReturn(true);
+    $tmdb->shouldReceive('collectDynamicGroupResults')
+        ->andReturn([['tmdb_id' => '42']]);
+    app()->instance(TmdbService::class, $tmdb);
+
+    // Re-running sync with the same (type, source, name) triple must re-enable
+    // the existing row (no duplicate), not create a new tombstone.
+    (new SyncDynamicGroups($playlist->id))->handle();
+
+    $staleGroup->refresh();
+    expect(DynamicGroup::where('playlist_id', $playlist->id)->count())->toBe(1)
+        ->and($staleGroup->enabled)->toBeTrue()
+        ->and(DB::table('dynamic_group_items')->where('dynamic_group_id', $staleGroup->id)->count())->toBe(1);
+});
 
 it('never_expire files linked via a soft-unshared pivot are still retained (independent of pivot state)', function () {
     // The retention check looks at the CachedContentFile row's

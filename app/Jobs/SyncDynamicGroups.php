@@ -162,6 +162,17 @@ class SyncDynamicGroups implements ShouldQueue
             // the soft-unshare entirely. Leaving the DG row as a tombstone
             // (enabled=false) costs one row per stale rule — bounded by how
             // many times operators rename rules.
+            //
+            // PR #1524 review: the stale rule's `dynamic_group_items` rows
+            // (the membership pivot used by the Xtream category filter and the
+            // per-channel membership on the View page) MUST also be dropped.
+            // Without this, a client requesting the old Xtream category_id
+            // keeps getting the stale list because XtreamCategoryService::
+            // applyDynamicGroupFilter() only filters by dynamic_group_id. The
+            // CachedContentFile pivot above is a separate table and is
+            // soft-unshared, not deleted; this one is membership only and has
+            // no retention semantics attached, so a plain delete is fine and
+            // is what callers expect when a rule disappears.
             DB::table('cached_content_file_dynamic_groups')
                 ->whereIn('dynamic_group_id', $staleIds)
                 ->whereNull('dropped_at')
@@ -169,6 +180,10 @@ class SyncDynamicGroups implements ShouldQueue
                     'dropped_at' => now(),
                     'updated_at' => now(),
                 ]);
+
+            DB::table('dynamic_group_items')
+                ->whereIn('dynamic_group_id', $staleIds)
+                ->delete();
 
             DynamicGroup::whereIn('id', $staleIds)->update(['enabled' => false]);
         }
