@@ -109,8 +109,15 @@ class CachedContentStreamController extends Controller
             abort(404, 'Cached file not found');
         }
 
+        // PR #1524 review item 5: authorize the uuid via the same
+        // servable scope the gate + dispatcher use, so a file shared by
+        // another of the same user's playlists with
+        // `share_cache_across_playlists = true` plays through this
+        // playlist's credentials. Rows owned by a different user NEVER
+        // resolve - the subquery inside the scope filters sharing
+        // candidates by `playlists.user_id = $playlist->user_id`.
         $file = CachedContentFile::query()
-            ->ownedByPlaylist($playlist->id)
+            ->servableForPlaylist($playlist)
             ->where('uuid', $uuid)
             ->first();
 

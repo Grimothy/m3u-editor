@@ -142,10 +142,21 @@ class ChannelsRelationManager extends RelationManager
 
     private function cachedFileForChannel(Channel $channel): ?CachedContentFile
     {
+        $playlistId = (int) $channel->playlist_id;
+        if ($playlistId === 0) {
+            return null;
+        }
+
+        // PR #1524: lookup follows the same servable rule as playback
+        // (see `CachedContentFile::scopeServableForPlaylist()`). The
+        // channel's own playlist row is preferred; a Completed row
+        // shared by another of the same user's playlists with
+        // `share_cache_across_playlists = true` is the fallback.
         return CachedContentFile::query()
+            ->servableForPlaylist($playlistId)
             ->where('content_type', 'movie')
             ->where('content_fingerprint', $channel->cacheFingerprint())
-            ->where('playlist_id', $channel->playlist_id)
+            ->orderByRaw('CASE WHEN playlist_id = ? THEN 0 ELSE 1 END', [$playlistId])
             ->first();
     }
 }

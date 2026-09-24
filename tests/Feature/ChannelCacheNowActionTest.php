@@ -12,6 +12,7 @@ use App\Settings\GeneralSettings;
 use Filament\Actions\Testing\TestAction;
 use Illuminate\Foundation\Testing\RefreshDatabase;
 use Illuminate\Support\Facades\Bus;
+use Illuminate\Support\Facades\DB;
 use Livewire\Livewire;
 
 uses(RefreshDatabase::class);
@@ -266,4 +267,92 @@ it('Cache Now on a VOD channel with a Downloading row surfaces "Already queued f
         ->assertNotified('Already queued for caching');
 
     Bus::assertNotDispatched(DownloadCachedContentFile::class);
+});
+// --- PR #1524 review efficiency fix: Channel::isCached() must be single-query + no relation load ---
+
+/**
+ * Count queries against `cached_content_files` only. Other tables
+ * (e.g. `playlists` via the nested subquery path, `episodes.series`)
+ * are not the hot-path concern this PR review flagged - this helper
+ * pins down the existence lookup the memoization must eliminate.
+ */
+function countCachedContentFileQueries(): int
+{
+    return collect(DB::getQueryLog())
+        ->filter(fn (array $entry): bool => str_contains(strtolower($entry['query']), 'from "cached_content_files"'))
+        ->count();
+}
+
+it('Channel::isCached() runs one cached_content_files query and does not load the playlist relation on repeated calls', function () {
+    // Per review: isCached() is called twice per row on the VOD table
+    // (getStateUsing + tooltip closures), so a 50-row page would do
+    // 100 queries + 100 relation loads without memoization + int scope.
+    $user = User::factory()->create();
+    $playlist = Playlist::factory()->for($user)->create();
+    $channel = Channel::factory()->for($user)->for($playlist)->create([
+        'tmdb_id' => 550,
+        'url' => 'https://example.com/memo-channel.mp4',
+    ]);
+    CachedContentFile::factory()->completed()->create([
+        'user_id' => $user->id,
+        'playlist_id' => $playlist->id,
+        'content_type' => 'movie',
+        'tmdb_id' => '550',
+    ]);
+
+    DB::enableQueryLog();
+    $first = $channel->isCached();
+    $queriesAfterFirst = countCachedContentFileQueries();
+    $relationLoadedAfterFirst = $channel->relationLoaded('playlist');
+
+    $second = $channel->isCached();
+    $queriesAfterSecond = countCachedContentFileQueries();
+    $relationLoadedAfterSecond = $channel->relationLoaded('playlist');
+    DB::disableQueryLog();
+
+    expect($first)->toBeTrue()
+        ->and($second)->toBeTrue()
+        // Exactly one cached_content_files query for the first call.
+        ->and($queriesAfterFirst)->toBe(1)
+        // Second call must not issue any new cached_content_files query.
+        ->and($queriesAfterSecond)->toBe(1)
+        // The playlist relation must NOT be loaded by isCached() - the
+        // scope resolves playlists.user_id via a nested subquery.
+        ->and($relationLoadedAfterFirst)->toBeFalse()
+        ->and($relationLoadedAfterSecond)->toBeFalse();
+});
+
+it('Channel::isCached() memoizes a false result without issuing a second cached_content_files query', function () {
+    // The false branch (no Completed row, no playlist_id) must also
+    // memoize so repeated false calls do not re-query.
+    $user = User::factory()->create();
+    $playlist = Playlist::factory()->for($user)->create();
+    $channel = Channel::factory()->for($user)->for($playlist)->create([
+        'tmdb_id' => 551,
+        'url' => 'https://example.com/no-cache.mp4',
+    ]);
+    // No CachedContentFile row at all.
+
+    DB::enableQueryLog();
+    $first = $channel->isCached();
+    $queriesAfterFirst = countCachedContentFileQueries();
+    $second = $channel->isCached();
+    $queriesAfterSecond = countCachedContentFileQueries();
+    DB::disableQueryLog();
+
+    expect($first)->toBeFalse()
+        ->and($second)->toBeFalse()
+        ->and($queriesAfterFirst)->toBe(1)
+        ->and($queriesAfterSecond)->toBe(1)
+        ->and($channel->relationLoaded('playlist'))->toBeFalse();
+});
+
+it('Channel::isCached() does not load the playlist relation even when playlist_id is null', function () {
+    // Short-circuit branch: no playlist_id means the answer is false
+    // without touching the DB or the relation.
+    $channel = new Channel;
+    $channel->playlist_id = null;
+
+    expect($channel->isCached())->toBeFalse()
+        ->and($channel->relationLoaded('playlist'))->toBeFalse();
 });

@@ -146,6 +146,79 @@ it('returns 404 when the file row exists but the storage file is missing', funct
     $response->assertStatus(404);
 });
 
+// --- PR #1524 review item 5: servable scope at stream auth ---
+//
+// The stream controller must honor the same sharing rule as the
+// dispatcher + cache-hit gate so a file shared by a sibling playlist
+// plays through this playlist's credentials. Cross-USER access is still
+// 404 - the scope subquery filters sharing candidates by user_id.
+
+it('streams a file shared by a same-user sibling playlist through this playlist credentials', function () {
+    $user = User::factory()->create();
+    $playlistA = Playlist::factory()->for($user)->create(['share_cache_across_playlists' => true]);
+    $playlistB = Playlist::factory()->for($user)->create();
+    Storage::disk('cache')->put('cache/movie-shared.mp4', 'shared-bytes');
+
+    // File belongs to playlistA (sharing), accessed via playlistB credentials.
+    $file = CachedContentFile::factory()->completed()->create([
+        'user_id' => $user->id,
+        'playlist_id' => $playlistA->id,
+        'content_type' => 'movie',
+        'tmdb_id' => '1234',
+        'file_path' => 'cache/movie-shared.mp4',
+    ]);
+
+    $response = $this->get("/cached-content/{$user->name}/{$playlistB->uuid}/{$file->uuid}.mp4");
+
+    $response->assertOk();
+    expect((string) $response->streamedContent())->toContain('shared-bytes');
+});
+
+it('returns 404 when the playlist is not a sharing sibling and the file belongs to a sibling', function () {
+    // Same user, but sibling playlistA has sharing OFF. The file is not
+    // servable for playlistB - 404 (not 403) to match the
+    // "no info leak" convention.
+    $user = User::factory()->create();
+    $playlistA = Playlist::factory()->for($user)->create(['share_cache_across_playlists' => false]);
+    $playlistB = Playlist::factory()->for($user)->create();
+    Storage::disk('cache')->put('cache/movie-private.mp4', 'bytes');
+
+    $file = CachedContentFile::factory()->completed()->create([
+        'user_id' => $user->id,
+        'playlist_id' => $playlistA->id,
+        'content_type' => 'movie',
+        'tmdb_id' => '5678',
+        'file_path' => 'cache/movie-private.mp4',
+    ]);
+
+    $response = $this->get("/cached-content/{$user->name}/{$playlistB->uuid}/{$file->uuid}.mp4");
+
+    $response->assertStatus(404);
+});
+
+it('returns 404 when another user tries to stream a file via their own credentials, even if the source shares', function () {
+    // PR #1524 review item 5: other user's credentials cannot stream
+    // A's uuid even if A's playlist has sharing ON. Cross-USER sharing
+    // is never allowed.
+    $userA = User::factory()->create();
+    $userB = User::factory()->create();
+    $playlistA = Playlist::factory()->for($userA)->create(['share_cache_across_playlists' => true]);
+    $playlistB = Playlist::factory()->for($userB)->create();
+    Storage::disk('cache')->put('cache/movie-other-user.mp4', 'bytes');
+
+    $fileA = CachedContentFile::factory()->completed()->create([
+        'user_id' => $userA->id,
+        'playlist_id' => $playlistA->id,
+        'content_type' => 'movie',
+        'tmdb_id' => '9999',
+        'file_path' => 'cache/movie-other-user.mp4',
+    ]);
+
+    $response = $this->get("/cached-content/{$userB->name}/{$playlistB->uuid}/{$fileA->uuid}.mp4");
+
+    $response->assertStatus(404);
+});
+
 // NOTE: PlaylistAuth (Method 1) auth coverage is intentionally omitted here.
 // `playlist_auths` uses a polymorphic relation through `PlaylistAuthPivot`
 // rather than a direct `playlist_id` column, so a factory-based seed is

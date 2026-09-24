@@ -27,6 +27,26 @@ class Episode extends Model
     use HasFactory;
 
     /**
+     * Request-scoped memoization of `isCached()`.
+     *
+     * NOT an attribute/cast and NOT persisted to the DB - a plain
+     * in-memory cache so the Episodes table's `getStateUsing` + `tooltip`
+     * closures can both call `isCached()` per row without issuing the
+     * underlying query twice. Cleared on `__clone` because clones
+     * shouldn't share the parent's answer.
+     */
+    private ?bool $isCachedMemoized = null;
+
+    /**
+     * Clear request-scoped memoization so a cloned Episode instance
+     * does not inherit the parent's `isCached()` answer.
+     */
+    public function __clone()
+    {
+        $this->isCachedMemoized = null;
+    }
+
+    /**
      * The attributes that should be cast to native types.
      *
      * @var array
@@ -111,33 +131,64 @@ class Episode extends Model
      * `tvdb_id` (via `series.tvdb_id`) is folded in so the cached row
      * matches the live fingerprint (PR #1500 missed this, causing
      * cache-delete-redownload loops for series with a tvdb_id set).
+     *
+     * When neither the parent series nor the episode itself carries an
+     * external id, the fingerprint falls back to a `local_key` derived
+     * from the episode id so two unmatched episodes on the same playlist
+     * do not collapse into a single cache row (PR #1524 review item 6).
+     * Matched fingerprints stay byte-identical to the prior contract.
      */
     public function cacheFingerprint(): string
     {
         $series = $this->series;
+        $seriesTmdb = ($series && $series->tmdb_id !== null) ? (string) $series->tmdb_id : null;
+        $seriesTvdb = ($series && $series->tvdb_id !== null) ? (string) $series->tvdb_id : null;
+        $episodeTmdb = $this->tmdb_id !== null ? (string) $this->tmdb_id : null;
+
+        $effectiveTmdb = $seriesTmdb ?? $episodeTmdb;
+        $hasExternalId = ($effectiveTmdb !== null && $effectiveTmdb !== '')
+            || ($seriesTvdb !== null && $seriesTvdb !== '');
 
         return CachedContentFile::fingerprintFor([
             'content_type' => 'episode',
-            'tmdb_id' => ($series && $series->tmdb_id !== null) ? (string) $series->tmdb_id : ($this->tmdb_id !== null ? (string) $this->tmdb_id : null),
-            'tvdb_id' => ($series && $series->tvdb_id !== null) ? (string) $series->tvdb_id : null,
+            'tmdb_id' => $effectiveTmdb,
+            'tvdb_id' => $seriesTvdb,
             'season_number' => $this->season,
             'episode_number' => $this->episode_num,
+            'local_key' => $hasExternalId ? null : 'ep'.$this->id,
         ]);
     }
 
     /**
-     * Whether this episode has a Completed CachedContentFile matching
-     * its source playlist and content fingerprint. Single indexed query
+     * Whether this episode has a Completed CachedContentFile that is servable
+     * for its source playlist and matches its content fingerprint.
+     *
+     * Servability covers both the playlist's own row and any row shared by
+     * another of the same user's playlists with
+     * `share_cache_across_playlists = true` (see
+     * `CachedContentFile::scopeServableForPlaylist()`). Single indexed query
      * against cached_content_files.
+     *
+     * Hot path: this is invoked twice per row on the Episodes table
+     * (`getStateUsing` + `tooltip` in `EpisodesRelationManager`). The
+     * result is memoized on the instance (private property, not an
+     * attribute/cast) so the second call is free, and the scope is called
+     * with an `int` (not the Playlist model) so it does NOT trigger a
+     * playlist relation load - the nested subquery resolves
+     * `playlists.user_id` server-side.
      */
     public function isCached(): bool
     {
-        if (! $this->playlist_id) {
-            return false;
+        if ($this->isCachedMemoized !== null) {
+            return $this->isCachedMemoized;
         }
 
-        return CachedContentFile::query()
-            ->ownedByPlaylist((int) $this->playlist_id)
+        if (! $this->playlist_id) {
+            return $this->isCachedMemoized = false;
+        }
+
+        return $this->isCachedMemoized = CachedContentFile::query()
+            ->servableForPlaylist((int) $this->playlist_id)
             ->where('content_fingerprint', $this->cacheFingerprint())
             ->where('status', CachedContentFileStatus::Completed->value)
             ->exists();

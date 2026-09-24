@@ -313,11 +313,7 @@ it('shows Cache Now for synced VOD members on the Movies relation manager', func
         'content_type' => 'movie',
         'tmdb_id' => $channel->tmdb_id,
         'tvdb_id' => $channel->tvdb_id,
-        'content_fingerprint' => CachedContentFile::fingerprintFor([
-            'content_type' => 'movie',
-            'tmdb_id' => $channel->tmdb_id,
-            'tvdb_id' => $channel->tvdb_id,
-        ]),
+        'content_fingerprint' => $channel->cacheFingerprint(),
     ]);
     DB::table('dynamic_group_items')->insert([
         'dynamic_group_id' => $group->id,

@@ -224,3 +224,90 @@ it('falls through to the existing redirect when no Completed row matches and ena
     $location = $response->headers->get('Location') ?? '';
     expect($location)->not->toContain('/cached-content/');
 });
+
+// --- PR #1524 review item 2: cache-hit gate honors cross-playlist sharing ---
+
+it('cache-hit gate honors a Completed row from a same-user sharing sibling playlist', function () {
+    // PlaylistA has the row and sharing ON; PlaylistB (same user, no
+    // row) requests the same content. The gate must redirect to A's
+    // cached uuid - this is what was broken pre-PR #1524.
+    setEnableCache(true);
+
+    $user = User::factory()->create(['name' => 'testuser'.uniqid()]);
+    $playlistA = Playlist::factory()->for($user)->create(['share_cache_across_playlists' => true]);
+    $playlistB = Playlist::factory()->for($user)->create();
+    $channel = Channel::factory()->for($playlistB)->create([
+        'tmdb_id' => '550',
+        'enabled' => true,
+    ]);
+
+    $cached = CachedContentFile::factory()->completed()->create([
+        'user_id' => $user->id,
+        'playlist_id' => $playlistA->id,
+        'content_type' => 'movie',
+        'tmdb_id' => '550',
+    ]);
+
+    $response = $this->get(
+        "/movie/{$user->name}/{$playlistB->uuid}/{$channel->id}.mp4"
+    );
+
+    $response->assertRedirectContains("/cached-content/{$user->name}/{$playlistB->uuid}/{$cached->uuid}.mp4");
+});
+
+it('cache-hit gate does NOT honor a row from a sibling playlist with sharing OFF', function () {
+    setEnableCache(true);
+
+    $user = User::factory()->create(['name' => 'testuser'.uniqid()]);
+    $playlistA = Playlist::factory()->for($user)->create(['share_cache_across_playlists' => false]);
+    $playlistB = Playlist::factory()->for($user)->create();
+    $channel = Channel::factory()->for($playlistB)->create([
+        'tmdb_id' => '550',
+        'enabled' => true,
+    ]);
+
+    CachedContentFile::factory()->completed()->create([
+        'user_id' => $user->id,
+        'playlist_id' => $playlistA->id,
+        'content_type' => 'movie',
+        'tmdb_id' => '550',
+    ]);
+
+    $response = $this->get(
+        "/movie/{$user->name}/{$playlistB->uuid}/{$channel->id}.mp4"
+    );
+
+    $response->assertRedirect();
+    $location = $response->headers->get('Location') ?? '';
+    expect($location)->not->toContain('/cached-content/');
+});
+
+it('cache-hit gate never honors a row owned by a different user', function () {
+    // Cross-USER sharing is forbidden - even if both users have sharing
+    // ON, userB's request must NOT serve userA's cache.
+    setEnableCache(true);
+
+    $userA = User::factory()->create(['name' => 'testuser'.uniqid()]);
+    $userB = User::factory()->create(['name' => 'testuser'.uniqid()]);
+    $playlistA = Playlist::factory()->for($userA)->create(['share_cache_across_playlists' => true]);
+    $playlistB = Playlist::factory()->for($userB)->create();
+    $channel = Channel::factory()->for($playlistB)->create([
+        'tmdb_id' => '550',
+        'enabled' => true,
+    ]);
+
+    CachedContentFile::factory()->completed()->create([
+        'user_id' => $userA->id,
+        'playlist_id' => $playlistA->id,
+        'content_type' => 'movie',
+        'tmdb_id' => '550',
+    ]);
+
+    $response = $this->get(
+        "/movie/{$userB->name}/{$playlistB->uuid}/{$channel->id}.mp4"
+    );
+
+    $response->assertRedirect();
+    $location = $response->headers->get('Location') ?? '';
+    expect($location)->not->toContain('/cached-content/');
+});

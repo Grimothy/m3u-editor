@@ -14,6 +14,7 @@ use App\Settings\GeneralSettings;
 use Filament\Actions\Testing\TestAction;
 use Illuminate\Foundation\Testing\RefreshDatabase;
 use Illuminate\Support\Facades\Bus;
+use Illuminate\Support\Facades\DB;
 use Livewire\Livewire;
 
 uses(RefreshDatabase::class);
@@ -309,4 +310,85 @@ it('Cache Now on an episode with a Downloading row surfaces "Already queued for 
         ->assertNotified('Already queued for caching');
 
     Bus::assertNotDispatched(DownloadCachedContentFile::class);
+});
+
+// --- PR #1524 review efficiency fix: Episode::isCached() must be single-query + no relation load ---
+
+/**
+ * Count queries against `cached_content_files` only. The series
+ * relation is also lazy-loaded by `Episode::cacheFingerprint()` but is
+ * outside the PR review's hot-path concern. Named uniquely to avoid
+ * colliding with the same-named helper in ChannelCacheNowActionTest
+ * when both files are loaded in the same PHP process.
+ */
+function episodeCountCachedContentFileQueries(): int
+{
+    return collect(DB::getQueryLog())
+        ->filter(fn (array $entry): bool => str_contains(strtolower($entry['query']), 'from "cached_content_files"'))
+        ->count();
+}
+
+it('Episode::isCached() runs one cached_content_files query and does not load the playlist relation on repeated calls', function () {
+    // Per review: isCached() is called twice per row on the Episodes
+    // table (getStateUsing + tooltip closures in
+    // EpisodesRelationManager), so a 50-row page would do 100 queries +
+    // 100 relation loads without memoization + int scope.
+    $user = User::factory()->create();
+    $playlist = Playlist::factory()->for($user)->create();
+    $series = Series::factory()->for($user)->for($playlist)->create(['tmdb_id' => 60625]);
+    $episode = Episode::factory()->for($user)->for($playlist)->for($series, 'series')->create([
+        'season' => 1,
+        'episode_num' => 5,
+        'url' => 'https://example.com/memo-episode.mp4',
+    ]);
+    CachedContentFile::factory()->completed()->create([
+        'user_id' => $user->id,
+        'playlist_id' => $playlist->id,
+        'content_type' => 'episode',
+        'tmdb_id' => '60625',
+        'season_number' => 1,
+        'episode_number' => 5,
+    ]);
+
+    DB::enableQueryLog();
+    $first = $episode->isCached();
+    $queriesAfterFirst = episodeCountCachedContentFileQueries();
+    $relationLoadedAfterFirst = $episode->relationLoaded('playlist');
+
+    $second = $episode->isCached();
+    $queriesAfterSecond = episodeCountCachedContentFileQueries();
+    $relationLoadedAfterSecond = $episode->relationLoaded('playlist');
+    DB::disableQueryLog();
+
+    expect($first)->toBeTrue()
+        ->and($second)->toBeTrue()
+        ->and($queriesAfterFirst)->toBe(1)
+        ->and($queriesAfterSecond)->toBe(1)
+        ->and($relationLoadedAfterFirst)->toBeFalse()
+        ->and($relationLoadedAfterSecond)->toBeFalse();
+});
+
+it('Episode::isCached() memoizes a false result without issuing a second cached_content_files query', function () {
+    $user = User::factory()->create();
+    $playlist = Playlist::factory()->for($user)->create();
+    $series = Series::factory()->for($user)->for($playlist)->create(['tmdb_id' => 60626]);
+    $episode = Episode::factory()->for($user)->for($playlist)->for($series, 'series')->create([
+        'season' => 1,
+        'episode_num' => 1,
+        'url' => 'https://example.com/no-cache-ep.mp4',
+    ]);
+    // No CachedContentFile row.
+
+    DB::enableQueryLog();
+    $first = $episode->isCached();
+    $queriesAfterFirst = episodeCountCachedContentFileQueries();
+    $second = $episode->isCached();
+    $queriesAfterSecond = episodeCountCachedContentFileQueries();
+    DB::disableQueryLog();
+
+    expect($first)->toBeFalse()
+        ->and($second)->toBeFalse()
+        ->and($queriesAfterFirst)->toBe(1)
+        ->and($queriesAfterSecond)->toBe(1)
+        ->and($episode->relationLoaded('playlist'))->toBeFalse();
 });

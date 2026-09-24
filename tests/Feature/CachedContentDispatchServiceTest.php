@@ -162,103 +162,9 @@ it('dispatchForChannel does not INSERT when an existing Pending row blocks the f
         ->and(CachedContentFile::count())->toBe(1);
 });
 
-// --- isCrossPlaylistDuplicate + findSharedCacheHit: source-owns-file sharing rule ---
+// --- findServableCacheHit: per-playlist + cross-playlist (within a single user) sharing rule ---
 
-it('isCrossPlaylistDuplicate returns false when source playlist has sharing OFF', function () {
-    $user = User::factory()->create();
-    $playlist = Playlist::factory()->for($user)->create([
-        'share_cache_across_playlists' => false,
-    ]);
-    CachedContentFile::factory()->completed()->create([
-        'content_type' => 'movie',
-        'tmdb_id' => '550',
-        'playlist_id' => $playlist->id,
-        'user_id' => $user->id,
-    ]);
-
-    $fingerprint = CachedContentFile::fingerprintFor(['content_type' => 'movie', 'tmdb_id' => '550']);
-
-    $isDuplicate = app(CachedContentDispatchService::class)
-        ->isCrossPlaylistDuplicate($fingerprint, $playlist);
-
-    expect($isDuplicate)->toBeFalse();
-});
-
-it('isCrossPlaylistDuplicate returns true when source playlist has sharing ON AND Completed row exists', function () {
-    $user = User::factory()->create();
-    $playlist = Playlist::factory()->for($user)->create([
-        'share_cache_across_playlists' => true,
-    ]);
-    CachedContentFile::factory()->completed()->create([
-        'content_type' => 'movie',
-        'tmdb_id' => '550',
-        'playlist_id' => $playlist->id,
-        'user_id' => $user->id,
-    ]);
-
-    $fingerprint = CachedContentFile::fingerprintFor(['content_type' => 'movie', 'tmdb_id' => '550']);
-
-    $isDuplicate = app(CachedContentDispatchService::class)
-        ->isCrossPlaylistDuplicate($fingerprint, $playlist);
-
-    expect($isDuplicate)->toBeTrue();
-});
-
-it('isCrossPlaylistDuplicate returns false when matching row is Pending (not Completed)', function () {
-    // Constraint 4 (PR #1500 review): sharing only kicks in when a
-    // Completed row exists. Pending/Downloading/Failed don't satisfy
-    // a sharing lookup - a failed share would just re-fail on playback.
-    $user = User::factory()->create();
-    $playlist = Playlist::factory()->for($user)->create([
-        'share_cache_across_playlists' => true,
-    ]);
-    // Vary tmdb_id per iteration so each row has a unique fingerprint
-    // (content_fingerprint has a UNIQUE constraint - same content = same
-    // fingerprint = insert violation).
-    $i = 0;
-    foreach ([
-        CachedContentFileStatus::Pending,
-        CachedContentFileStatus::Downloading,
-        CachedContentFileStatus::Failed,
-    ] as $status) {
-        $row = CachedContentFile::factory()->create([
-            'content_type' => 'movie',
-            'tmdb_id' => (string) (550 + $i++),
-            'status' => $status,
-            'playlist_id' => $playlist->id,
-            'user_id' => $user->id,
-        ]);
-        $fingerprint = $row->content_fingerprint;
-
-        $isDuplicate = app(CachedContentDispatchService::class)
-            ->isCrossPlaylistDuplicate($fingerprint, $playlist);
-
-        expect($isDuplicate)->toBeFalse("sharing should not match {$status->value} rows");
-    }
-});
-
-it('isCrossPlaylistDuplicate returns false when matching row exists for a different playlist', function () {
-    // Sharing is per-source-playlist, not per-fingerprint-globally.
-    $userA = User::factory()->create();
-    $userB = User::factory()->create();
-    $playlistA = Playlist::factory()->for($userA)->create(['share_cache_across_playlists' => true]);
-    $playlistB = Playlist::factory()->for($userB)->create(['share_cache_across_playlists' => true]);
-    CachedContentFile::factory()->completed()->create([
-        'content_type' => 'movie',
-        'tmdb_id' => '550',
-        'playlist_id' => $playlistA->id,
-        'user_id' => $userA->id,
-    ]);
-
-    $fingerprint = CachedContentFile::fingerprintFor(['content_type' => 'movie', 'tmdb_id' => '550']);
-
-    $isDuplicate = app(CachedContentDispatchService::class)
-        ->isCrossPlaylistDuplicate($fingerprint, $playlistB);
-
-    expect($isDuplicate)->toBeFalse();
-});
-
-it('findSharedCacheHit returns the matching Completed row when sharing-on', function () {
+it('findServableCacheHit returns the playlist own Completed row when one exists', function () {
     $user = User::factory()->create();
     $playlist = Playlist::factory()->for($user)->create(['share_cache_across_playlists' => true]);
     $existing = CachedContentFile::factory()->completed()->create([
@@ -269,24 +175,47 @@ it('findSharedCacheHit returns the matching Completed row when sharing-on', func
     ]);
 
     $hit = app(CachedContentDispatchService::class)
-        ->findSharedCacheHit($existing->content_fingerprint, $playlist);
+        ->findServableCacheHit($existing->content_fingerprint, $playlist);
 
     expect($hit)->not->toBeNull()
         ->and($hit->id)->toBe($existing->id);
 });
 
-it('findSharedCacheHit returns null when sharing is off', function () {
+it('findServableCacheHit returns null when no Completed row exists for the playlist or any sharing sibling', function () {
     $user = User::factory()->create();
-    $playlist = Playlist::factory()->for($user)->create(['share_cache_across_playlists' => false]);
-    $existing = CachedContentFile::factory()->completed()->create([
+    $playlist = Playlist::factory()->for($user)->create(['share_cache_across_playlists' => true]);
+    // Pending row exists but is not Completed.
+    CachedContentFile::factory()->create([
         'content_type' => 'movie',
         'tmdb_id' => '550',
         'playlist_id' => $playlist->id,
         'user_id' => $user->id,
     ]);
+    $fingerprint = CachedContentFile::fingerprintFor(['content_type' => 'movie', 'tmdb_id' => '550']);
 
     $hit = app(CachedContentDispatchService::class)
-        ->findSharedCacheHit($existing->content_fingerprint, $playlist);
+        ->findServableCacheHit($fingerprint, $playlist);
+
+    expect($hit)->toBeNull();
+});
+
+it('findServableCacheHit never matches rows owned by a different user', function () {
+    // Cross-user sharing is forbidden by design. Even if both users have
+    // sharing ON, a row owned by userA must not be servable for userB.
+    $userA = User::factory()->create();
+    $userB = User::factory()->create();
+    $playlistA = Playlist::factory()->for($userA)->create(['share_cache_across_playlists' => true]);
+    $playlistB = Playlist::factory()->for($userB)->create(['share_cache_across_playlists' => true]);
+    CachedContentFile::factory()->completed()->create([
+        'content_type' => 'movie',
+        'tmdb_id' => '550',
+        'playlist_id' => $playlistA->id,
+        'user_id' => $userA->id,
+    ]);
+    $fingerprint = CachedContentFile::fingerprintFor(['content_type' => 'movie', 'tmdb_id' => '550']);
+
+    $hit = app(CachedContentDispatchService::class)
+        ->findServableCacheHit($fingerprint, $playlistB);
 
     expect($hit)->toBeNull();
 });
@@ -311,6 +240,115 @@ it('dispatchForChannel short-circuits when an existing shared Completed row sati
 
     expect($jobs)->toHaveCount(0)
         ->and(CachedContentFile::count())->toBe(1); // the pre-existing share-hit
+});
+
+// --- PR #1524 review items 1+2: per-playlist uniqueness + cross-playlist sharing ---
+
+it('two playlists of different users each get their own row for the same fingerprint', function () {
+    // Item 1: composite unique on (content_fingerprint, playlist_id).
+    // User A and user B both cache the same tmdb - each gets their own
+    // row. The previous global unique on content_fingerprint made this
+    // impossible (one user would always lose the INSERT race).
+    $userA = User::factory()->create();
+    $userB = User::factory()->create();
+    $playlistA = Playlist::factory()->for($userA)->create();
+    $playlistB = Playlist::factory()->for($userB)->create();
+    $channelA = Channel::factory()->for($userA)->for($playlistA)->create([
+        'tmdb_id' => 777,
+        'url' => 'https://example.com/a.mp4',
+    ]);
+    $channelB = Channel::factory()->for($userB)->for($playlistB)->create([
+        'tmdb_id' => 777,
+        'url' => 'https://example.com/b.mp4',
+    ]);
+
+    $jobsA = app(CachedContentDispatchService::class)->dispatchForChannel($channelA);
+    $jobsB = app(CachedContentDispatchService::class)->dispatchForChannel($channelB);
+
+    expect($jobsA)->toHaveCount(1)
+        ->and($jobsB)->toHaveCount(1)
+        ->and(CachedContentFile::count())->toBe(2);
+});
+
+it('same user, playlistA shares, playlistB dispatch is skipped', function () {
+    // Item 2: cross-playlist sharing within one user. PlaylistA already
+    // has a Completed row; PlaylistB is a sibling owned by the same
+    // user with sharing ON. PlaylistB's dispatch must NOT create a new
+    // row (the previous short-circuit only checked the item's own
+    // playlist, which had no row for the fingerprint, so it always
+    // dispatched).
+    $user = User::factory()->create();
+    $playlistA = Playlist::factory()->for($user)->create(['share_cache_across_playlists' => true]);
+    $playlistB = Playlist::factory()->for($user)->create();
+    CachedContentFile::factory()->completed()->create([
+        'content_type' => 'movie',
+        'tmdb_id' => '888',
+        'user_id' => $user->id,
+        'playlist_id' => $playlistA->id,
+    ]);
+    $channelB = Channel::factory()->for($user)->for($playlistB)->create([
+        'tmdb_id' => 888,
+        'url' => 'https://example.com/b.mp4',
+    ]);
+
+    $jobs = app(CachedContentDispatchService::class)->dispatchForChannel($channelB);
+
+    expect($jobs)->toHaveCount(0)
+        ->and(CachedContentFile::count())->toBe(1);
+});
+
+it('same user, playlistA NOT sharing, playlistB gets its own row', function () {
+    // Item 2: when sharing is OFF, cross-playlist sharing does NOT
+    // apply - PlaylistB must insert its own row.
+    $user = User::factory()->create();
+    $playlistA = Playlist::factory()->for($user)->create(['share_cache_across_playlists' => false]);
+    $playlistB = Playlist::factory()->for($user)->create();
+    CachedContentFile::factory()->completed()->create([
+        'content_type' => 'movie',
+        'tmdb_id' => '888',
+        'user_id' => $user->id,
+        'playlist_id' => $playlistA->id,
+    ]);
+    $channelB = Channel::factory()->for($user)->for($playlistB)->create([
+        'tmdb_id' => 888,
+        'url' => 'https://example.com/b.mp4',
+    ]);
+
+    $jobs = app(CachedContentDispatchService::class)->dispatchForChannel($channelB);
+
+    expect($jobs)->toHaveCount(1)
+        ->and(CachedContentFile::count())->toBe(2);
+});
+
+it('two unmatched movies on the same playlist get distinct fingerprints and rows', function () {
+    // Item 6: when neither tmdb_id nor tvdb_id is set the fingerprint
+    // falls back to a local_key derived from the channel id. Two such
+    // channels on the same playlist must each get their own row (the
+    // previous implementation collapsed them to `movie::::` and one
+    // row for the whole playlist).
+    $user = User::factory()->create();
+    $playlist = Playlist::factory()->for($user)->create();
+    $channelA = Channel::factory()->for($user)->for($playlist)->create([
+        'tmdb_id' => null,
+        'tvdb_id' => null,
+        'url' => 'https://example.com/unmatched-a.mp4',
+    ]);
+    $channelB = Channel::factory()->for($user)->for($playlist)->create([
+        'tmdb_id' => null,
+        'tvdb_id' => null,
+        'url' => 'https://example.com/unmatched-b.mp4',
+    ]);
+
+    $service = app(CachedContentDispatchService::class);
+    $jobsA = $service->dispatchForChannel($channelA);
+    $jobsB = $service->dispatchForChannel($channelB);
+
+    expect($jobsA)->toHaveCount(1)
+        ->and($jobsB)->toHaveCount(1)
+        ->and(CachedContentFile::count())->toBe(2);
+
+    $rows = CachedContentFile::all();
+    expect($rows[0]->content_fingerprint)->not->toBe($rows[1]->content_fingerprint);
 });
 
 // --- dispatchForEpisode: same ownership + sharing rules, episode identity ---
@@ -478,16 +516,14 @@ it('describeExisting returns the matching Pending row when one exists for the it
         ->and($hit->status)->toBe(CachedContentFileStatus::Pending);
 });
 
-it('describeExisting falls back to a fingerprint-only match when no row exists for the item playlist', function () {
-    // Cross-playlist sharing rule: even if the source playlist has no
-    // row for the fingerprint, a row stamped to another playlist with
-    // the same fingerprint is still surfaced so the UI can say "Already
-    // cached" rather than the red failure notification.
-    $ownerA = User::factory()->create();
-    $ownerB = User::factory()->create();
-    $playlistA = Playlist::factory()->for($ownerA)->create();
-    $playlistB = Playlist::factory()->for($ownerB)->create();
-    $channel = Channel::factory()->for($ownerB)->for($playlistB)->create([
+it('describeExisting falls back to a same-user sharing row when no own-playlist row exists', function () {
+    // PR #1524: cross-playlist sharing within the SAME user is surfaced
+    // as "Already cached" (the row is servable for the item's playlist
+    // via the source playlist's `share_cache_across_playlists = true`).
+    $owner = User::factory()->create();
+    $playlistA = Playlist::factory()->for($owner)->create(['share_cache_across_playlists' => true]);
+    $playlistB = Playlist::factory()->for($owner)->create();
+    $channel = Channel::factory()->for($owner)->for($playlistB)->create([
         'tmdb_id' => 2020,
         'url' => 'https://example.com/describe-cross.mp4',
     ]);
@@ -496,13 +532,69 @@ it('describeExisting falls back to a fingerprint-only match when no row exists f
         'content_type' => 'movie',
         'tmdb_id' => '2020',
         'playlist_id' => $playlistA->id,
-        'user_id' => $ownerA->id,
+        'user_id' => $owner->id,
     ]);
 
     $hit = app(CachedContentDispatchService::class)->describeExisting($channel);
 
     expect($hit)->not->toBeNull()
         ->and($hit->id)->toBe($existing->id);
+});
+
+it('describeExisting never returns a row owned by a different user (privacy)', function () {
+    // PR #1524 review item (carry-over from package 1): the previous
+    // implementation reported another user's cached file as "Already
+    // cached". The servable-scope rewrite guarantees that never happens.
+    $ownerA = User::factory()->create();
+    $ownerB = User::factory()->create();
+    $playlistA = Playlist::factory()->for($ownerA)->create();
+    $playlistB = Playlist::factory()->for($ownerB)->create();
+    $channel = Channel::factory()->for($ownerB)->for($playlistB)->create([
+        'tmdb_id' => 2021,
+        'url' => 'https://example.com/describe-cross-user.mp4',
+    ]);
+
+    CachedContentFile::factory()->completed()->create([
+        'content_type' => 'movie',
+        'tmdb_id' => '2021',
+        'playlist_id' => $playlistA->id,
+        'user_id' => $ownerA->id,
+    ]);
+
+    $hit = app(CachedContentDispatchService::class)->describeExisting($channel);
+
+    expect($hit)->toBeNull();
+});
+
+it('describeExisting prefers the item playlist own row over a shared row', function () {
+    // When both the item's playlist AND a sibling sharing playlist have a
+    // Completed row for the fingerprint, the own-playlist row wins.
+    $owner = User::factory()->create();
+    $playlistA = Playlist::factory()->for($owner)->create(['share_cache_across_playlists' => true]);
+    $playlistB = Playlist::factory()->for($owner)->create();
+    $channel = Channel::factory()->for($owner)->for($playlistB)->create([
+        'tmdb_id' => 2022,
+        'url' => 'https://example.com/describe-prefer-own.mp4',
+    ]);
+
+    $shared = CachedContentFile::factory()->completed()->create([
+        'content_type' => 'movie',
+        'tmdb_id' => '2022',
+        'playlist_id' => $playlistA->id,
+        'user_id' => $owner->id,
+    ]);
+    $own = CachedContentFile::factory()->completed()->create([
+        'content_type' => 'movie',
+        'tmdb_id' => '2022',
+        'playlist_id' => $playlistB->id,
+        'user_id' => $owner->id,
+    ]);
+
+    $hit = app(CachedContentDispatchService::class)->describeExisting($channel);
+
+    expect($hit)->not->toBeNull()
+        ->and($hit->id)->toBe($own->id)
+        ->and($hit->id)->not->toBe($shared->id);
 });
 
 it('describeExisting returns null when no row matches the fingerprint at all', function () {

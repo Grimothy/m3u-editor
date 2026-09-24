@@ -43,6 +43,7 @@ use Illuminate\Support\Str;
  * @method static Builder<static> ownedBy(int $userId)
  * @method static Builder<static> ownedByPlaylist(int $playlistId)
  * @method static Builder<static> ownedByDynamicGroup(int $dynamicGroupId)
+ * @method static Builder<static> servableForPlaylist(Playlist|int $playlist)
  */
 class CachedContentFile extends Model
 {
@@ -117,13 +118,20 @@ class CachedContentFile extends Model
     /**
      * Build a deterministic content fingerprint from identity parts.
      *
-     * Format: content_type:tmdb_id:tvdb_id:season_number:episode_number:quality
+     * Format: content_type:tmdb_id:tvdb_id:season_number:episode_number:quality[:local_key]
      * - content_type: lowercased+trimmed, REQUIRED (throws if empty)
      * - quality: lowercased+trimmed
      * - tmdb_id/tvdb_id: string-coerced
      * - season_number/episode_number: (int) cast then stringified (no leading zeros)
+     * - local_key: OPTIONAL disambiguator appended ONLY when both tmdb_id
+     *   and tvdb_id are empty (i.e. the content has no external identity we
+     *   can match on). Without it, two unmatched movies on the same playlist
+     *   would collapse to one fingerprint and one cache row - see PR #1524
+     *   review item 6. When set, rows keyed by a local_key are naturally
+     *   unique to their source and CANNOT be shared across playlists (the
+     *   fingerprint is per-row); this is intentional and acceptable.
      *
-     * @param  array{content_type: string, tmdb_id?: string|int|null, tvdb_id?: string|int|null, season_number?: int|null, episode_number?: int|null, quality?: string|null}  $parts
+     * @param  array{content_type: string, tmdb_id?: string|int|null, tvdb_id?: string|int|null, season_number?: int|null, episode_number?: int|null, quality?: string|null, local_key?: string|null}  $parts
      */
     public static function fingerprintFor(array $parts): string
     {
@@ -140,7 +148,17 @@ class CachedContentFile extends Model
         $episodeStr = ($episode === null || $episode === '') ? '' : (string) (int) $episode;
         $quality = strtolower(trim((string) ($parts['quality'] ?? '')));
 
-        return $contentType.':'.$tmdbId.':'.$tvdbId.':'.$seasonStr.':'.$episodeStr.':'.$quality;
+        $base = $contentType.':'.$tmdbId.':'.$tvdbId.':'.$seasonStr.':'.$episodeStr.':'.$quality;
+
+        // Only attach the local_key segment when BOTH external ids are empty.
+        // Matched content fingerprints stay byte-identical to the prior
+        // contract - existing tests pin those exact strings.
+        $localKey = $parts['local_key'] ?? null;
+        if ($localKey !== null && $localKey !== '' && $tmdbId === '' && $tvdbId === '') {
+            return $base.':'.(string) $localKey;
+        }
+
+        return $base;
     }
 
     /**
@@ -272,6 +290,60 @@ class CachedContentFile extends Model
         return $query->whereHas('dynamicGroups', function (Builder $q) use ($dynamicGroupId): void {
             $q->where('dynamic_groups.id', $dynamicGroupId)
                 ->whereNull('cached_content_file_dynamic_groups.dropped_at');
+        });
+    }
+
+    /**
+     * Filter to cached files that the given playlist is allowed to serve.
+     *
+     * "Servable" covers two cases:
+     *  - The row's own playlist IS `$playlist` (the playlist that originally
+     *    cached the file).
+     *  - The row belongs to a DIFFERENT playlist owned by the same user that
+     *    has `share_cache_across_playlists = true` (cross-playlist sharing
+     *    within a single user only; never across users).
+     *
+     * Accepts either a loaded `Playlist` model or just its `int` id. The
+     * int path (used by hot per-row code like `Channel::isCached()`)
+     * resolves the owner `user_id` via a nested scalar subquery so the
+     * caller doesn't have to `->playlist` eager-load - on a 50-row
+     * Filament table that's the difference between 1 query/row and
+     * 2 queries/row (the relation load + the cached-content lookup).
+     *
+     * The OR-with-subquery uses an inline whereIn over a correlated
+     * `playlists` lookup so we don't pull a list of sharing playlist ids
+     * into PHP and re-issue a second query. The composite
+     * `(content_fingerprint, playlist_id)` unique index from migration
+     * `2026_09_16_120100_add_playlist_id_...` is the lookup path for the
+     * owning-playlist branch; the sharing branch re-uses
+     * `playlists.user_id` and the existing `playlists.user_id` index.
+     *
+     * Callers that want the OWN playlist row preferred over a shared row
+     * pair this scope with `->orderByRaw('playlist_id = ? desc', [$playlistId])`.
+     *
+     * @param  Builder<static>  $query
+     * @return Builder<static>
+     */
+    public function scopeServableForPlaylist(Builder $query, Playlist|int $playlist): Builder
+    {
+        $playlistId = $playlist instanceof Playlist ? (int) $playlist->id : (int) $playlist;
+
+        return $query->where(function (Builder $q) use ($playlistId): void {
+            $q->where('playlist_id', $playlistId)
+                ->orWhereIn('playlist_id', function ($sub) use ($playlistId): void {
+                    $sub->select('id')
+                        ->from('playlists')
+                        ->where('share_cache_across_playlists', true)
+                        ->where('id', '!=', $playlistId)
+                        // Nested scalar subquery: re-resolve the requester
+                        // playlist's user_id so we don't have to load the
+                        // Playlist model just to read it.
+                        ->where('user_id', function ($userSub) use ($playlistId): void {
+                            $userSub->select('user_id')
+                                ->from('playlists')
+                                ->where('id', $playlistId);
+                        });
+                });
         });
     }
 

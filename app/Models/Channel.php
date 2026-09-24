@@ -80,9 +80,29 @@ class Channel extends Model
         'is_aio_failover_clone' => 'boolean',
     ];
 
+    /**
+     * Request-scoped memoization of `isCached()`.
+     *
+     * NOT an attribute/cast and NOT persisted to the DB - a plain
+     * in-memory cache so the VOD table's `getStateUsing` + `tooltip`
+     * closures can both call `isCached()` per row without issuing the
+     * underlying query twice. Cleared on `__clone` because clones
+     * shouldn't share the parent's answer.
+     */
+    private ?bool $isCachedMemoized = null;
+
     protected static function booted(): void
     {
         static::addGlobalScope(new ExcludeAioFailoverClonesScope);
+    }
+
+    /**
+     * Clear request-scoped memoization so a cloned Channel instance
+     * does not inherit the parent's `isCached()` answer.
+     */
+    public function __clone()
+    {
+        $this->isCachedMemoized = null;
     }
 
     public function user(): BelongsTo
@@ -213,29 +233,57 @@ class Channel extends Model
      * of truth for movie identity - the dispatcher, the retention sweep, the
      * cache-hit gate, and Channel::isCached() all derive their `content_fingerprint`
      * from this method so a row written by the dispatcher matches every read.
+     *
+     * When neither `tmdb_id` nor `tvdb_id` is set the fingerprint falls back
+     * to a `local_key` derived from the channel id so two unmatched movies on
+     * the same playlist do not collapse into a single cache row (PR #1524
+     * review item 6). Matched fingerprints stay byte-identical to the prior
+     * contract so existing tests / rows are unaffected.
      */
     public function cacheFingerprint(): string
     {
+        $tmdbId = $this->tmdb_id !== null ? (string) $this->tmdb_id : null;
+        $tvdbId = $this->tvdb_id !== null ? (string) $this->tvdb_id : null;
+
         return CachedContentFile::fingerprintFor([
             'content_type' => 'movie',
-            'tmdb_id' => $this->tmdb_id !== null ? (string) $this->tmdb_id : null,
-            'tvdb_id' => $this->tvdb_id !== null ? (string) $this->tvdb_id : null,
+            'tmdb_id' => $tmdbId,
+            'tvdb_id' => $tvdbId,
+            'local_key' => ($tmdbId === null || $tmdbId === '') && ($tvdbId === null || $tvdbId === '')
+                ? 'ch'.$this->id
+                : null,
         ]);
     }
 
     /**
-     * Whether this channel has a Completed CachedContentFile matching
-     * its source playlist and content fingerprint. Single indexed query
+     * Whether this channel has a Completed CachedContentFile that is servable
+     * for its source playlist and matches its content fingerprint.
+     *
+     * Servability covers both the playlist's own row and any row shared by
+     * another of the same user's playlists with
+     * `share_cache_across_playlists = true` (see
+     * `CachedContentFile::scopeServableForPlaylist()`). Single indexed query
      * against cached_content_files.
+     *
+     * Hot path: this is invoked twice per row on the VOD table
+     * (`getStateUsing` + `tooltip` in `VodResource`). The result is
+     * memoized on the instance (private property, not an attribute/cast)
+     * so the second call is free, and the scope is called with an `int`
+     * (not the Playlist model) so it does NOT trigger a playlist relation
+     * load - the nested subquery resolves `playlists.user_id` server-side.
      */
     public function isCached(): bool
     {
-        if (! $this->playlist_id) {
-            return false;
+        if ($this->isCachedMemoized !== null) {
+            return $this->isCachedMemoized;
         }
 
-        return CachedContentFile::query()
-            ->ownedByPlaylist((int) $this->playlist_id)
+        if (! $this->playlist_id) {
+            return $this->isCachedMemoized = false;
+        }
+
+        return $this->isCachedMemoized = CachedContentFile::query()
+            ->servableForPlaylist((int) $this->playlist_id)
             ->where('content_fingerprint', $this->cacheFingerprint())
             ->where('status', CachedContentFileStatus::Completed->value)
             ->exists();

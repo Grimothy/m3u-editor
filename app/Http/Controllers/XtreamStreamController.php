@@ -551,6 +551,13 @@ class XtreamStreamController extends Controller
      * `Episode::cacheFingerprint()` - the single source of truth shared
      * with the dispatcher and retention sweep.
      *
+     * Servability (PR #1524 review items 1 + 2): the gate uses
+     * `CachedContentFile::scopeServableForPlaylist()` so a Completed row
+     * shared by another of the same user's playlists (with
+     * `share_cache_across_playlists = true`) is honored. Cross-USER
+     * sharing is never allowed - the scope subquery filters sharing
+     * candidates by `playlists.user_id = $playlist->user_id`.
+     *
      * Numeric-id collision guard: `cached_content_files.playlist_id` is
      * a FK into `playlists` (not polymorphic). When the caller passes a
      * CustomPlaylist / MergedPlaylist / PlaylistAlias, their numeric
@@ -571,9 +578,10 @@ class XtreamStreamController extends Controller
         $fingerprint = $item->cacheFingerprint();
 
         $cached = CachedContentFile::query()
-            ->ownedByPlaylist($playlist->id)
+            ->servableForPlaylist($playlist)
             ->where('content_fingerprint', $fingerprint)
             ->where('status', CachedContentFileStatus::Completed->value)
+            ->orderByRaw('CASE WHEN playlist_id = ? THEN 0 ELSE 1 END', [$playlist->id])
             ->first();
 
         if ($cached === null || ! $cached->hasFilePath()) {

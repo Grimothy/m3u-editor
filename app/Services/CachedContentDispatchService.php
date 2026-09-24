@@ -22,16 +22,19 @@ use Illuminate\Support\Facades\DB;
  *
  * Invariants:
  *  1. Single-row dispatch (one Channel or Episode per call). N calls with
- *     the same fingerprint produce exactly ONE INSERT total because the
- *     2nd..Nth calls hit the existing-row short-circuit.
+ *     the same fingerprint AND the same playlist produce exactly ONE INSERT
+ *     total because the 2nd..Nth calls hit the existing-row short-circuit.
  *  2. Ownership: every new `CachedContentFile` row stamps BOTH `user_id`
  *     (auth()->id() with a fallback to the source playlist's owner for
  *     the scheduled-orchestrator path where no user is logged in) AND
  *     `playlist_id` (from the source row's playlist).
- *  3. Cross-playlist sharing: the SOURCE playlist owns the file
- *     (write-locked). Other playlists read it only when the source's
- *     `share_cache_across_playlists` toggle is on AND a Completed row
- *     exists for the fingerprint with that source playlist's id.
+ *  3. Cross-playlist sharing (within a single user only): another
+ *     playlist that the same user owns may SERVE a Completed row that
+ *     belongs to a sibling playlist when that sibling has
+ *     `share_cache_across_playlists = true`. Cross-USER sharing is never
+ *     allowed. A playlist's own row is always preferred over a shared row.
+ *     "Servable for playlist P" is implemented by
+ *     `CachedContentFile::scopeServableForPlaylist()`.
  *  4. Fingerprint identity: `Channel::cacheFingerprint()` and
  *     `Episode::cacheFingerprint()` are the single source of truth - both
  *     the live dispatch path and the cached fingerprint row derive from
@@ -46,10 +49,12 @@ class CachedContentDispatchService
      * Returns a Collection of the DownloadCachedContentFile job(s) actually
      * queued. Empty Collection when:
      *  - The global `enable_cache` setting is off (kill switch)
-     *  - The fingerprint already has any row (idempotent re-dispatch is a no-op)
+     *  - The fingerprint already has any row for THIS playlist (idempotent
+     *    re-dispatch is a no-op - PR #1524 review item 1)
+     *  - A Completed row from another of the same user's playlists with
+     *    `share_cache_across_playlists = true` is servable for this
+     *    playlist (cross-playlist sharing - PR #1524 review item 2)
      *  - The Channel has no URL (no work to do)
-     *  - Cross-playlist sharing hits an existing Completed row owned by
-     *    a sharing-enabled source playlist
      *
      * @return Collection<int, DownloadCachedContentFile>
      */
@@ -66,7 +71,7 @@ class CachedContentDispatchService
 
         $fingerprint = $channel->cacheFingerprint();
 
-        if ($this->findSharedCacheHit($fingerprint, $playlist) !== null) {
+        if ($this->findServableCacheHit($fingerprint, $playlist) !== null) {
             return collect();
         }
 
@@ -80,10 +85,12 @@ class CachedContentDispatchService
      *
      * Returns an empty Collection when:
      *  - The global `enable_cache` setting is off (kill switch)
-     *  - The fingerprint already has any row (idempotent re-dispatch is a no-op)
+     *  - The fingerprint already has any row for THIS playlist (idempotent
+     *    re-dispatch is a no-op - PR #1524 review item 1)
+     *  - A Completed row from another of the same user's playlists with
+     *    `share_cache_across_playlists = true` is servable for this
+     *    playlist (cross-playlist sharing)
      *  - The Episode has no playlist or URL
-     *  - Cross-playlist sharing hits an existing Completed row owned by
-     *    a sharing-enabled source playlist
      *
      * @return Collection<int, DownloadCachedContentFile>
      */
@@ -100,7 +107,7 @@ class CachedContentDispatchService
 
         $fingerprint = $episode->cacheFingerprint();
 
-        if ($this->findSharedCacheHit($fingerprint, $playlist) !== null) {
+        if ($this->findServableCacheHit($fingerprint, $playlist) !== null) {
             return collect();
         }
 
@@ -187,27 +194,28 @@ class CachedContentDispatchService
      * handlers to disambiguate "dispatcher returned empty because the
      * row is already cached / queued" from a genuine empty result.
      *
-     * Prefers a row matching the item's source playlist when one exists;
-     * falls back to ANY row for the fingerprint so cross-playlist hits
-     * are still surfaced as "Already cached" even when the local playlist
-     * has no row of its own.
+     * Visibility follows the same "servable for playlist" rule as
+     * playback (see `CachedContentFile::scopeServableForPlaylist()`):
+     * the item's source playlist row is preferred; a row shared by
+     * another of the same user's playlists with
+     * `share_cache_across_playlists = true` is the fallback. Rows owned
+     * by other users are NEVER surfaced - reporting another user's cache
+     * as "Already cached" for our row would be both wrong and a privacy
+     * leak.
      */
     public function describeExisting(Channel|Episode $item): ?CachedContentFile
     {
-        $fingerprint = $item->cacheFingerprint();
-        $playlistId = $item->playlist_id;
-
-        $hit = CachedContentFile::query()
-            ->where('content_fingerprint', $fingerprint)
-            ->when($playlistId !== null, fn ($q) => $q->where('playlist_id', $playlistId))
-            ->first();
-
-        if ($hit) {
-            return $hit;
+        $playlist = $item->playlist;
+        if (! $playlist) {
+            return null;
         }
 
+        $fingerprint = $item->cacheFingerprint();
+
         return CachedContentFile::query()
+            ->servableForPlaylist($playlist)
             ->where('content_fingerprint', $fingerprint)
+            ->orderByRaw('CASE WHEN playlist_id = ? THEN 0 ELSE 1 END', [$playlist->id])
             ->first();
     }
 
@@ -291,34 +299,27 @@ class CachedContentDispatchService
     }
 
     /**
-     * Whether a Completed `CachedContentFile` exists for `$fingerprint`
-     * that another playlist can reuse via `$sourcePlaylist`'s sharing
-     * toggle.
+     * Resolve a Completed `CachedContentFile` for `$fingerprint` that is
+     * SERVABLE for `$playlist` - i.e. either belongs to `$playlist` itself
+     * OR to another of the same user's playlists that has
+     * `share_cache_across_playlists = true`.
      *
-     * Rule:
-     *  - The owning playlist of the existing row MUST be `$sourcePlaylist`.
-     *  - That source playlist's `share_cache_across_playlists` MUST be on.
-     *  - The row's status MUST be `Completed`.
+     * The `scopeServableForPlaylist()` predicate implements the OR. The
+     * Completed-status filter is applied on top. This is the single source
+     * of truth for "is there a cache hit for this playlist" used by
+     * `dispatchForChannel()`, `dispatchForEpisode()`, and
+     * `XtreamStreamController::resolveCacheHit()`.
+     *
+     * The result prefers `$playlist`'s own row over a shared row via
+     * `orderByRaw('CASE WHEN playlist_id = ? THEN 0 ELSE 1 END', ...)`.
      */
-    public function isCrossPlaylistDuplicate(string $fingerprint, Playlist $sourcePlaylist): bool
+    public function findServableCacheHit(string $fingerprint, Playlist $playlist): ?CachedContentFile
     {
-        return $this->findSharedCacheHit($fingerprint, $sourcePlaylist) !== null;
-    }
-
-    /**
-     * Same logic as `isCrossPlaylistDuplicate` but returns the matching
-     * row instead of a boolean. Null when no share-hit exists.
-     */
-    public function findSharedCacheHit(string $fingerprint, Playlist $sourcePlaylist): ?CachedContentFile
-    {
-        if (! $sourcePlaylist->share_cache_across_playlists) {
-            return null;
-        }
-
         return CachedContentFile::query()
+            ->servableForPlaylist($playlist)
             ->where('content_fingerprint', $fingerprint)
-            ->where('playlist_id', $sourcePlaylist->id)
             ->where('status', CachedContentFileStatus::Completed)
+            ->orderByRaw('CASE WHEN playlist_id = ? THEN 0 ELSE 1 END', [$playlist->id])
             ->first();
     }
 
@@ -326,18 +327,23 @@ class CachedContentDispatchService
      * Build the dispatch from the per-item fingerprint + ownership check
      * through to the actual row insert + job dispatch.
      *
-     * Existing-row short-circuit: any row with the same fingerprint
-     * (any status) prevents the INSERT. This is what makes the
-     * "N calls, same fingerprint, 1 INSERT" test invariant hold.
+     * Existing-row short-circuit (PR #1524 review item 1): a row with the
+     * same fingerprint AND the same playlist id (any status) prevents the
+     * INSERT. This is what makes the
+     * "N calls, same playlist + same fingerprint, 1 INSERT" test invariant
+     * hold. Note the second key (playlist_id) - uniqueness is per-playlist,
+     * not global, so a different playlist can legitimately insert its own
+     * copy of the same fingerprint.
      *
      * The INSERT is wrapped in a savepoint (DB::transaction) + a
-     * QueryException fallback so a concurrent dispatch racing on the
-     * same fingerprint survives: the unique index on `content_fingerprint`
-     * rejects the second INSERT, we swallow that specific exception, and
-     * re-query the now-existing row. Postgres aborts the surrounding
-     * transaction on a failed statement (SQLSTATE 25P02), so the
-     * savepoint matters specifically for RefreshDatabase's per-test
-     * wrapper.
+     * QueryException fallback so a concurrent dispatch racing on the same
+     * `(fingerprint, playlist_id)` survives: the composite unique on
+     * `(content_fingerprint, playlist_id)` from migration
+     * `2026_09_16_120100_add_playlist_id_...` rejects the second INSERT,
+     * we swallow that specific exception, and re-query the now-existing
+     * row. Postgres aborts the surrounding transaction on a failed
+     * statement (SQLSTATE 25P02), so the savepoint matters specifically for
+     * RefreshDatabase's per-test wrapper.
      *
      * @return Collection<int, DownloadCachedContentFile>
      */
@@ -348,7 +354,10 @@ class CachedContentDispatchService
             return collect();
         }
 
-        $existing = CachedContentFile::where('content_fingerprint', $fingerprint)->first();
+        $existing = CachedContentFile::query()
+            ->where('content_fingerprint', $fingerprint)
+            ->where('playlist_id', $playlist->id)
+            ->first();
         if ($existing) {
             return collect();
         }
@@ -375,8 +384,9 @@ class CachedContentDispatchService
             });
         } catch (QueryException) {
             // Lost an INSERT race against a concurrent dispatch for the
-            // same fingerprint. The other writer's row satisfies the
-            // idempotent re-dispatch contract; bail without dispatching.
+            // same (fingerprint, playlist_id). The other writer's row
+            // satisfies the idempotent re-dispatch contract; bail without
+            // dispatching.
             return collect();
         }
 
