@@ -26,11 +26,54 @@ class PrivateNetworkGuard
 {
     /**
      * Determine whether an IP address is private, loopback, link-local,
-     * or otherwise reserved.
+     * multicast, or otherwise reserved.
+     *
+     * PHP's `FILTER_FLAG_NO_PRIV_RANGE | FILTER_FLAG_NO_RES_RANGE`
+     * already covers RFC1918, loopback, link-local, the IPv6 ULA / link-
+     * local blocks, and the reserved IPv4 ranges. It does NOT cover the
+     * multicast blocks - those are checked explicitly below.
+     *
+     * CGNAT (100.64.0.0/10, RFC 6598) is intentionally NOT treated as
+     * private here: operators routinely reach providers that live behind
+     * ISP-side CGNAT (and Tailscale exit nodes commonly sit in that
+     * range), and a false-positive rejection would block legitimate
+     * downloads with no real SSRF-protection benefit. If a future threat
+     * model requires CGNAT rejection, gate it behind an explicit
+     * `$denyCgnat` parameter rather than changing this default.
+     *
+     * Multicast blocks ARE treated as unsafe: SSRF attempts can pivot to
+     * multicast listeners on co-located infrastructure, and there is no
+     * legitimate "operator reaches us at a multicast IP" use case here.
+     *  - IPv4: 224.0.0.0/4 (first byte 0xE0-0xEF)
+     *  - IPv6: ff00::/8 (first byte 0xFF)
      */
     public static function ipIsPrivate(string $ip): bool
     {
-        return ! filter_var($ip, FILTER_VALIDATE_IP, FILTER_FLAG_NO_PRIV_RANGE | FILTER_FLAG_NO_RES_RANGE);
+        if (! filter_var($ip, FILTER_VALIDATE_IP, FILTER_FLAG_NO_PRIV_RANGE | FILTER_FLAG_NO_RES_RANGE)) {
+            return true;
+        }
+
+        $packed = @inet_pton($ip);
+        if ($packed === false) {
+            // Unparseable (and yet FILTER_VALIDATE_IP said it was fine) -
+            // fail closed.
+            return true;
+        }
+
+        if (strlen($packed) === 4) {
+            // IPv4 multicast 224.0.0.0/4.
+            $first = ord($packed[0]);
+            if ($first >= 0xE0 && $first <= 0xEF) {
+                return true;
+            }
+        } else {
+            // IPv6 multicast ff00::/8.
+            if (ord($packed[0]) === 0xFF) {
+                return true;
+            }
+        }
+
+        return false;
     }
 
     /**

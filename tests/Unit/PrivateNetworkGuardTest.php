@@ -51,6 +51,15 @@ it('flags RFC1918, loopback, link-local, 0.0.0.0, and IPv6 private ranges as pri
     // re-checks the embedded v4 against the same private/reserved flags.
     'ipv4-mapped 127.0.0.1' => '::ffff:127.0.0.1',
     'ipv4-mapped 10.0.0.1' => '::ffff:10.0.0.1',
+
+    // Multicast - NOT covered by PHP's FILTER_FLAG_NO_PRIV_RANGE |
+    // FILTER_FLAG_NO_RES_RANGE; the guard adds an explicit check.
+    'ipv4 multicast low (224.0.0.0/4)' => '224.0.0.1',
+    'ipv4 multicast mid (224.0.0.0/4)' => '232.1.2.3',
+    'ipv4 multicast high (224.0.0.0/4)' => '239.255.255.255',
+    'ipv6 multicast ff00::/8 all-nodes' => 'ff02::1',
+    'ipv6 multicast ff00::/8 site-local' => 'ff05::1:3',
+    'ipv6 multicast ff00::/8 generic' => 'ffee:1234::1',
 ]);
 
 it('flags 172.15.x and 172.32.x as public (edge cases just outside RFC1918)', function (string $ip) {
@@ -70,14 +79,32 @@ it('treats well-known public addresses as public', function (string $ip) {
     'Cloudflare DNS IPv4' => '1.1.1.1',
     'Google DNS IPv6' => '2001:4860:4860::8888',
     'Cloudflare DNS IPv6' => '2606:4700:4700::1111',
-
-    // PHP's FILTER_FLAG_NO_PRIV_RANGE | FILTER_FLAG_NO_RES_RANGE leaves
-    // these as public - they are NOT in the guard's deny-list. Documenting
-    // here so a future filter-flag change (e.g. a PHP release that
-    // starts treating CGNAT as reserved) is caught by the test suite.
-    'CGNAT 100.64.0.1 (public per PHP filter flags)' => '100.64.0.1',
-    'multicast 224.0.0.1 (public per PHP filter flags)' => '224.0.0.1',
 ]);
+
+it('intentionally allows CGNAT 100.64.0.0/10 (provider / Tailscale reachability)', function (string $ip) {
+    // 100.64.0.0/10 (RFC 6598) is intentionally NOT in the deny-list:
+    // operators routinely reach providers that live behind ISP-side
+    // CGNAT, and Tailscale exit nodes commonly sit in that range. A
+    // false-positive rejection here would block legitimate downloads
+    // with no real SSRF-protection benefit. The dataset exercises the
+    // four corners (RFC 6598 reserves the full /10).
+    expect(PrivateNetworkGuard::ipIsPrivate($ip))->toBeFalse();
+})->with([
+    'CGNAT low edge 100.64.0.0' => '100.64.0.0',
+    'CGNAT mid 100.100.100.100' => '100.100.100.100',
+    'CGNAT mid ISP-style 100.64.0.1' => '100.64.0.1',
+    'CGNAT high edge 100.127.255.255' => '100.127.255.255',
+]);
+
+it('does NOT extend the multicast check past 239.x (224.0.0.0/4 boundary)', function () {
+    // The multicast check targets 224.0.0.0/4 (first byte 0xE0-0xEF,
+    // range 224-239). 223.x is just below that boundary and is NOT
+    // classified as private by the guard's multicast branch - PHP's
+    // own NO_PRIV/NO_RES_RANGE flags also leave 223.x as public. This
+    // pins the byte-range boundary so a future "extend the check to
+    // all 0xE0+" change would be caught.
+    expect(PrivateNetworkGuard::ipIsPrivate('223.255.255.255'))->toBeFalse();
+});
 
 it('assertUrlSafe accepts a normal public http URL with an IP-literal host', function () {
     // The guard resolves IP-literal hosts inline (no DNS), so this is
