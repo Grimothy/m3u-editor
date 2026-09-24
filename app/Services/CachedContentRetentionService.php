@@ -7,6 +7,10 @@ use App\Models\CachedContentFile;
 use App\Models\Channel;
 use App\Models\DynamicGroup;
 use App\Models\Episode;
+use App\Models\Playlist;
+use App\Settings\GeneralSettings;
+use Closure;
+use Illuminate\Database\Eloquent\Builder;
 use Illuminate\Support\Collection;
 use Illuminate\Support\Facades\Log;
 
@@ -20,22 +24,46 @@ use Illuminate\Support\Facades\Log;
  * the whole set), then rebuilds each scope's fingerprint set ONCE per
  * scope. Total work is O(scopes + files).
  *
- * Retention policy:
- *  - `never_expire = true` rows are kept regardless of scope membership.
- *  - Active downloads (Pending/Downloading) are NEVER deleted - retention
- *    would orphan an in-flight worker mid-write. The job's atomic reclaim
- *    has already flipped Failed -> Downloading but Pending/Downloading
- *    rows are explicitly excluded here so retention can never race a live
- *    worker.
- *  - All other rows whose fingerprint does NOT appear in their scope's
- *    live fingerprint set are eligible for deletion.
+ * Retention policy (effective per playlist via
+ * `Playlist::effectiveCacheRetentionMode()`):
+ *  - `never-expire` and `manual` both block automatic cleanup for the
+ *    owning playlist. Files in those playlists survive the sweep.
+ *    Operators delete them from the UI manually.
+ *  - `time-based` lets the automatic sweep pick up stale rows. "Stale"
+ *    means the row's `content_fingerprint` no longer appears in the
+ *    owning playlist's live membership.
+ *  - `never_expire = true` rows are kept regardless of scope membership
+ *    (per-row pin, beats any per-playlist mode).
+ *  - Active downloads (Pending/Downloading) are NEVER deleted - the job's
+ *    atomic reclaim can flip Failed -> Downloading; retention must never
+ *    orphan a live worker.
  *  - Actual deletion (file on disk + row) happens in
- *    `CachedContentRetentionCleanup::handle()` via chunked DELETEs.
+ *    `CachedContentRetentionCleanup::handle()` via chunked DELETEs, and
+ *    re-checks status AND `never_expire` to close the SELECT/DELETE race.
+ *
+ * Empty live-set behaviour:
+ *  When `evaluate()` / `evaluateForDynamicGroup()` ends up with a live
+ *  fingerprint set whose cardinality is empty (the playlist/group has
+ *  zero content rows), the scope is considered "no membership at all".
+ *  - For evaluate(): we treat the scope as "stale" — every non-pinned
+ *    candidate owned by that scope is eligible for deletion, consistent
+ *    with the legacy PR #1500 contract (no live = nothing wanted).
+ *  - For evaluateForDynamicGroup(): same — explicit empty-set branch
+ *    collects every candidate.
+ *
+ *  The unified helper below documents both branches so this contract is
+ *  preserved when extending it.
  */
 class CachedContentRetentionService
 {
     /**
      * Identify every `CachedContentFile` row that is no longer wanted.
+     *
+     * Respects per-playlist cache-retention mode: playlists whose effective
+     * mode is `never-expire` or `manual` are skipped entirely (their files
+     * survive the sweep). The set of "automatic" playlist IDs is resolved
+     * via a small subquery against `playlists` so we never load the model
+     * list into PHP.
      *
      * Returns a Collection of integer IDs (NOT Eloquent models) so the
      * caller can chunk them into a chunked DELETE without reloading the
@@ -50,28 +78,109 @@ class CachedContentRetentionService
      */
     public function evaluate(): Collection
     {
-        $eligibleStatuses = [
-            CachedContentFileStatus::Completed->value,
-            CachedContentFileStatus::Failed->value,
-        ];
+        $autoQuery = $this->automaticPlaylistIdsQuery();
 
-        // Stream candidates: exclude never_expire and active downloads at
-        // the DB layer so PHP never has to re-check them.
+        // Restrict the candidate query to playlists whose effective
+        // retention mode is automatic ("time-based"). Rows whose owning
+        // playlist chose 'never-expire' or 'manual' are filtered out at
+        // the DB layer via a subquery so they don't even enter the lazy
+        // iteration. Filtering them in the live-fingerprint resolver
+        // would return an empty set, which the contains() check would
+        // read as "no live membership → row is stale" and incorrectly
+        // delete.
+        $query = CachedContentFile::query()
+            ->where('never_expire', false)
+            ->whereIn('status', [
+                CachedContentFileStatus::Completed->value,
+                CachedContentFileStatus::Failed->value,
+            ])
+            ->where(function ($q) use ($autoQuery): void {
+                $q->whereNull('playlist_id')
+                    ->orWhereIn('playlist_id', $autoQuery);
+            });
+
+        return $this->collectStaleIdsFromCandidateQuery($query, function (?int $userId, ?int $playlistId): Collection {
+            return $this->liveFingerprintsForScope($userId ?? -1, $playlistId ?? -1);
+        });
+    }
+
+    /**
+     * Eloquent query builder for playlist IDs whose effective retention
+     * mode is automatic ("time-based").
+     *
+     * Returns a Builder rather than a Collection so callers can compose
+     * it inline via `orWhereIn('playlist_id', $builder)`, which compiles
+     * to a single SQL subquery. On a multi-thousand-row playlists table
+     * this is the difference between one indexed lookup and a
+     * full-table PHP filter loop (this project forbids unbounded
+     * `->all()` / `->get()` on large tables).
+     *
+     * Branching on the global default happens in PHP because the default
+     * is a PHP value resolved before the query. The two emitted shapes
+     * match the rules on `Playlist::effectiveCacheRetentionMode()`:
+     *  - Global default (post null/empty normalization) is 'time-based':
+     *    a playlist is automatic when its column is NULL, '' (empty), OR
+     *    explicitly 'time-based'. ONE indexed scan, three OR branches.
+     *  - Otherwise (global 'never-expire' or 'manual'): a playlist is
+     *    automatic only when its column is explicitly 'time-based'.
+     *
+     * `GeneralSettings` is refreshed first so an admin's in-session
+     * change to the global default is reflected by the sweep (otherwise
+     * the singleton's stale in-memory copy would silently outlive an
+     * admin edit).
+     */
+    public function automaticPlaylistIdsQuery(): Builder
+    {
+        $raw = app(GeneralSettings::class)->refresh()->cache_retention_mode ?? null;
+        $global = (is_string($raw) && $raw !== '') ? $raw : 'time-based';
+
+        if ($global === 'time-based') {
+            return Playlist::query()
+                ->select('id')
+                ->where(function ($q) use ($global): void {
+                    $q->whereNull('cache_retention_mode')
+                        ->orWhere('cache_retention_mode', '')
+                        ->orWhere('cache_retention_mode', $global);
+                });
+        }
+
+        return Playlist::query()
+            ->select('id')
+            ->where('cache_retention_mode', 'time-based');
+    }
+
+    /**
+     * Shared "build live-fingerprint set, stream candidates excluding
+     * never_expire/active, collect stale ids" implementation.
+     *
+     * Accepts an already-built candidate query builder (the caller
+     * decides which rows are eligible for evaluation — e.g. via
+     * `ownedByDynamicGroup()` for the DG path, or the retention-mode
+     * filter for the standalone path) and a closure that resolves the
+     * live fingerprint set for the (userId, playlistId) of each
+     * candidate. Returning an empty Collection from the closure
+     * signals "no live membership in this scope" — every eligible
+     * candidate row in that scope is then considered stale.
+     *
+     * @param  Builder<CachedContentFile>  $query
+     * @param  Closure(?int, ?int): Collection<int, string>  $resolveLive
+     * @return Collection<int, int>
+     */
+    protected function collectStaleIdsFromCandidateQuery(Builder $query, Closure $resolveLive): Collection
+    {
         $toDelete = collect();
         $liveByScope = [];
 
-        CachedContentFile::query()
-            ->where('never_expire', false)
-            ->whereIn('status', $eligibleStatuses)
+        $query
             ->select(['id', 'user_id', 'playlist_id', 'content_fingerprint'])
             ->lazy(1000)
-            ->each(function (CachedContentFile $file) use (&$liveByScope, &$toDelete): void {
+            ->each(function (CachedContentFile $file) use (&$liveByScope, &$toDelete, $resolveLive): void {
                 $userId = $file->user_id ?? -1;
                 $playlistId = $file->playlist_id ?? -1;
                 $key = "{$userId}:{$playlistId}";
 
                 if (! array_key_exists($key, $liveByScope)) {
-                    $liveByScope[$key] = $this->liveFingerprintsForScope($userId, $playlistId);
+                    $liveByScope[$key] = $resolveLive($file->user_id, $file->playlist_id);
                 }
 
                 if (! $liveByScope[$key]->contains($file->content_fingerprint)) {
@@ -106,6 +215,7 @@ class CachedContentRetentionService
         Channel::query()
             ->where('playlist_id', $playlistId)
             ->when($userId !== -1, fn ($q) => $q->where('user_id', $userId))
+            ->select(['id', 'tmdb_id', 'tvdb_id', 'playlist_id'])
             ->lazy(1000)
             ->each(function (Channel $channel) use (&$fingerprints): void {
                 $fingerprints->push($channel->cacheFingerprint());
@@ -114,7 +224,8 @@ class CachedContentRetentionService
         Episode::query()
             ->where('playlist_id', $playlistId)
             ->when($userId !== -1, fn ($q) => $q->where('user_id', $userId))
-            ->with('series:id,tmdb_id,tvdb_id')
+            ->with(['series:id,tmdb_id,tvdb_id'])
+            ->select(['id', 'playlist_id', 'series_id', 'tmdb_id', 'season', 'episode_num'])
             ->lazy(1000)
             ->each(function (Episode $episode) use (&$fingerprints): void {
                 $fingerprints->push($episode->cacheFingerprint());
@@ -136,6 +247,11 @@ class CachedContentRetentionService
      *  3. In-memory compare each file's fingerprint to the live set;
      *     collect the IDs whose fingerprint is no longer present.
      *
+     * Empty-set behaviour: when the group's live membership is empty
+     * (no channels / series), every non-pinned candidate in scope is
+     * considered stale and returned. Empty-Collection live-set → "no
+     * membership, nothing wanted".
+     *
      * @return Collection<int, int>
      */
     public function evaluateForDynamicGroup(int $dynamicGroupId): Collection
@@ -147,37 +263,31 @@ class CachedContentRetentionService
 
         $liveFingerprints = $this->liveFingerprintsForGroup($group);
 
+        $autoQuery = $this->automaticPlaylistIdsQuery();
+
         $query = CachedContentFile::query()
             ->ownedByDynamicGroup($dynamicGroupId)
             ->where('never_expire', false)
             ->whereIn('status', [
                 CachedContentFileStatus::Completed->value,
                 CachedContentFileStatus::Failed->value,
-            ]);
-
-        if ($liveFingerprints->isEmpty()) {
-            $toDelete = collect();
-
-            $query->select('id')
-                ->lazy(1000)
-                ->each(function (CachedContentFile $file) use (&$toDelete): void {
-                    $toDelete->push((int) $file->id);
-                });
-
-            return $toDelete;
-        }
-
-        $toDelete = collect();
-
-        $query->select(['id', 'content_fingerprint'])
-            ->lazy(1000)
-            ->each(function (CachedContentFile $file) use ($liveFingerprints, &$toDelete): void {
-                if (! $liveFingerprints->contains($file->content_fingerprint)) {
-                    $toDelete->push((int) $file->id);
-                }
+            ])
+            // Same per-playlist retention-mode filter as evaluate().
+            // Files linked into a DG but owned by a playlist that's
+            // 'never-expire' or 'manual' are skipped here so the
+            // shared helper can't mark them stale via the empty-set branch.
+            ->where(function ($q) use ($autoQuery): void {
+                $q->whereNull('playlist_id')
+                    ->orWhereIn('playlist_id', $autoQuery);
             });
 
-        return $toDelete->values();
+        // Live set resolved once for the whole DG; every candidate row
+        // sees the same fingerprint set regardless of its (user, playlist).
+        $resolve = function () use ($liveFingerprints): Collection {
+            return $liveFingerprints;
+        };
+
+        return $this->collectStaleIdsFromCandidateQuery($query, $resolve);
     }
 
     /**
@@ -193,13 +303,14 @@ class CachedContentRetentionService
         $fingerprints = collect();
 
         if ($group->type === 'vod') {
-            $group->loadMissing('channels');
+            $group->loadMissing('channels:id,playlist_id,tmdb_id,tvdb_id,user_id');
             foreach ($group->channels as $channel) {
                 $fingerprints->push($channel->cacheFingerprint());
             }
         } elseif ($group->type === 'series') {
             $group->loadMissing('series.episodes');
             foreach ($group->series as $series) {
+                $series->loadMissing('episodes:id,series_id,playlist_id,tmdb_id,season,episode_num');
                 foreach ($series->episodes as $episode) {
                     $fingerprints->push($episode->cacheFingerprint());
                 }
@@ -213,10 +324,11 @@ class CachedContentRetentionService
      * Delete a set of `CachedContentFile` rows + their on-disk files.
      * Called by `CachedContentRetentionCleanup::handle()` after `evaluate()`.
      *
-     * Skips any row whose status has flipped to Pending or Downloading
-     * since `evaluate()` decided to delete it - that's the only race
-     * window (a worker reclaimed a Failed row between the SELECT and the
-     * DELETE). A re-delete attempt would orphan the worker's bytes.
+     * Re-checks both `status` (so we don't orphan a worker that flipped
+     * Failed -> Pending/Downloading between SELECT and DELETE) AND
+     * `never_expire` (so a row that gets pinned between evaluate() and
+     * deleteIds() survives). Without the `never_expire` re-check, a
+     * pin-and-evaluate race would silently delete the pinned row.
      *
      * Chunked DELETE via `chunkById` so a multi-thousand-row cleanup
      * doesn't lock the table.
@@ -238,6 +350,7 @@ class CachedContentRetentionService
 
         CachedContentFile::query()
             ->whereIn('id', $ids->all())
+            ->where('never_expire', false)
             ->whereNotIn('status', $activeStatuses)
             ->chunkById(500, function ($rows) use (&$deleted): void {
                 foreach ($rows as $row) {

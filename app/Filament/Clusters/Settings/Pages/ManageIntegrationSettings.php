@@ -425,11 +425,11 @@ class ManageIntegrationSettings extends BaseSettingsPage
                                             ->label(__('Cache retention mode'))
                                             ->options([
                                                 'never-expire' => __('Never expire'),
-                                                'time-based' => __('Time-based'),
+                                                'time-based' => __('Automatic (remove when content leaves the playlist)'),
                                                 'manual' => __('Manual'),
                                             ])
                                             ->default('time-based')
-                                            ->helperText(__('How cached files are kept across the cleanup job. "Never expire" disables automatic cleanup. "Time-based" honors each row\'s age threshold. "Manual" requires explicit deletion.')),
+                                            ->helperText(__('How cached files are kept across the cleanup job. "Never expire" and "Manual" both disable automatic cleanup. "Automatic" removes a cached file once its content is no longer live in its owning playlist.')),
                                         Toggle::make('default_share_cache_across_playlists')
                                             ->label(__('Share cache across playlists by default'))
                                             ->inline(false)

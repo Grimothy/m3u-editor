@@ -7,6 +7,7 @@ use App\Enums\PlaylistChannelId;
 use App\Enums\PlaylistSourceType;
 use App\Enums\Status;
 use App\Jobs\UpdateXtreamStats;
+use App\Settings\GeneralSettings;
 use App\Traits\ShortUrlTrait;
 use Illuminate\Database\Eloquent\Casts\Attribute;
 use Illuminate\Database\Eloquent\Collection;
@@ -103,6 +104,41 @@ class Playlist extends Model
     public function getFolderPathAttribute(): string
     {
         return "playlist/{$this->uuid}";
+    }
+
+    /**
+     * Resolve the effective cache-retention mode for this playlist.
+     *
+     * Order of precedence (highest first):
+     *  1. This playlist's `cache_retention_mode` column, if set and non-empty.
+     *  2. The global `GeneralSettings::$cache_retention_mode` value.
+     *  3. Hard-coded fallback `'time-based'` (legacy default).
+     *
+     * Single source of truth used by `CachedContentRetentionService`. The
+     * stored per-row `never_expire` flag always wins — this only gates
+     * whether the automatic sweep is allowed to consider a playlist's
+     * files at all.
+     */
+    public function effectiveCacheRetentionMode(): string
+    {
+        $override = $this->cache_retention_mode ?? null;
+        if (is_string($override) && $override !== '') {
+            return $override;
+        }
+
+        $global = app(GeneralSettings::class)->cache_retention_mode ?? null;
+
+        return is_string($global) && $global !== '' ? $global : 'time-based';
+    }
+
+    /**
+     * Convenience: is the automatic retention sweep allowed to consider
+     * this playlist's cached files? `never-expire` and `manual` both mean
+     * "no automatic cleanup" (operators delete from the UI manually).
+     */
+    public function hasAutomaticCacheRetention(): bool
+    {
+        return $this->effectiveCacheRetentionMode() === 'time-based';
     }
 
     public function getFilePathAttribute(): string

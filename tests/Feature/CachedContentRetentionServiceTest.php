@@ -7,6 +7,7 @@ use App\Models\Playlist;
 use App\Models\Series;
 use App\Models\User;
 use App\Services\CachedContentRetentionService;
+use App\Settings\GeneralSettings;
 use Illuminate\Foundation\Testing\RefreshDatabase;
 use Illuminate\Support\Facades\Bus;
 use Illuminate\Support\Facades\DB;
@@ -260,4 +261,225 @@ it('deleteIds removes the rows and their on-disk files', function () {
 it('deleteIds returns 0 when the ID list is empty', function () {
     expect(app(CachedContentRetentionService::class)->deleteIds(collect()))
         ->toBe(0);
+});
+
+// --- PR #1524 review item 4: SQL-built "auto" set agrees with Playlist::effectiveCacheRetentionMode() ---
+
+it('automaticPlaylistIdsQuery() and Playlist::effectiveCacheRetentionMode() agree on AUTO status for every (override, global) combination', function () {
+    // Five combinations plus the null-global border. For every playlist,
+    // membership in the SQL-built set must match
+    // `effectiveCacheRetentionMode() === 'time-based'`.
+    $user = User::factory()->create();
+    $plExplicitTime = Playlist::factory()->for($user)->create(['cache_retention_mode' => 'time-based']);
+    $plExplicitNever = Playlist::factory()->for($user)->create(['cache_retention_mode' => 'never-expire']);
+    $plExplicitManual = Playlist::factory()->for($user)->create(['cache_retention_mode' => 'manual']);
+    $plExplicitEmpty = Playlist::factory()->for($user)->create(['cache_retention_mode' => '']);
+    $plNull = Playlist::factory()->for($user)->create(['cache_retention_mode' => null]);
+
+    $allPlaylists = [$plExplicitTime, $plExplicitNever, $plExplicitManual, $plExplicitEmpty, $plNull];
+    $service = app(CachedContentRetentionService::class);
+    $settings = app(GeneralSettings::class);
+
+    $assertAgreement = function () use ($service, $allPlaylists): void {
+        $autoIds = $service->automaticPlaylistIdsQuery()
+            ->pluck('id')
+            ->map(fn ($id) => (int) $id)
+            ->all();
+
+        foreach ($allPlaylists as $p) {
+            $inAuto = in_array((int) $p->id, $autoIds, true);
+            $effective = $p->fresh()->effectiveCacheRetentionMode();
+            $expectedAuto = $effective === 'time-based';
+
+            expect($inAuto)->toBe(
+                $expectedAuto,
+                "Playlist {$p->id} (override={$p->cache_retention_mode}): SQL says ".($inAuto ? 'AUTO' : 'NOT AUTO')
+                    ." but effectiveCacheRetentionMode() returned '{$effective}'",
+            );
+        }
+    };
+
+    // Case 1 + 3 + 4 + null-fallback: global = time-based.
+    $settings->cache_retention_mode = 'time-based';
+    $settings->save();
+    $assertAgreement();
+
+    // Case 2 + explicit override survives global change: global = never-expire.
+    $settings->cache_retention_mode = 'never-expire';
+    $settings->save();
+    $assertAgreement();
+
+    // Case 5 + null-global normalised border: global = manual, then global = null.
+    $settings->cache_retention_mode = 'manual';
+    $settings->save();
+    $assertAgreement();
+
+    $settings->cache_retention_mode = null;
+    $settings->save();
+    $assertAgreement();
+});
+
+// --- PR #1524 review item 4: per-playlist cache_retention_mode is honored ---
+
+it('evaluate() keeps stale rows when a playlist override is set to never-expire', function () {
+    $user = User::factory()->create();
+    $playlist = Playlist::factory()->for($user)->create([
+        'cache_retention_mode' => 'never-expire',
+    ]);
+
+    // Stale row that would otherwise be picked up.
+    $stale = CachedContentFile::factory()->completed()->create([
+        'content_type' => 'movie',
+        'tmdb_id' => '999',
+        'playlist_id' => $playlist->id,
+        'user_id' => $user->id,
+    ]);
+
+    $ids = app(CachedContentRetentionService::class)->evaluate();
+
+    expect($ids->all())->not->toContain($stale->id);
+});
+
+it('evaluate() keeps stale rows when a playlist override is set to manual', function () {
+    $user = User::factory()->create();
+    $playlist = Playlist::factory()->for($user)->create([
+        'cache_retention_mode' => 'manual',
+    ]);
+
+    $stale = CachedContentFile::factory()->completed()->create([
+        'content_type' => 'movie',
+        'tmdb_id' => '999',
+        'playlist_id' => $playlist->id,
+        'user_id' => $user->id,
+    ]);
+
+    $ids = app(CachedContentRetentionService::class)->evaluate();
+
+    expect($ids->all())->not->toContain($stale->id);
+});
+
+it('evaluate() keeps stale rows when NULL override and global default is never-expire', function () {
+    $settings = app(GeneralSettings::class);
+    $settings->cache_retention_mode = 'never-expire';
+    $settings->save();
+
+    $user = User::factory()->create();
+    $playlist = Playlist::factory()->for($user)->create([
+        'cache_retention_mode' => null,
+    ]);
+
+    $stale = CachedContentFile::factory()->completed()->create([
+        'content_type' => 'movie',
+        'tmdb_id' => '999',
+        'playlist_id' => $playlist->id,
+        'user_id' => $user->id,
+    ]);
+
+    $ids = app(CachedContentRetentionService::class)->evaluate();
+
+    expect($ids->all())->not->toContain($stale->id);
+});
+
+it('evaluate() deletes stale rows when NULL override and global default is time-based', function () {
+    $settings = app(GeneralSettings::class);
+    $settings->cache_retention_mode = 'time-based';
+    $settings->save();
+
+    $user = User::factory()->create();
+    $playlist = Playlist::factory()->for($user)->create([
+        'cache_retention_mode' => null,
+    ]);
+
+    $stale = CachedContentFile::factory()->completed()->create([
+        'content_type' => 'movie',
+        'tmdb_id' => '999',
+        'playlist_id' => $playlist->id,
+        'user_id' => $user->id,
+    ]);
+
+    $ids = app(CachedContentRetentionService::class)->evaluate();
+
+    expect($ids->all())->toContain($stale->id);
+});
+
+it('evaluate() deletes stale rows when playlist override is time-based even with global never-expire', function () {
+    $settings = app(GeneralSettings::class);
+    $settings->cache_retention_mode = 'never-expire';
+    $settings->save();
+
+    $user = User::factory()->create();
+
+    $autoPlaylist = Playlist::factory()->for($user)->create([
+        'cache_retention_mode' => 'time-based',
+    ]);
+    $manualPlaylist = Playlist::factory()->for($user)->create([
+        'cache_retention_mode' => null,
+    ]);
+
+    $autoStale = CachedContentFile::factory()->completed()->create([
+        'content_type' => 'movie',
+        'tmdb_id' => '999',
+        'playlist_id' => $autoPlaylist->id,
+        'user_id' => $user->id,
+    ]);
+    $manualStale = CachedContentFile::factory()->completed()->create([
+        'content_type' => 'movie',
+        'tmdb_id' => '888',
+        'playlist_id' => $manualPlaylist->id,
+        'user_id' => $user->id,
+    ]);
+
+    $ids = app(CachedContentRetentionService::class)->evaluate();
+
+    expect($ids->all())->toContain($autoStale->id)
+        ->and($ids->all())->not->toContain($manualStale->id);
+});
+
+// --- PR #1524 review item 8: deleteIds re-checks never_expire to close the pin race ---
+
+it('deleteIds re-checks never_expire so a row pinned between evaluate() and deleteIds() survives', function () {
+    // Scenario from PR #1524 review item 8: an operator pins a row to
+    // never_expire=true AFTER evaluate() has already decided to delete it.
+    // deleteIds() must re-check never_expire and skip the row instead of
+    // racing ahead with the DELETE. This protects user intent over the
+    // classic SELECT/DELETE race window.
+    $user = User::factory()->create();
+    $playlist = Playlist::factory()->for($user)->create([
+        'cache_retention_mode' => 'time-based',
+    ]);
+
+    $row = CachedContentFile::factory()->completed()->create([
+        'playlist_id' => $playlist->id,
+        'user_id' => $user->id,
+        'never_expire' => false,
+    ]);
+
+    // simulate: evaluate decided to delete, then operator pins the row
+    $row->update(['never_expire' => true]);
+    $row->refresh();
+
+    $count = app(CachedContentRetentionService::class)->deleteIds(collect([$row->id]));
+
+    expect($count)->toBe(0)
+        ->and(CachedContentFile::find($row->id))->not->toBeNull();
+});
+
+it('deleteIds skips rows whose status flipped back to Pending/Downloading between SELECT and DELETE', function () {
+    // Existing re-check safety (status) - kept here so the never_expire
+    // variant above is testable alongside it.
+    $user = User::factory()->create();
+    $playlist = Playlist::factory()->for($user)->create();
+
+    $row = CachedContentFile::factory()->completed()->create([
+        'playlist_id' => $playlist->id,
+        'user_id' => $user->id,
+    ]);
+
+    $row->update(['status' => 'downloading']);
+    $row->refresh();
+
+    $count = app(CachedContentRetentionService::class)->deleteIds(collect([$row->id]));
+
+    expect($count)->toBe(0)
+        ->and(CachedContentFile::find($row->id))->not->toBeNull();
 });

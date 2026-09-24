@@ -3324,11 +3324,11 @@ class PlaylistResource extends Resource implements CopilotResource
                         ->label(__('Cache retention mode'))
                         ->options([
                             'never-expire' => __('Never expire'),
-                            'time-based' => __('Time-based'),
+                            'time-based' => __('Automatic (remove when content leaves the playlist)'),
                             'manual' => __('Manual'),
                         ])
                         ->placeholder(__('Use global default (:mode)', ['mode' => __(($globalDefault = app(GeneralSettings::class)->cache_retention_mode ?? 'time-based'))]))
-                        ->helperText(__('Override the global retention mode (set in Settings > Integrations > Cache) for this playlist. Leave empty to fall back to the global setting.')),
+                        ->helperText(__('Override the global retention mode (set in Settings > Integrations > Cache) for this playlist. Leave empty to fall back to the global setting. "Never expire" and "Manual" both disable automatic cleanup; "Automatic" removes a cached file once its content is no longer live in the playlist.')),
                 ]),
             Section::make(__('EPG Output'))
                 ->description(__('EPG output options'))
