@@ -1,6 +1,7 @@
 <?php
 
 use App\Filament\Clusters\Settings\Pages\ManageIntegrationSettings;
+use App\Filament\Resources\Playlists\Pages\CreatePlaylist;
 use App\Models\User;
 use App\Settings\GeneralSettings;
 use Filament\Schemas\Components\Tabs;
@@ -80,3 +81,12 @@ it('opens the Integrations page on the new cache tab', function () {
 
     expect($tabs->getActiveTab())->toBe(4); // tmdb(1) + aiostreams(2) + mediaflow(3) + cache(4)
 });
+
+it('pre-fills the per-playlist share toggle from the global default on create', function (bool $globalDefault) {
+    $settings = app(GeneralSettings::class);
+    $settings->default_share_cache_across_playlists = $globalDefault;
+    $settings->save();
+
+    Livewire::test(CreatePlaylist::class)
+        ->assertFormSet(['share_cache_across_playlists' => $globalDefault]);
+})->with([true, false]);

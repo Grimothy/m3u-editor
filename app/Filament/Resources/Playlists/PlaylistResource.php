@@ -3319,15 +3319,17 @@ class PlaylistResource extends Resource implements CopilotResource
                         ->inline(false)
                         ->live()
                         ->helperText(__('When enabled, a cached file owned by this playlist is reused by other playlists pointing at the same content (subject to the source playlist also having sharing enabled). Disabling this hides this playlist\'s cached files from the cross-playlist dedup lookup.'))
-                        ->default(false),
+                        ->default(fn (): bool => (bool) (app(GeneralSettings::class)->default_share_cache_across_playlists ?? false)),
                     Select::make('cache_retention_mode')
                         ->label(__('Cache retention mode'))
-                        ->options([
+                        ->options($cacheRetentionOptions = [
                             'never-expire' => __('Never expire'),
                             'time-based' => __('Automatic (remove when content leaves the playlist)'),
                             'manual' => __('Manual'),
                         ])
-                        ->placeholder(__('Use global default (:mode)', ['mode' => __(($globalDefault = app(GeneralSettings::class)->cache_retention_mode ?? 'time-based'))]))
+                        ->placeholder(__('Use global default (:mode)', [
+                            'mode' => $cacheRetentionOptions[app(GeneralSettings::class)->cache_retention_mode ?: 'time-based'] ?? $cacheRetentionOptions['time-based'],
+                        ]))
                         ->helperText(__('Override the global retention mode (set in Settings > Integrations > Cache) for this playlist. Leave empty to fall back to the global setting. "Never expire" and "Manual" both disable automatic cleanup; "Automatic" removes a cached file once its content is no longer live in the playlist.')),
                 ]),
             Section::make(__('EPG Output'))
