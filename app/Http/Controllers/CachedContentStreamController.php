@@ -8,9 +8,9 @@ use App\Models\CustomPlaylist;
 use App\Models\MergedPlaylist;
 use App\Models\Playlist;
 use App\Models\PlaylistAlias;
-use App\Models\PlaylistAuth;
+use App\Services\PlaylistCredentialResolver;
 use App\Settings\GeneralSettings;
-use Illuminate\Database\Eloquent\ModelNotFoundException;
+use Illuminate\Database\Eloquent\Model;
 use Illuminate\Http\Request;
 use Illuminate\Support\Facades\Storage;
 
@@ -23,6 +23,10 @@ use Illuminate\Support\Facades\Storage;
  * and `XtreamStreamController::findAuthenticatedPlaylistAndStreamModel()`:
  *  - Method 1: PlaylistAuth credentials (returns the assigned playlist)
  *  - Method 2: password = playlist UUID, username = playlist owner's name
+ *
+ * Both steps are delegated to the shared `PlaylistCredentialResolver`
+ * service; this controller only adds the endpoint-specific ownership
+ * and type checks below.
  *
  * Phase 1 only supports caching for plain `Playlist` rows. The
  * `cached_content_files.playlist_id` column is a FK into the `playlists`
@@ -46,44 +50,20 @@ use Illuminate\Support\Facades\Storage;
  */
 class CachedContentStreamController extends Controller
 {
+    public function __construct(protected PlaylistCredentialResolver $resolver) {}
+
     /**
      * Resolve the authenticated playlist. Returns null when credentials
      * do not resolve. The returned model is one of Playlist /
      * MergedPlaylist / CustomPlaylist / PlaylistAlias depending on which
      * table the uuid (or PlaylistAuth assignment) maps to; the caller is
      * responsible for narrowing to Playlist before reading the cache.
+     *
+     * @return Model|null Playlist | MergedPlaylist | CustomPlaylist | PlaylistAlias
      */
-    private function resolvePlaylist(string $username, string $password): Playlist|CustomPlaylist|MergedPlaylist|PlaylistAlias|null
+    private function resolvePlaylist(string $username, string $password): ?Model
     {
-        // Method 1: PlaylistAuth credentials
-        $playlistAuth = PlaylistAuth::where('username', $username)
-            ->where('password', $password)
-            ->where('enabled', true)
-            ->first();
-
-        if ($playlistAuth && ! $playlistAuth->isExpired()) {
-            $playlist = $playlistAuth->getAssignedModel();
-            if ($playlist) {
-                return $playlist;
-            }
-        }
-
-        // Method 2: password = playlist UUID, username = owner's name
-        $playlistTypes = [Playlist::class, MergedPlaylist::class, CustomPlaylist::class, PlaylistAlias::class];
-
-        foreach ($playlistTypes as $type) {
-            try {
-                $playlist = $type::with('user')->where('uuid', $password)->firstOrFail();
-
-                if ($playlist->user && $playlist->user->name === $username) {
-                    return $playlist;
-                }
-            } catch (ModelNotFoundException) {
-                // Try next type
-            }
-        }
-
-        return null;
+        return $this->resolver->resolve($username, $password);
     }
 
     public function stream(Request $request, string $username, string $password, string $uuid)
@@ -136,7 +116,27 @@ class CachedContentStreamController extends Controller
         }
 
         $fullPath = Storage::disk($disk)->path($file->file_path);
-        $fileSize = filesize($fullPath);
+
+        // Storage::size() throws (Flysystem FileNotFoundException) on a
+        // missing file. Some drivers return false instead. Neither is
+        // acceptable for `int $fileSize` -- previously this tripped a
+        // TypeError 500 when a file vanished between exists() and
+        // filesize() (TOCTOU). Surface the disappearance as 404.
+        try {
+            $fileSize = Storage::disk($disk)->size($file->file_path);
+        } catch (\Throwable) {
+            abort(404, 'Cached file not found on disk');
+        }
+        if ($fileSize === false || $fileSize < 1) {
+            abort(404, 'Cached file not found on disk');
+        }
+        $fileSize = (int) $fileSize;
+
+        // Guard the actual read too: the file could vanish between
+        // size() and fopen() inside the streamed response.
+        if (@fopen($fullPath, 'rb') === false) {
+            abort(404, 'Cached file not found on disk');
+        }
 
         return StreamLocalFile::serve(
             fullPath: $fullPath,

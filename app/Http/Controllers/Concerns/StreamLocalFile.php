@@ -33,13 +33,18 @@ class StreamLocalFile
     public const CHUNK_SIZE = 8192;
 
     /**
-     * HTTP Range header regex. Accepts `bytes=N-` (open-ended) and
-     * `bytes=N-M` (closed). The spec form `bytes=N-M,P-Q` (multi-range)
-     * is rejected by this single-pass regex; callers asking for a
-     * multi-range response should compose a multipart/byteranges
-     * response themselves.
+     * HTTP Range header regex. Anchored to `^bytes=...$` so leading/trailing
+     * junk (and the multi-range form `bytes=N-M,P-Q`, which is currently
+     * unsupported) falls through to the full-body 200 path. Accepts the three
+     * RFC 7233 single-range forms:
+     *  - Open-ended: `bytes=N-`   (group 1 = N,  group 2 = null)
+     *  - Closed:     `bytes=N-M`  (group 1 = N,  group 2 = M)
+     *  - Suffix:     `bytes=-M`   (group 1 = null, group 2 = M)
+     *
+     * Callers asking for a multi-range response should compose a
+     * multipart/byteranges response themselves.
      */
-    public const RANGE_PATTERN = '/bytes=(\d+)-(\d*)/';
+    public const RANGE_PATTERN = '/^bytes=(\d+)?-(\d+)?$/';
 
     /**
      * Serve a local file with HTTP Range support.
@@ -150,6 +155,11 @@ class StreamLocalFile
      * the parsed range is out-of-bounds, so the caller can return a
      * proper 416 instead of silently clamping to the file size.
      *
+     * Handles the three RFC 7233 single-range forms accepted by
+     * RANGE_PATTERN. Suffix `bytes=-N` resolves to `start = max(0, size - N)`,
+     * so callers probing the last N bytes (typical MP4/MKV trailer fetch)
+     * get a real 206 instead of a silently widened 200.
+     *
      * @return array{0: int, 1: int, 2: int}
      */
     public static function parseRangeOrThrow(string $range, int $fileSize): array
@@ -162,9 +172,31 @@ class StreamLocalFile
             throw new InvalidRangeException("Malformed Range header: {$range}");
         }
 
+        // Optional capture groups may not populate their array key when
+        // they match the empty string -- guard with isset() before
+        // dereferencing, otherwise PHP warns "undefined array key N".
+        $hasStart = isset($matches[1]) && $matches[1] !== '';
+        $hasEnd = isset($matches[2]) && $matches[2] !== '';
+
+        if (! $hasStart && ! $hasEnd) {
+            throw new InvalidRangeException("Range header has neither start nor end: {$range}");
+        }
+
+        // Suffix form: bytes=-N  (e.g. player probing trailing MP4/MKV metadata).
+        if (! $hasStart && $hasEnd) {
+            $suffixLength = (int) $matches[2];
+            if ($suffixLength === 0) {
+                throw new InvalidRangeException('Suffix length 0 is not satisfiable.');
+            }
+            $start = max(0, $fileSize - $suffixLength);
+            $end = $fileSize - 1;
+
+            return [$start, $end, $end - $start + 1];
+        }
+
         $start = (int) $matches[1];
         // Open-ended (bytes=N-) -> end = fileSize - 1 per RFC 7233 §2.1.
-        $end = isset($matches[2]) && $matches[2] !== '' ? (int) $matches[2] : $fileSize - 1;
+        $end = $hasEnd ? (int) $matches[2] : $fileSize - 1;
 
         if ($start < 0 || $start >= $fileSize) {
             throw new InvalidRangeException("Range start {$start} outside 0..".($fileSize - 1));
