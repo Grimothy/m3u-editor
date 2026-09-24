@@ -8,6 +8,7 @@ use App\Models\Channel;
 use App\Models\Episode;
 use App\Settings\GeneralSettings;
 use App\Support\PrivateNetworkGuard;
+use App\Traits\ProviderRequestDelay;
 use GuzzleHttp\Psr7\Stream;
 use GuzzleHttp\Psr7\UriResolver;
 use GuzzleHttp\Psr7\Utils;
@@ -38,11 +39,15 @@ use Throwable;
  *    `bytes_downloaded` / `bytes_per_second` / `last_progress_at`.
  *  - Atomic Failed -> Downloading reclaim for retries, gated by
  *    `DB::transaction(... lockForUpdate())`.
- *  - Pending-cancellation flag consumed at job start (covers the
- *    "operator cancelled before a worker ever picked up the job" window).
- *  - Mid-flight cancellation via `cancellationCacheKey` polled on every
- *    progress tick (time-throttled so a multi-GB download does not hammer
- *    the cache store on every 64 KiB read).
+ *  - Cancellation: the widget's `deleteCachedFile()` writes the row-id
+ *    `cancellationCacheKey` and then deletes the row. For Pending rows
+ *    the worker's `find()` returns null and it exits cleanly. For
+ *    already-Downloading rows the flag is polled from
+ *    `checkCancellation()` (time-throttled so a multi-GB download does
+ *    not hammer the cache store on every 64 KiB read). `markCancelled()`
+ *    handles the race where the row is still alive when the worker
+ *    observes the flag, flipping it to Failed with a "Cancelled" error
+ *    message instead of leaving it stuck on Downloading.
  *  - `last_error_message` persisted on the row by `markFailed()`.
  *  - Three retries with exponential backoff via the framework's standard
  *    `tries` + `backoff()` mechanism.
@@ -51,6 +56,13 @@ use Throwable;
  *    automatic redirect following and re-validates every `Location`
  *    header so a malicious upstream can't redirect to internal
  *    services.
+ *  - Provider throttling: `withProviderThrottling()` wraps ONLY the
+ *    connection-establishment step (`fetchWithSafeRedirects`). The slot
+ *    has a 5-minute TTL and is shared across M3U/EPG import jobs, so
+ *    wrapping the whole download would starve the import pipeline of
+ *    slots for the full multi-GB download window. The body streaming
+ *    happens outside the slot; overall download concurrency is bounded
+ *    by the Horizon `cache-queue` supervisor's maxProcesses.
  *  - Storage write is validated (`put()` return + post-write `exists()`)
  *    before stamping `Completed`, so a failed disk write doesn't mark a
  *    row as ready when the bytes never made it.
@@ -59,7 +71,7 @@ use Throwable;
  */
 class DownloadCachedContentFile implements ShouldQueue
 {
-    use Dispatchable, InteractsWithQueue, Queueable;
+    use Dispatchable, InteractsWithQueue, ProviderRequestDelay, Queueable;
 
     /**
      * Three attempts covers a single transient proxy hiccup + one genuine
@@ -139,15 +151,17 @@ class DownloadCachedContentFile implements ShouldQueue
      * Orchestrate the download end to end:
      *
      *  1. Find the row (operator-deleted rows log + return without throw).
-     *  2. Consume any pending-cancel flag for this fingerprint.
-     *  3. Atomic Failed -> Downloading (or Pending -> Downloading) reclaim
+     *  2. Atomic Failed -> Downloading (or Pending -> Downloading) reclaim
      *     inside a `lockForUpdate()` transaction.
-     *  4. Validate the source URL against PrivateNetworkGuard (SSRF guard).
-     *  5. Stream the GET with redirect-disabled Guzzle, manually following
-     *     each redirect through the guard.
-     *  6. Move temp file -> `cache` disk via Storage::put and validate
+     *  3. Validate the source URL against PrivateNetworkGuard (SSRF guard).
+     *  4. Stream the GET with redirect-disabled Guzzle, manually following
+     *     each redirect through the guard (wrapped in
+     *     `withProviderThrottling()` so the provider-request-delay
+     *     concurrency slot is held only across connection-establishment,
+     *     not the full body stream).
+     *  5. Move temp file -> `cache` disk via Storage::put and validate
      *     the write succeeded.
-     *  7. Stamp Completed with file size + progress metadata.
+     *  6. Stamp Completed with file size + progress metadata.
      *
      * On any failure (HTTP exception, ConnectionException, RequestException,
      * SSRF rejection, IO error) the row moves to Failed via `markFailed()`
@@ -180,12 +194,6 @@ class DownloadCachedContentFile implements ShouldQueue
 
         $fingerprint = $file->content_fingerprint;
 
-        if (Cache::pull(CachedContentFile::pendingCancellationCacheKey($fingerprint))) {
-            Log::info("DownloadCachedContentFile: fingerprint={$fingerprint} cancelled before start.");
-
-            return;
-        }
-
         $file = $this->atomicReclaim($file);
         if ($file === null) {
             return;
@@ -194,7 +202,7 @@ class DownloadCachedContentFile implements ShouldQueue
         $this->progressFile = $file;
         $this->checkCancellation();
         if ($this->cancelled) {
-            Cache::forget(CachedContentFile::cancellationCacheKey($file->id));
+            $this->markCancelled($file, 'Cancelled before download started.');
 
             return;
         }
@@ -231,7 +239,16 @@ class DownloadCachedContentFile implements ShouldQueue
         $this->cancelled = false;
 
         try {
-            $response = $this->fetchWithSafeRedirects($url);
+            // withProviderThrottling() holds the shared provider-request
+            // slot only across the connection-establishment + redirect
+            // walk. The body stream below runs outside the slot; overall
+            // download concurrency is bounded by the Horizon
+            // `cache-queue` maxProcesses. enable_provider_request_delay
+            // off => the trait is a no-op so existing Http::fake tests
+            // are unaffected.
+            $response = $this->withProviderThrottling(
+                fn (): Response => $this->fetchWithSafeRedirects($url)
+            );
             $this->streamResponseToFile($response, $tempPath);
         } catch (RequestException|ConnectionException $e) {
             @unlink($tempPath);
@@ -254,9 +271,9 @@ class DownloadCachedContentFile implements ShouldQueue
         $this->checkCancellation();
 
         if ($this->cancelled) {
-            Cache::forget(CachedContentFile::cancellationCacheKey($file->id));
             Log::info("DownloadCachedContentFile: fingerprint={$fingerprint} cancelled mid-download.");
             @unlink($tempPath);
+            $this->markCancelled($file, 'Cancelled mid-download.');
 
             return;
         }
@@ -323,12 +340,7 @@ class DownloadCachedContentFile implements ShouldQueue
         }
 
         if ($this->cancelled) {
-            Cache::forget(CachedContentFile::cancellationCacheKey($file->id));
-            $file->forceFill([
-                'status' => CachedContentFileStatus::Failed,
-                'last_failed_at' => now(),
-                'last_error_message' => 'Cancelled after download completed.',
-            ])->save();
+            $this->markCancelled($file, 'Cancelled after download completed.');
 
             return;
         }
@@ -610,6 +622,41 @@ class DownloadCachedContentFile implements ShouldQueue
             Log::warning("DownloadCachedContentFile failed for row {$file->id} (fp={$file->content_fingerprint}): {$reason}");
         } catch (Throwable $e) {
             Log::error("DownloadCachedContentFile: markFailed itself failed for {$file->id}: {$e->getMessage()}");
+        }
+    }
+
+    /**
+     * Apply a cancellation flag: forget the row-id cancellation key and,
+     * if the row is still alive, flip it to Failed with the given reason.
+     *
+     * Without this helper, every cancel exit in `handle()` would either
+     * forget the key and return (leaving the row stuck on Downloading)
+     * or open-code the row update and skip the no-row case. Centralising
+     * the exit makes both halves of the invariant explicit:
+     *
+     *  - The row-id key is ALWAYS cleared so a future dispatch (new row,
+     *    new id) cannot be blocked by a stale flag.
+     *  - The status update is GUARDED by `whereKey($id)->update()` so a
+     *    row that was deleted between the worker's `find()` and this
+     *    call is NOT re-inserted. A mass update affecting 0 rows is
+     *    harmless.
+     *
+     * Cancellation does NOT bump `failure_count` (cancellation is an
+     * operator-initiated abort, not a transient failure), so the user
+     * can retry without a cooldown penalty.
+     */
+    private function markCancelled(CachedContentFile $file, string $reason): void
+    {
+        Cache::forget(CachedContentFile::cancellationCacheKey($file->id));
+
+        $affected = CachedContentFile::whereKey($file->id)->update([
+            'status' => CachedContentFileStatus::Failed->value,
+            'last_failed_at' => now(),
+            'last_error_message' => mb_substr($reason, 0, 8000),
+        ]);
+
+        if ($affected > 0) {
+            Log::info("DownloadCachedContentFile: row {$file->id} marked cancelled ({$reason}).");
         }
     }
 

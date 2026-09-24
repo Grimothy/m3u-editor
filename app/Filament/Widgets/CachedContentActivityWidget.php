@@ -595,8 +595,13 @@ class CachedContentActivityWidget extends BaseWidget
      * present) then deletes the row. Cancellation is signalled BEFORE the
      * delete so an in-flight worker picks up the flag instead of running
      * to completion against an orphaned file - see
-     * DownloadCachedContentFile::checkCancellation() and the
-     * pendingCancellationCacheKey consumption path.
+     * DownloadCachedContentFile::checkCancellation().
+     *
+     * The single row-id cancellation key covers both Pending and
+     * Downloading rows: Pending workers find no row to act on, Downloading
+     * workers poll the key from `checkCancellation()`. No fingerprint-scoped
+     * flag is needed (or wanted): a long-lived fingerprint flag would
+     * silently suppress a later legitimate dispatch for the same content.
      */
     public static function deleteCachedFile(CachedContentFile $record): void
     {
@@ -608,9 +613,6 @@ class CachedContentActivityWidget extends BaseWidget
             // Set the row marker for Pending too: the worker may have
             // reclaimed it to Downloading between our read and deletion.
             Cache::put(CachedContentFile::cancellationCacheKey($record->id), true, now()->addHours(48));
-        }
-        if ($record->status === CachedContentFileStatus::Pending) {
-            Cache::put(CachedContentFile::pendingCancellationCacheKey($record->content_fingerprint), true, now()->addMinutes(10));
         }
 
         if (! empty($record->file_path)) {

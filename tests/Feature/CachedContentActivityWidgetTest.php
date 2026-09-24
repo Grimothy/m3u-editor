@@ -214,7 +214,13 @@ it('per-row deleteCache action removes the row and storage file', function () {
     expect(Storage::disk('cache')->exists('cache/fingerprint.mp4'))->toBeFalse();
 });
 
-it('per-row cancel action sets a Pending cancellation flag for in-flight rows', function () {
+it('per-row cancel action sets a row-id cancellation flag and deletes the row (no fingerprint flag)', function () {
+    // PR #1524 review item 7: the previous implementation ALSO wrote a
+    // fingerprint-scoped `pendingCancellationCacheKey` when cancelling a
+    // Pending row. That flag lingered for 10 minutes and silently
+    // suppressed the next legitimate dispatch for the same content.
+    // The fix removes the fingerprint flag entirely; the row-id
+    // `cancellationCacheKey` + row deletion cover both windows.
     $user = User::factory()->create();
     $playlist = Playlist::factory()->for($user)->create();
     $fingerprint = 'movie:1234:::1080p';
@@ -228,12 +234,14 @@ it('per-row cancel action sets a Pending cancellation flag for in-flight rows', 
         'status' => CachedContentFileStatus::Pending,
     ]);
 
+    // Only the row-id flag is written - the fingerprint-scoped helper is
+    // gone. Mockery::mockery teardown unsets this between tests.
     Cache::shouldReceive('put')
         ->once()
         ->withArgs(fn (string $key, mixed $value, mixed $ttl): bool => $key === CachedContentFile::cancellationCacheKey($row->id));
-    Cache::shouldReceive('put')
-        ->once()
-        ->withArgs(fn (string $key, mixed $value, mixed $ttl): bool => $key === CachedContentFile::pendingCancellationCacheKey($fingerprint));
+
+    // Sanity: the fingerprint-scoped helper must not exist on the model.
+    expect(method_exists(CachedContentFile::class, 'pendingCancellationCacheKey'))->toBeFalse();
 
     $this->actingAs($user);
 

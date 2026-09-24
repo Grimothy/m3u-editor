@@ -158,26 +158,22 @@ class CachedContentFile extends Model
      * cancelled row's key can never collide with a later, unrelated
      * dispatch for the same content.
      *
-     * Checked periodically from the job's Guzzle PROGRESS callback — see
-     * DownloadCachedContentFile::checkCancellation().
+     * Covers BOTH windows:
+     *  - Pending rows: the widget writes the flag, then deletes the row.
+     *    The worker's `find()` returns null and it exits cleanly before
+     *    doing anything.
+     *  - Already-reclaimed (Downloading) rows: the worker polls the key
+     *    from `checkCancellation()` and aborts the stream.
+     *
+     * The previous fingerprint-keyed `pendingCancellationCacheKey` was
+     * removed because deleting the row before pickup already covers the
+     * Pending window, and a fingerprint-scoped flag with a TTL would
+     * silently suppress the NEXT legitimate dispatch for the same content
+     * if the flag outlived the original cancel.
      */
     public static function cancellationCacheKey(int $id): string
     {
         return "dynamic-group-cache:cancel:{$id}";
-    }
-
-    /**
-     * Cache key used to signal cancellation of a job that hasn't started
-     * downloading yet (Pending — cancelled before a worker reclaimed it).
-     * Keyed by content_fingerprint (the row itself is already deleted by
-     * the time this is checked) and consumed via Cache::pull() the one
-     * time DownloadCachedContentFile::handle() is about to create a fresh
-     * row for it, so a stale flag can never suppress a later, unrelated
-     * legitimate dispatch for the same fingerprint.
-     */
-    public static function pendingCancellationCacheKey(string $fingerprint): string
-    {
-        return "dynamic-group-cache:cancel-pending:{$fingerprint}";
     }
 
     /**

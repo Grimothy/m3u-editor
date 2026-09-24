@@ -380,8 +380,17 @@ class CachedContentDispatchService
             return collect();
         }
 
+        // Construct the job once and dispatch that same instance. The
+        // previous implementation built a `new` instance here AND called
+        // `DownloadCachedContentFile::dispatch(...)` with a fresh
+        // instance, producing two unrelated objects. We use the global
+        // `dispatch()` helper (NOT `DownloadCachedContentFile::dispatch()`)
+        // because the latter comes from the Dispatchable trait and would
+        // try to re-instantiate the job from its arguments. The job's
+        // constructor sets `onQueue('cache')` so the queue assignment
+        // is preserved.
         $job = new DownloadCachedContentFile($item, $row->id);
-        DownloadCachedContentFile::dispatch($item, $row->id)->onQueue('cache');
+        dispatch($job);
 
         return collect([$job]);
     }

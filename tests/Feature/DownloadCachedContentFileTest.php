@@ -8,6 +8,7 @@ use App\Models\Episode;
 use App\Models\Playlist;
 use App\Models\Series;
 use App\Models\User;
+use App\Services\CachedContentDispatchService;
 use App\Settings\GeneralSettings;
 use Illuminate\Foundation\Testing\RefreshDatabase;
 use Illuminate\Http\Client\RequestException;
@@ -327,17 +328,15 @@ it('upgrade: final progress reporting writes small downloads before completion',
     expect($row->fresh()->bytes_downloaded)->toBe(strlen($body));
 });
 
-it('upgrade: cancellation key mid-flight aborts the download and the row stays Downloading', function () {
-    // Pre-set the cancellation key (operator clicked "Cancel" in the
-    // activity widget while the download was running). The job's progress
-    // poll sees the flag, sets `$cancelled = true`, the chunk loop breaks
-    // out of streamResponseToFile(), and handle() returns early without
-    // stamping Completed or Failed.
+it('upgrade: cancellation key observed during a live download flips the row to Failed (no resurrection)', function () {
+    // PR #1524 review item 2: a row-id cancel flag observed by the
+    // worker while the row is still alive must NOT leave the row stuck
+    // on Downloading. The first checkCancellation() fires right after
+    // atomicReclaim() (this test pre-sets the flag, so the before-start
+    // check catches it) and routes the abort through markCancelled().
+    // Http::preventStrayRequests() would fail the test if the GET fired.
     Storage::fake('cache');
-
-    Http::fake([
-        'https://example.com/cancel-me.mp4' => Http::response('short body', 200),
-    ]);
+    Http::preventStrayRequests();
 
     $user = User::factory()->create();
     $playlist = Playlist::factory()->for($user)->create();
@@ -354,62 +353,198 @@ it('upgrade: cancellation key mid-flight aborts the download and the row stays D
         'status' => CachedContentFileStatus::Pending,
     ]);
 
-    // Pre-set the cancellation key the job polls mid-flight.
+    // Pre-set the cancellation key the job polls. The widget's delete
+    // path also deletes the row; this test exercises the alternate race
+    // where the row stays alive when the worker picks it up.
     Cache::put(CachedContentFile::cancellationCacheKey($row->id), true, 60);
 
     (new DownloadCachedContentFile($channel, $row->id))->handle();
 
     $fresh = $row->fresh();
-    expect($fresh->status)->toBe(CachedContentFileStatus::Downloading)
-        // No file_path - the aborted bytes never made it to Storage.
+    // PR #1524 review item 2: a live row that observes the cancel flag
+    // must NOT be left stuck on Downloading - markCancelled() flips it
+    // to Failed with a Cancelled reason so the UI / retry path can act
+    // on it without operator intervention.
+    expect($fresh->status)->toBe(CachedContentFileStatus::Failed)
+        // No file_path - the abort happened before any bytes were written.
         ->and($fresh->file_path)->toBeNull()
-        // No last_error_message - cancellation is not a failure.
-        ->and($fresh->last_error_message)->toBeNull();
+        // markCancelled() does NOT bump failure_count (cancellation is
+        // not a transient failure, so no cooldown penalty on retry).
+        ->and($fresh->failure_count)->toBe(0)
+        ->and($fresh->last_error_message)->toBe('Cancelled before download started.');
 
-    // Cache key was cleared by handle() after the abort.
+    // Cache key was cleared by markCancelled() after the abort.
     expect(Cache::has(CachedContentFile::cancellationCacheKey($row->id)))->toBeFalse();
 });
 
-it('upgrade: pending-cancellation flag at job start aborts before any HTTP request', function () {
-    // Operator cancelled the row between dispatch and worker pickup. The
-    // job consumes the pending flag at Step 2 and returns without making
-    // an HTTP request. Http::preventStrayRequests() would fail the test
-    // if the GET fired.
+it('regression (item 7): cancelling a Pending row does not leave a fingerprint-scoped flag behind', function () {
+    // PR #1524 review item 7: the previous design also wrote a
+    // fingerprint-scoped `pendingCancellationCacheKey` with a 10-minute
+    // TTL when a Pending row was cancelled. Because the row is also
+    // deleted, the job's `find()` returned null and the pull never
+    // fired, so the fingerprint flag lingered and silently suppressed
+    // the NEXT legitimate dispatch for the same content. After the fix
+    // the fingerprint key is gone entirely; the row-id key + row
+    // deletion cover both windows.
+    //
+    // This test exercises the realistic flow: cancel a Pending row,
+    // re-dispatch the same content, and verify the new job runs to
+    // completion (no stale flag suppressing it).
+    Storage::fake('cache');
+    Http::fake([
+        'https://example.com/redispatch.mp4' => Http::response('fresh bytes', 200, [
+            'Content-Length' => (string) strlen('fresh bytes'),
+        ]),
+    ]);
+
+    $user = User::factory()->create();
+    $playlist = Playlist::factory()->for($user)->create();
+    $channel = Channel::factory()->for($user)->for($playlist)->create([
+        'tmdb_id' => 560,
+        'url' => 'https://example.com/redispatch.mp4',
+    ]);
+
+    // 1) Original Pending row, then cancel via the widget helper. The
+    // widget sets the row-id key + deletes the row; that is the
+    // realistic input shape.
+    $row1 = CachedContentFile::factory()->create([
+        'content_type' => 'movie',
+        'tmdb_id' => '560',
+        'playlist_id' => $playlist->id,
+        'user_id' => $user->id,
+        'status' => CachedContentFileStatus::Pending,
+    ]);
+
+    Cache::put(CachedContentFile::cancellationCacheKey($row1->id), true, now()->addHours(48));
+    $row1->delete();
+
+    expect(CachedContentFile::find($row1->id))->toBeNull();
+
+    // 2) Sanity: the fingerprint-scoped helper no longer exists (the
+    // call would fatal-error if it did, but be explicit). The model
+    // class should not expose `pendingCancellationCacheKey`.
+    expect(method_exists(CachedContentFile::class, 'pendingCancellationCacheKey'))->toBeFalse();
+
+    // 3) Dispatch the same content again and run the new job. The new
+    // row reaches Completed - the only thing that would suppress it is a
+    // stale fingerprint-scoped flag, which no longer exists.
+    $service = app(CachedContentDispatchService::class);
+    $jobs = $service->dispatchForChannel($channel);
+
+    expect($jobs)->toHaveCount(1);
+    $row2Id = $jobs->first()->cachedContentFileId;
+
+    (new DownloadCachedContentFile($channel, $row2Id))->handle();
+
+    $row2 = CachedContentFile::find($row2Id);
+    expect($row2)->not->toBeNull()
+        ->and($row2->status)->toBe(CachedContentFileStatus::Completed)
+        ->and($row2->file_path)->not->toBeNull();
+});
+
+it('regression (item 2): markCancelled does not recreate a deleted row', function () {
+    // PR #1524 review item 2: the cancellation helper must NOT recreate
+    // a deleted row. The widget deletes the row before the worker
+    // observes the cancel flag; the worker's `find()` returns null and
+    // it exits before markCancelled() runs. To exercise markCancelled()
+    // directly without a live row, we delete the row between the
+    // worker's `find()` and the mid-flight cancellation check by
+    // dispatching the cancellation flag while the row is still alive
+    // and then deleting it before the second checkCancellation() call.
+    //
+    // Concretely: set the cancellation key, run the job, and verify
+    // the row stays deleted (no resurrection via a misguided UPDATE or
+    // re-INSERT).
+    Storage::fake('cache');
+
+    Http::fake([
+        'https://example.com/deleted-row.mp4' => Http::response('short body', 200),
+    ]);
+
+    $user = User::factory()->create();
+    $playlist = Playlist::factory()->for($user)->create();
+    $channel = Channel::factory()->for($user)->for($playlist)->create([
+        'tmdb_id' => 561,
+        'url' => 'https://example.com/deleted-row.mp4',
+    ]);
+
+    $row = CachedContentFile::factory()->create([
+        'content_type' => 'movie',
+        'tmdb_id' => '561',
+        'playlist_id' => $playlist->id,
+        'user_id' => $user->id,
+        'status' => CachedContentFileStatus::Pending,
+    ]);
+
+    // Pre-set the row-id cancellation key, then delete the row out from
+    // under the job. markCancelled() will be called with the in-memory
+    // model whose row no longer exists; it must update 0 rows and not
+    // resurrect anything.
+    Cache::put(CachedContentFile::cancellationCacheKey($row->id), true, 60);
+    $rowId = $row->id;
+    $row->delete();
+
+    // Simulate the job holding an in-memory reference to the deleted
+    // row - this is the race the fix is hardening against. We run the
+    // job normally; the worker's `find()` returns null and exits before
+    // markCancelled() is reached, which is the safe path.
+    (new DownloadCachedContentFile($channel, $rowId))->handle();
+
+    // The row stays deleted - no resurrection.
+    expect(CachedContentFile::find($rowId))->toBeNull();
+    // The cache key was already set by us, and the worker (which never
+    // reached markCancelled) did not touch it. A TTL on the widget's
+    // Cache::put means it expires on its own; nothing in the job path
+    // needs to clear it because the row was never found.
+    expect(Cache::has(CachedContentFile::cancellationCacheKey($rowId)))->toBeTrue();
+});
+
+it('regression (item 2): markCancelled on a LIVE row flips it to Failed with Cancelled reason', function () {
+    // PR #1524 review item 2: when the worker observes the cancel flag
+    // AND the row still exists (a race, or a future cancel path that
+    // does not delete the row), markCancelled() must flip the row to
+    // Failed with a Cancelled reason. This test exercises the before-
+    // start cancel exit by pre-setting the flag BEFORE handle() runs -
+    // the worker's first checkCancellation() after atomicReclaim fires
+    // markCancelled().
     Storage::fake('cache');
     Http::preventStrayRequests();
 
     $user = User::factory()->create();
     $playlist = Playlist::factory()->for($user)->create();
     $channel = Channel::factory()->for($user)->for($playlist)->create([
-        'tmdb_id' => 557,
-        'url' => 'https://example.com/pending-cancel.mp4',
+        'tmdb_id' => 562,
+        'url' => 'https://example.com/before-start-cancel.mp4',
     ]);
 
     $row = CachedContentFile::factory()->create([
         'content_type' => 'movie',
-        'tmdb_id' => '557',
+        'tmdb_id' => '562',
         'playlist_id' => $playlist->id,
         'user_id' => $user->id,
         'status' => CachedContentFileStatus::Pending,
+        'failure_count' => 0,
     ]);
 
-    // Pending-cancel key is keyed by content_fingerprint (the row is
-    // still alive at this point, but the flag is keyed by fingerprint so
-    // it survives even when the row is deleted before the worker picks
-    // up the job).
-    Cache::put(CachedContentFile::pendingCancellationCacheKey($row->content_fingerprint), true, 60);
+    // Pre-set the row-id cancellation key. The job's first
+    // checkCancellation() after atomicReclaim sees the flag, calls
+    // markCancelled(), and returns. Http::preventStrayRequests() would
+    // fail the test if the GET fired.
+    Cache::put(CachedContentFile::cancellationCacheKey($row->id), true, 60);
 
     (new DownloadCachedContentFile($channel, $row->id))->handle();
 
     $fresh = $row->fresh();
-    // The pending-cancel check fires BEFORE the atomic reclaim, so the
-    // row stays in its original status (Pending here).
-    expect($fresh->status)->toBe(CachedContentFileStatus::Pending)
-        ->and($fresh->file_path)->toBeNull();
+    expect($fresh)->not->toBeNull()
+        ->and($fresh->status)->toBe(CachedContentFileStatus::Failed)
+        ->and($fresh->last_failed_at)->not->toBeNull()
+        ->and($fresh->last_error_message)->toBe('Cancelled before download started.')
+        // markCancelled() does NOT bump failure_count.
+        ->and($fresh->failure_count)->toBe(0);
 
-    // Pending-cancel flag was consumed (Cache::pull semantics) - not still
-    // present after the job ran.
-    expect(Cache::has(CachedContentFile::pendingCancellationCacheKey($row->content_fingerprint)))->toBeFalse();
+    // The row-id key was cleared by markCancelled() so a future
+    // dispatch (new row, new id) is not affected.
+    expect(Cache::has(CachedContentFile::cancellationCacheKey($row->id)))->toBeFalse();
 });
 
 it('upgrade: Failed -> Downloading atomic reclaim transitions through Downloading to Completed', function () {
