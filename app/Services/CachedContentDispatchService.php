@@ -220,6 +220,26 @@ class CachedContentDispatchService
     }
 
     /**
+     * Resolve the human-readable title to persist on a newly-dispatched
+     * `CachedContentFile` row. Mirrors the same precedence the activity
+     * widget's `movie_source_title` / `episode_source_title`
+     * projections use (Channel::getDisplayTitleAttribute /
+     * Episode::getDisplayTitleAttribute), so the stored `title` column
+     * produces a byte-identical label when the widget reads it back.
+     *
+     * Returns null when the source row's display title is empty -
+     * matches the projection's `nullif(trim(...), '')` behaviour so the
+     * widget falls through to its subquery path on legacy rows without
+     * re-fetching what was already null at dispatch time.
+     */
+    private static function resolveInitialTitle(Channel|Episode $item): ?string
+    {
+        $title = trim((string) $item->display_title);
+
+        return $title === '' ? null : $title;
+    }
+
+    /**
      * Build the Filament notification for a "Cache Now" dispatch result.
      *
      * Centralizes the result-to-notification mapping for both the VOD
@@ -377,6 +397,14 @@ class CachedContentDispatchService
                     'episode_number' => $item instanceof Episode ? $item->episode_num : null,
                     'quality' => null,
                     'content_fingerprint' => $fingerprint,
+                    // Persist the source display title at dispatch time so the
+                    // CachedContentActivityWidget can render the title cell
+                    // straight from the row's own column on every poll. The
+                    // widget's Channel/Episode projection subqueries remain
+                    // as the fallback for legacy rows that pre-date this fill
+                    // (PR #1524 reuse/efficiency item: avoid re-running the
+                    // title subquery on every poll cycle).
+                    'title' => self::resolveInitialTitle($item),
                     'user_id' => $userId,
                     'playlist_id' => $playlist->id,
                     'status' => CachedContentFileStatus::Pending,

@@ -21,6 +21,7 @@ use Filament\Tables\Columns\TextColumn;
 use Filament\Tables\Enums\RecordActionsPosition;
 use Filament\Tables\Table;
 use Filament\Widgets\TableWidget as BaseWidget;
+use Illuminate\Database\Eloquent\Model;
 use Illuminate\Support\Collection;
 use Illuminate\Support\Facades\Cache;
 use Illuminate\Support\Facades\Log;
@@ -137,12 +138,31 @@ class CachedContentActivityWidget extends BaseWidget
             ->defaultSort('updated_at', 'desc')
             ->defaultPaginationPageOption(15)
             ->paginated([10, 25, 50])
-            ->poll('5s')
+            // Adaptive poll: 5s while at least one visible row is in-flight,
+            // 60s once every visible row is terminal (Completed/Failed). The
+            // slow idle poll keeps newly scheduled downloads (cache:content,
+            // Cache Now from another tab) appearing without a page reload
+            // while avoiding a 5s re-render of a static table.
+            ->poll(
+                fn (): string => CachedContentFile::query()
+                    ->when(
+                        ! (auth()->user()?->isAdmin() ?? false),
+                        fn ($q) => $q->ownedBy((int) auth()->id()),
+                    )
+                    ->whereIn('status', [CachedContentFileStatus::Pending, CachedContentFileStatus::Downloading])
+                    ->exists() ? '5s' : '60s',
+            )
             ->columns([
                 TextColumn::make('title')
                     ->label(__('Title'))
-                    ->placeholder('—')
-                    ->getStateUsing(fn (CachedContentFile $record): string => self::getContentLabel($record))
+                    ->placeholder('-')
+                    // Prefer the cached row's own `title` column (populated at
+                    // dispatch time) so the title cell can render straight
+                    // from the row without re-running the Channel/Episode
+                    // subquery on every poll. The subquery path remains the
+                    // fallback for legacy rows where dispatch never wrote a
+                    // title - see `getContentLabel()`.
+                    ->state(fn (CachedContentFile $record): string => self::getStoredTitleOrFallback($record))
                     ->searchable(['title', 'tmdb_id', 'tvdb_id'])
                     ->wrap()
                     ->limit(60),
@@ -168,13 +188,13 @@ class CachedContentActivityWidget extends BaseWidget
                     ->icon(fn (CachedContentFileStatus $state): string => $state->getIcon()),
                 TextColumn::make('progress')
                     ->label(__('Progress'))
-                    ->placeholder('—')
+                    ->placeholder('-')
                     ->getStateUsing(fn (CachedContentFile $record): ?string => self::getProgressLabel($record))
                     ->extraAttributes(fn (CachedContentFile $record): array => self::getProgressAttributes($record))
                     ->width('220px'),
                 TextColumn::make('eta')
                     ->label(__('ETA'))
-                    ->placeholder('—')
+                    ->placeholder('-')
                     ->getStateUsing(fn (CachedContentFile $record): ?string => self::getEtaLabel($record))
                     ->width('90px'),
                 TextColumn::make('failure_count')
@@ -184,7 +204,7 @@ class CachedContentActivityWidget extends BaseWidget
                     ->width('90px'),
                 TextColumn::make('playlist.name')
                     ->label(__('Playlist'))
-                    ->placeholder('—')
+                    ->placeholder('-')
                     ->toggleable()
                     ->width('140px'),
                 TextColumn::make('updated_at')
@@ -396,13 +416,13 @@ class CachedContentActivityWidget extends BaseWidget
      * Human-readable content identity for the title column.
      *
      * 3-tier resolution:
-     *  1. The cached row's own `title` column (currently always null
-     *     because dispatch + job never populate it; left in place as a
-     *     future backfill seam).
+     *  1. The cached row's own `title` column (populated at dispatch time
+     *     by `CachedContentDispatchService::dispatchNew()`).
      *  2. The widget query's `movie_source_title` / `episode_source_title`
      *     projection, resolved via Channel::getDisplayTitleAttribute() or
      *     Episode::getDisplayTitleAttribute() against the source row that
-     *     matches the cached row's playlist + tmdb/tvdb identity.
+     *     matches the cached row's playlist + tmdb/tvdb identity. Used for
+     *     legacy rows created before the title column was populated.
      *  3. The structured fingerprint label as a final fallback so legacy
      *     rows and rows whose source records were deleted remain informative.
      */
@@ -430,6 +450,27 @@ class CachedContentActivityWidget extends BaseWidget
         $episode = $record->episode_number !== null ? "E{$record->episode_number}" : '';
 
         return "{$record->content_type}: tmdb {$tmdb}{$season}{$episode}";
+    }
+
+    /**
+     * Cheap title lookup that prefers the cached row's own `title`
+     * column (no subquery needed) and only falls back to
+     * `getContentLabel()`'s full resolution when the row's `title` is
+     * null (legacy rows that pre-date the dispatch-time title fill, or
+     * rows whose source records have since been deleted).
+     *
+     * Used as the `state()` callback on the title TextColumn so the
+     * per-row title renders directly from the SELECT'd column on every
+     * poll, without re-running the Channel/Episode projection subqueries
+     * for every row in the table.
+     */
+    public static function getStoredTitleOrFallback(CachedContentFile $record): string
+    {
+        if ($record->title !== null && $record->title !== '') {
+            return $record->title;
+        }
+
+        return self::getContentLabel($record);
     }
 
     /**
@@ -653,8 +694,8 @@ class CachedContentActivityWidget extends BaseWidget
         }
 
         $item = match ($record->content_type) {
-            'movie' => self::resolveChannel($playlist, $record),
-            'episode' => self::resolveEpisode($playlist, $record),
+            'movie' => self::resolveSource($playlist, $record, Channel::class),
+            'episode' => self::resolveSource($playlist, $record, Episode::class),
             default => null,
         };
         if (! $item) {
@@ -720,36 +761,55 @@ class CachedContentActivityWidget extends BaseWidget
     }
 
     /**
-     * Resolve the underlying Channel row for a movie-type cache row.
+     * Resolve the underlying source row (Channel for movie-type rows,
+     * Episode for episode-type rows) for a cache row, matching on the
+     * stored tmdb/tvdb identity.
+     *
+     * The model-specific identity match differs (Episode goes through its
+     * parent Series because tmdb/tvdb lives there; Channel is matched
+     * directly), so each branch has its own query. The shared tail of the
+     * resolution - URL gate and return - lives in this method, which is
+     * why both call sites can collapse to a single parameterised call.
+     * Returns null when no source row matches OR the resolved row has no
+     * usable URL (re-dispatch against a no-URL row would queue a no-op).
+     *
+     * @template T of Channel|Episode
+     *
+     * @param  class-string<T>  $modelClass
+     * @return T|null
      */
-    private static function resolveChannel(Playlist $playlist, CachedContentFile $record): ?Channel
-    {
-        $query = Channel::query()->where('playlist_id', $playlist->id)->where('is_vod', true);
+    private static function resolveSource(
+        Playlist $playlist,
+        CachedContentFile $record,
+        string $modelClass,
+    ): ?Model {
+        $item = match ($modelClass) {
+            Channel::class => Channel::query()
+                ->where('playlist_id', $playlist->id)
+                ->where('is_vod', true)
+                ->when($record->tmdb_id, fn ($q) => $q->where('tmdb_id', (int) $record->tmdb_id))
+                ->when($record->tvdb_id, fn ($q) => $q->where('tvdb_id', (int) $record->tvdb_id))
+                ->first(),
+            Episode::class => self::findEpisodeThroughSeries($playlist, $record),
+            default => null,
+        };
 
-        if ($record->tmdb_id) {
-            $query->where('tmdb_id', (int) $record->tmdb_id);
-        }
-        if ($record->tvdb_id) {
-            $query->where('tvdb_id', (int) $record->tvdb_id);
-        }
-
-        $channel = $query->first();
-        if (! $channel) {
+        if (! $item) {
             return null;
         }
 
-        $url = PlaylistUrlService::getChannelUrl($channel, $playlist);
-        if (! $url) {
-            return null;
-        }
+        $hasUrl = $modelClass === Channel::class
+            ? (bool) PlaylistUrlService::getChannelUrl($item, $playlist)
+            : (bool) PlaylistUrlService::getEpisodeUrl($item, $playlist);
 
-        return $channel;
+        return $hasUrl ? $item : null;
     }
 
     /**
-     * Resolve the underlying Episode row for an episode-type cache row.
+     * Episode resolution goes through the parent Series because tmdb/tvdb
+     * identity lives on Series, not on Episode itself.
      */
-    private static function resolveEpisode(Playlist $playlist, CachedContentFile $record): ?Episode
+    private static function findEpisodeThroughSeries(Playlist $playlist, CachedContentFile $record): ?Episode
     {
         $series = Series::query()
             ->where('playlist_id', $playlist->id)
@@ -760,20 +820,10 @@ class CachedContentActivityWidget extends BaseWidget
             return null;
         }
 
-        $episode = Episode::query()
+        return Episode::query()
             ->where('series_id', $series->id)
             ->where('season', (int) ($record->season_number ?? 0))
             ->where('episode_num', (int) ($record->episode_number ?? 0))
             ->first();
-        if (! $episode) {
-            return null;
-        }
-
-        $url = PlaylistUrlService::getEpisodeUrl($episode, $playlist);
-        if (! $url) {
-            return null;
-        }
-
-        return $episode;
     }
 }

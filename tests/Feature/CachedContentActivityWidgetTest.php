@@ -10,6 +10,7 @@ use App\Models\Playlist;
 use App\Models\Season;
 use App\Models\Series;
 use App\Models\User;
+use App\Services\CachedContentDispatchService;
 use App\Settings\GeneralSettings;
 use Illuminate\Foundation\Testing\RefreshDatabase;
 use Illuminate\Support\Facades\Bus;
@@ -662,7 +663,7 @@ it('table renders the resolved source title for a null-title row with a matching
 
 // Resolution helpers
 
-it('resolveChannel returns a Channel when the source playlist matches by tmdb_id', function () {
+it('resolveSource returns a Channel when the source playlist matches by tmdb_id', function () {
     $user = User::factory()->create();
     $playlist = Playlist::factory()->for($user)->create();
     $channel = Channel::factory()->for($user)->for($playlist)->create([
@@ -679,15 +680,15 @@ it('resolveChannel returns a Channel when the source playlist matches by tmdb_id
     ]);
 
     $reflection = new ReflectionClass(CachedContentActivityWidget::class);
-    $method = $reflection->getMethod('resolveChannel');
+    $method = $reflection->getMethod('resolveSource');
     $method->setAccessible(true);
-    $resolved = $method->invoke(null, $playlist, $row);
+    $resolved = $method->invoke(null, $playlist, $row, Channel::class);
 
     expect($resolved)->not->toBeNull()
         ->and($resolved->id)->toBe($channel->id);
 });
 
-it('resolveEpisode returns an Episode when the source series matches by tmdb_id', function () {
+it('resolveSource returns an Episode when the source series matches by tmdb_id', function () {
     $user = User::factory()->create();
     $playlist = Playlist::factory()->for($user)->create();
     $series = Series::factory()->for($user)->for($playlist)->create([
@@ -711,10 +712,190 @@ it('resolveEpisode returns an Episode when the source series matches by tmdb_id'
     ]);
 
     $reflection = new ReflectionClass(CachedContentActivityWidget::class);
-    $method = $reflection->getMethod('resolveEpisode');
+    $method = $reflection->getMethod('resolveSource');
     $method->setAccessible(true);
-    $resolved = $method->invoke(null, $playlist, $row);
+    $resolved = $method->invoke(null, $playlist, $row, Episode::class);
 
     expect($resolved)->not->toBeNull()
         ->and($resolved->id)->toBe($episode->id);
+});
+
+// Title persistence at dispatch time (PR #1524 reuse/efficiency)
+
+it('dispatchForChannel stores the source Channel display title on the new row', function () {
+    // PR #1524 reuse/efficiency: persist the resolved title at dispatch time
+    // so the widget can render the title cell straight from the row's own
+    // column on every poll, avoiding the Channel/Episode projection
+    // subquery for rows that already have a stored title.
+    $user = User::factory()->create();
+    $playlist = Playlist::factory()->for($user)->create();
+    $channel = Channel::factory()->for($user)->for($playlist)->create([
+        'is_vod' => true,
+        'tmdb_id' => 9_001,
+        'title' => 'Arrival',
+        'url' => 'https://example.com/arrival.mp4',
+    ]);
+
+    Auth::login($user);
+    app(CachedContentDispatchService::class)->dispatchForChannel($channel);
+
+    $row = CachedContentFile::sole();
+    expect($row->title)->toBe('Arrival');
+});
+
+it('dispatchForEpisode stores the source Episode title on the new row', function () {
+    $user = User::factory()->create();
+    $playlist = Playlist::factory()->for($user)->create();
+    $series = Series::factory()->for($user)->for($playlist)->create([
+        'tmdb_id' => 9_002,
+    ]);
+    $season = Season::factory()->for($series)->create(['season_number' => 1]);
+    $episode = Episode::factory()->for($series)->create([
+        'season_id' => $season->id,
+        'season' => 1,
+        'episode_num' => 1,
+        'title' => 'Pilot',
+        'url' => 'https://example.com/pilot.mp4',
+    ]);
+
+    Auth::login($user);
+    app(CachedContentDispatchService::class)->dispatchForEpisode($episode);
+
+    $row = CachedContentFile::sole();
+    expect($row->title)->toBe('Pilot');
+});
+
+it('dispatchForChannel leaves title null when the source Channel display title is empty', function () {
+    // Mirrors the widget projection's `nullif(trim(...), '')` behaviour:
+    // an empty source title must not be persisted as an empty string, so
+    // the widget still falls through to its subquery path.
+    $user = User::factory()->create();
+    $playlist = Playlist::factory()->for($user)->create();
+    $channel = Channel::factory()->for($user)->for($playlist)->create([
+        'is_vod' => true,
+        'tmdb_id' => 9_003,
+        'title' => null,
+        'title_custom' => null,
+        'name' => null,
+        'name_custom' => null,
+        'url' => 'https://example.com/empty.mp4',
+    ]);
+
+    Auth::login($user);
+    app(CachedContentDispatchService::class)->dispatchForChannel($channel);
+
+    $row = CachedContentFile::sole();
+    expect($row->title)->toBeNull();
+});
+
+// Title column renders the stored value without re-running the subquery
+
+it('table renders the stored title for a row whose title was set at dispatch time', function () {
+    // Title resolution from the row's own `title` column - no subquery
+    // involvement. The factory creates the row with a non-null title,
+    // simulating a freshly-dispatched row whose title was filled by
+    // CachedContentDispatchService::dispatchNew().
+    $user = User::factory()->create();
+    $playlist = Playlist::factory()->for($user)->create();
+    CachedContentFile::factory()->completed()->create([
+        'user_id' => $user->id,
+        'playlist_id' => $playlist->id,
+        'content_type' => 'movie',
+        'tmdb_id' => '9100',
+        'title' => 'Persisted Title',
+    ]);
+
+    $this->actingAs($user);
+
+    Livewire::test(CachedContentActivityWidget::class)
+        ->assertOk()
+        ->loadTable()
+        ->assertSee('Persisted Title');
+});
+
+it('getStoredTitleOrFallback returns the stored title when present', function () {
+    $row = CachedContentFile::factory()->create([
+        'content_type' => 'movie',
+        'tmdb_id' => '42',
+        'title' => 'Stored',
+    ]);
+
+    expect(CachedContentActivityWidget::getStoredTitleOrFallback($row))->toBe('Stored');
+});
+
+it('getStoredTitleOrFallback falls back to the projection when stored title is null', function () {
+    $row = CachedContentFile::factory()->create([
+        'content_type' => 'movie',
+        'tmdb_id' => '42',
+        'title' => null,
+    ]);
+
+    // Without a matching Channel and no stored title, getContentLabel
+    // produces the structured fingerprint fallback. The stored-title
+    // helper must thread the same fallback through.
+    $label = CachedContentActivityWidget::getStoredTitleOrFallback($row);
+
+    expect($label)->toContain('movie')
+        ->and($label)->toContain('42');
+});
+
+// Adaptive poll: 5s while an in-flight row is visible, 60s otherwise
+
+it('table poll slows to 60s when no visible rows are Pending or Downloading', function () {
+    // PR #1524 reuse/efficiency: slow polling to 60s once every visible
+    // row is terminal (Completed/Failed) so the table doesn't re-render
+    // every 5s, while newly scheduled downloads still appear. The Closure passed
+    // to ->poll() is evaluated by Table::getPollingInterval(), which
+    // is what drives the wire:poll directive in the Blade view.
+    $user = User::factory()->create();
+    $playlist = Playlist::factory()->for($user)->create();
+
+    CachedContentFile::factory()->completed()->create([
+        'user_id' => $user->id,
+        'playlist_id' => $playlist->id,
+        'content_type' => 'movie',
+        'tmdb_id' => '9201',
+    ]);
+    CachedContentFile::factory()->failed()->create([
+        'user_id' => $user->id,
+        'playlist_id' => $playlist->id,
+        'content_type' => 'movie',
+        'tmdb_id' => '9202',
+    ]);
+
+    $this->actingAs($user);
+
+    $instance = Livewire::test(CachedContentActivityWidget::class)->instance();
+    $reflection = new ReflectionClass($instance);
+    $tableProperty = $reflection->getProperty('table');
+    $tableProperty->setAccessible(true);
+
+    // Build the table through the public entrypoint so the ->poll(...)
+    // Closure is registered, then resolve the polling interval.
+    $table = $instance->table($tableProperty->getValue($instance) ?? $instance->getTable());
+    expect($table->getPollingInterval())->toBe('60s');
+});
+
+it('table poll resolves to 5s when at least one visible row is Downloading', function () {
+    $user = User::factory()->create();
+    $playlist = Playlist::factory()->for($user)->create();
+
+    CachedContentFile::factory()->completed()->create([
+        'user_id' => $user->id,
+        'playlist_id' => $playlist->id,
+        'content_type' => 'movie',
+        'tmdb_id' => '9301',
+    ]);
+    CachedContentFile::factory()->downloading(500_000, 2_000_000)->create([
+        'user_id' => $user->id,
+        'playlist_id' => $playlist->id,
+        'content_type' => 'movie',
+        'tmdb_id' => '9302',
+    ]);
+
+    $this->actingAs($user);
+
+    $instance = Livewire::test(CachedContentActivityWidget::class)->instance();
+    $table = $instance->getTable();
+    expect($table->getPollingInterval())->toBe('5s');
 });
