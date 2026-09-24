@@ -119,7 +119,7 @@ it('clicking Cache Now dispatches DownloadCachedContentFile for the episode', fu
     Bus::assertDispatched(DownloadCachedContentFile::class);
 });
 
-it('Cache Now on an episode that already has a Completed cached file surfaces the "Already cached or queued" notification', function () {
+it('Cache Now on an episode that already has a Completed cached file surfaces the "Already cached" notification', function () {
     $playlist = Playlist::factory()->for($this->user)->create();
     $series = Series::factory()->for($this->user)->for($playlist)->create(['tmdb_id' => 5678]);
     $season = Season::factory()->for($series)->create(['season_number' => 3]);
@@ -146,7 +146,7 @@ it('Cache Now on an episode that already has a Completed cached file surfaces th
         'pageClass' => ListSeries::class,
     ])
         ->callAction(TestAction::make('cache_now')->table($episode))
-        ->assertNotified('Already cached or queued');
+        ->assertNotified('Already cached');
 
     Bus::assertNotDispatched(DownloadCachedContentFile::class);
 });
@@ -240,4 +240,73 @@ it('Episode::isCached returns false when an existing row is not in Completed sta
     ]);
 
     expect($episode->isCached())->toBeFalse();
+});
+
+// --- PR #1524 review item 6: "Cache Now" on an already-queued item must
+// not surface the red "Could not queue cache" failure ---
+
+it('Cache Now on an episode with a Pending row surfaces "Already queued for caching" (not a red failure)', function () {
+    $playlist = Playlist::factory()->for($this->user)->create();
+    $series = Series::factory()->for($this->user)->for($playlist)->create(['tmdb_id' => 14_141]);
+    $season = Season::factory()->for($series)->create(['season_number' => 9]);
+    $episode = Episode::factory()->for($series)->create([
+        'playlist_id' => $playlist->id,
+        'user_id' => $this->user->id,
+        'season_id' => $season->id,
+        'season' => 9,
+        'episode_num' => 1,
+        'url' => 'https://example.com/s9e1.mp4',
+    ]);
+
+    CachedContentFile::factory()->create([
+        'user_id' => $this->user->id,
+        'playlist_id' => $playlist->id,
+        'content_type' => 'episode',
+        'tmdb_id' => '14141',
+        'season_number' => 9,
+        'episode_number' => 1,
+        'status' => CachedContentFileStatus::Pending,
+    ]);
+
+    Livewire::test(EpisodesRelationManager::class, [
+        'ownerRecord' => $series,
+        'pageClass' => ListSeries::class,
+    ])
+        ->callAction(TestAction::make('cache_now')->table($episode))
+        ->assertNotified('Already queued for caching');
+
+    Bus::assertNotDispatched(DownloadCachedContentFile::class);
+});
+
+it('Cache Now on an episode with a Downloading row surfaces "Already queued for caching"', function () {
+    $playlist = Playlist::factory()->for($this->user)->create();
+    $series = Series::factory()->for($this->user)->for($playlist)->create(['tmdb_id' => 14_242]);
+    $season = Season::factory()->for($series)->create(['season_number' => 10]);
+    $episode = Episode::factory()->for($series)->create([
+        'playlist_id' => $playlist->id,
+        'user_id' => $this->user->id,
+        'season_id' => $season->id,
+        'season' => 10,
+        'episode_num' => 2,
+        'url' => 'https://example.com/s10e2.mp4',
+    ]);
+
+    CachedContentFile::factory()->create([
+        'user_id' => $this->user->id,
+        'playlist_id' => $playlist->id,
+        'content_type' => 'episode',
+        'tmdb_id' => '14242',
+        'season_number' => 10,
+        'episode_number' => 2,
+        'status' => CachedContentFileStatus::Downloading,
+    ]);
+
+    Livewire::test(EpisodesRelationManager::class, [
+        'ownerRecord' => $series,
+        'pageClass' => ListSeries::class,
+    ])
+        ->callAction(TestAction::make('cache_now')->table($episode))
+        ->assertNotified('Already queued for caching');
+
+    Bus::assertNotDispatched(DownloadCachedContentFile::class);
 });

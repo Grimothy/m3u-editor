@@ -104,7 +104,7 @@ it('clicking Cache Now dispatches DownloadCachedContentFile', function () {
     Bus::assertDispatched(DownloadCachedContentFile::class);
 });
 
-it('Cache Now on a VOD channel that already has a Completed cached file surfaces the "Already cached or queued" notification', function () {
+it('Cache Now on a VOD channel that already has a Completed cached file surfaces the "Already cached" notification', function () {
     $playlist = Playlist::factory()->for($this->user)->create();
     $channel = Channel::factory()->for($this->user)->for($playlist)->create([
         'is_vod' => true,
@@ -121,7 +121,7 @@ it('Cache Now on a VOD channel that already has a Completed cached file surfaces
 
     Livewire::test(ListVod::class)
         ->callAction(TestAction::make('cache_now')->table($channel))
-        ->assertNotified('Already cached or queued');
+        ->assertNotified('Already cached');
 
     // No new dispatch should fire for an already-cached row.
     Bus::assertNotDispatched(DownloadCachedContentFile::class);
@@ -215,4 +215,55 @@ it('Channel::isCached returns false when an existing row is not in Completed sta
     ]);
 
     expect($channel->isCached())->toBeFalse();
+});
+
+// --- PR #1524 review item 6: "Cache Now" on an already-queued item must
+// not surface the red "Could not queue cache" failure ---
+
+it('Cache Now on a VOD channel with a Pending row surfaces "Already queued for caching" (not a red failure)', function () {
+    $playlist = Playlist::factory()->for($this->user)->create();
+    $channel = Channel::factory()->for($this->user)->for($playlist)->create([
+        'is_vod' => true,
+        'tmdb_id' => 10_100,
+        'url' => 'https://example.com/queued.mp4',
+    ]);
+
+    CachedContentFile::factory()->create([
+        'user_id' => $this->user->id,
+        'playlist_id' => $playlist->id,
+        'content_type' => 'movie',
+        'tmdb_id' => '10100',
+        'status' => CachedContentFileStatus::Pending,
+    ]);
+
+    Livewire::test(ListVod::class)
+        ->callAction(TestAction::make('cache_now')->table($channel))
+        ->assertNotified('Already queued for caching');
+
+    // The dispatcher must NOT have queued another job - the row already
+    // exists, so re-dispatching is a no-op.
+    Bus::assertNotDispatched(DownloadCachedContentFile::class);
+});
+
+it('Cache Now on a VOD channel with a Downloading row surfaces "Already queued for caching"', function () {
+    $playlist = Playlist::factory()->for($this->user)->create();
+    $channel = Channel::factory()->for($this->user)->for($playlist)->create([
+        'is_vod' => true,
+        'tmdb_id' => 10_200,
+        'url' => 'https://example.com/downloading.mp4',
+    ]);
+
+    CachedContentFile::factory()->create([
+        'user_id' => $this->user->id,
+        'playlist_id' => $playlist->id,
+        'content_type' => 'movie',
+        'tmdb_id' => '10200',
+        'status' => CachedContentFileStatus::Downloading,
+    ]);
+
+    Livewire::test(ListVod::class)
+        ->callAction(TestAction::make('cache_now')->table($channel))
+        ->assertNotified('Already queued for caching');
+
+    Bus::assertNotDispatched(DownloadCachedContentFile::class);
 });

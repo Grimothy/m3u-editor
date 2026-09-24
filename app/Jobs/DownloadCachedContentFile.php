@@ -6,6 +6,7 @@ use App\Enums\CachedContentFileStatus;
 use App\Models\CachedContentFile;
 use App\Models\Channel;
 use App\Models\Episode;
+use App\Settings\GeneralSettings;
 use App\Support\PrivateNetworkGuard;
 use GuzzleHttp\Psr7\Stream;
 use GuzzleHttp\Psr7\UriResolver;
@@ -154,6 +155,22 @@ class DownloadCachedContentFile implements ShouldQueue
      */
     public function handle(): void
     {
+        // Kill switch: if the operator turned `enable_cache` off while
+        // jobs were already queued, short-circuit cleanly without
+        // throwing. The row is marked Failed via the same path other
+        // validation errors use so a re-dispatch (after the operator
+        // re-enables caching) can reclaim it.
+        if (! (bool) (app(GeneralSettings::class)->enable_cache ?? false)) {
+            $file = CachedContentFile::find($this->cachedContentFileId);
+            if ($file) {
+                $this->markFailed($file, 'Caching disabled');
+            } else {
+                Log::info("DownloadCachedContentFile: caching disabled, row {$this->cachedContentFileId} not found - nothing to mark.");
+            }
+
+            return;
+        }
+
         $file = CachedContentFile::find($this->cachedContentFileId);
         if (! $file) {
             Log::warning("DownloadCachedContentFile: cached_content_files row {$this->cachedContentFileId} not found, nothing to download.");

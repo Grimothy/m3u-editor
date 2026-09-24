@@ -8,12 +8,20 @@ use App\Models\Episode;
 use App\Models\Playlist;
 use App\Models\Series;
 use App\Models\User;
+use App\Settings\GeneralSettings;
 use Illuminate\Foundation\Testing\RefreshDatabase;
 use Illuminate\Http\Client\RequestException;
 use Illuminate\Support\Facades\Bus;
 use Illuminate\Support\Facades\Cache;
 use Illuminate\Support\Facades\Http;
 use Illuminate\Support\Facades\Storage;
+
+function setEnableCacheForDownloadTest(bool $value): void
+{
+    $mock = Mockery::mock(GeneralSettings::class);
+    $mock->enable_cache = $value;
+    app()->instance(GeneralSettings::class, $mock);
+}
 
 uses(RefreshDatabase::class);
 
@@ -22,6 +30,11 @@ beforeEach(function () {
     // dispatch(ProcessM3uImport). Bus::fake() catches that so the listener
     // never queues real jobs in tests that touch Playlists.
     Bus::fake();
+
+    // The job's kill-switch guard reads `enable_cache` from
+    // GeneralSettings. Tests for the download path need the setting on
+    // (the off-path test flips it explicitly).
+    setEnableCacheForDownloadTest(true);
 
     // Per-test Http::fake is set INSIDE each test rather than as a `*`
     // wildcard here. A wildcard registered in beforeEach is matched
@@ -480,4 +493,63 @@ it('upgrade: tries=3 and backoff()=[10,60,300] are configured for transient retr
 
     expect($job->tries)->toBe(3)
         ->and($job->backoff())->toBe([10, 60, 300]);
+});
+
+// --- enable_cache kill switch: jobs queued before the toggle flipped off ---
+
+it('handle marks the row Failed with "Caching disabled" when enable_cache is off at run time', function () {
+    // PR #1524 review item 5: a job queued while enable_cache was on
+    // can still be picked up after the operator flips the toggle off.
+    // The job must mark the row Failed via the same path other validation
+    // errors use (so a later re-enable + dispatch can reclaim it) and
+    // must NOT throw - Horizon should not retry a known-disabled job.
+    Storage::fake('cache');
+    Http::preventStrayRequests();
+
+    setEnableCacheForDownloadTest(false);
+
+    $user = User::factory()->create();
+    $playlist = Playlist::factory()->for($user)->create();
+    $channel = Channel::factory()->for($user)->for($playlist)->create([
+        'tmdb_id' => 560,
+        'url' => 'https://example.com/kill-switch.mp4',
+    ]);
+
+    $row = CachedContentFile::factory()->create([
+        'content_type' => 'movie',
+        'tmdb_id' => '560',
+        'playlist_id' => $playlist->id,
+        'user_id' => $user->id,
+        'status' => CachedContentFileStatus::Pending,
+        'failure_count' => 0,
+    ]);
+
+    // No exception bubbles - Horizon should not retry a disabled-by-toggle
+    // failure.
+    (new DownloadCachedContentFile($channel, $row->id))->handle();
+
+    $fresh = $row->fresh();
+    expect($fresh->status)->toBe(CachedContentFileStatus::Failed)
+        ->and($fresh->failure_count)->toBe(1)
+        ->and($fresh->last_failed_at)->not->toBeNull()
+        ->and($fresh->last_error_message)->toBe('Caching disabled');
+});
+
+it('handle returns cleanly without touching the row when enable_cache is off AND the row is missing', function () {
+    // Defensive: if the row was deleted between dispatch and run AND
+    // the operator flipped the toggle off, handle() must not crash.
+    Storage::fake('cache');
+
+    setEnableCacheForDownloadTest(false);
+
+    $user = User::factory()->create();
+    $playlist = Playlist::factory()->for($user)->create();
+    $channel = Channel::factory()->for($user)->for($playlist)->create([
+        'tmdb_id' => 561,
+        'url' => 'https://example.com/none.mp4',
+    ]);
+
+    expect(CachedContentFile::count())->toBe(0);
+    (new DownloadCachedContentFile($channel, 999999))->handle();
+    expect(CachedContentFile::count())->toBe(0);
 });

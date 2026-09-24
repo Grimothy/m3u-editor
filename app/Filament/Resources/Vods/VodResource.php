@@ -2,6 +2,7 @@
 
 namespace App\Filament\Resources\Vods;
 
+use App\Enums\CachedContentFileStatus;
 use App\Facades\LogoFacade;
 use App\Facades\SortFacade;
 use App\Filament\Actions\AssetPickerAction;
@@ -537,23 +538,7 @@ class VodResource extends Resource implements CopilotResource
             ->modalSubmitActionLabel(__('Cache now'))
             ->action(function (Channel $record): void {
                 $result = self::dispatchCacheNowForChannel($record);
-                if ($result['queued']) {
-                    Notification::make()
-                        ->success()
-                        ->title($result['already'] ? __('Already cached or queued') : __('Cache download queued'))
-                        ->body($result['already']
-                            ? __('A pending or completed cached file already exists for this VOD.')
-                            : __('Track progress on the Cached Downloads page.'))
-                        ->send();
-
-                    return;
-                }
-
-                Notification::make()
-                    ->danger()
-                    ->title(__('Could not queue cache'))
-                    ->body($result['error'] ?? __('Unknown error.'))
-                    ->send();
+                CachedContentDispatchService::cacheNowNotification($record, $result)->send();
             });
     }
 
@@ -2390,7 +2375,13 @@ class VodResource extends Resource implements CopilotResource
      * normalized shape so the action handler can pick a notification
      * without re-checking conditions.
      *
-     * @return array{queued: bool, already?: bool, error?: string}
+     * When the dispatcher returns an empty Collection (idempotent re-dispatch
+     * for a row that already exists), we look the existing row up by
+     * fingerprint via `describeExisting()` so the UI can show "Already cached"
+     * vs "Already queued for caching" vs the red "Could not queue cache"
+     * failure - the dispatcher alone can't tell those apart.
+     *
+     * @return array{queued: bool, already?: 'cached'|'queued', error?: string}
      */
     public static function dispatchCacheNowForChannel(Channel $record): array
     {
@@ -2398,16 +2389,22 @@ class VodResource extends Resource implements CopilotResource
             return ['queued' => false, 'error' => __('This VOD has no resolvable source URL.')];
         }
 
-        if ($record->isCached()) {
-            return ['queued' => true, 'already' => true];
-        }
-
         $service = app(CachedContentDispatchService::class);
         $jobs = $service->dispatchForChannel($record);
 
-        return [
-            'queued' => $jobs->isNotEmpty(),
-            'already' => $jobs->isEmpty(),
-        ];
+        if ($jobs->isNotEmpty()) {
+            return ['queued' => true];
+        }
+
+        $existing = $service->describeExisting($record);
+        if ($existing === null) {
+            return ['queued' => false, 'error' => __('Unknown error.')];
+        }
+
+        if ($existing->status === CachedContentFileStatus::Completed) {
+            return ['queued' => true, 'already' => 'cached'];
+        }
+
+        return ['queued' => true, 'already' => 'queued'];
     }
 }

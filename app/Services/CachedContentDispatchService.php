@@ -10,6 +10,8 @@ use App\Models\DynamicGroup;
 use App\Models\Episode;
 use App\Models\Playlist;
 use App\Models\Series;
+use App\Settings\GeneralSettings;
+use Filament\Notifications\Notification;
 use Illuminate\Database\QueryException;
 use Illuminate\Support\Collection;
 use Illuminate\Support\Facades\Auth;
@@ -43,6 +45,7 @@ class CachedContentDispatchService
      *
      * Returns a Collection of the DownloadCachedContentFile job(s) actually
      * queued. Empty Collection when:
+     *  - The global `enable_cache` setting is off (kill switch)
      *  - The fingerprint already has any row (idempotent re-dispatch is a no-op)
      *  - The Channel has no URL (no work to do)
      *  - Cross-playlist sharing hits an existing Completed row owned by
@@ -52,6 +55,10 @@ class CachedContentDispatchService
      */
     public function dispatchForChannel(Channel $channel): Collection
     {
+        if (! $this->isEnabled()) {
+            return collect();
+        }
+
         $playlist = $channel->playlist;
         if (! $playlist) {
             return collect();
@@ -71,10 +78,21 @@ class CachedContentDispatchService
      * from the parent Series via Episode::cacheFingerprint() so the cached
      * row's fingerprint matches the live fingerprint exactly.
      *
+     * Returns an empty Collection when:
+     *  - The global `enable_cache` setting is off (kill switch)
+     *  - The fingerprint already has any row (idempotent re-dispatch is a no-op)
+     *  - The Episode has no playlist or URL
+     *  - Cross-playlist sharing hits an existing Completed row owned by
+     *    a sharing-enabled source playlist
+     *
      * @return Collection<int, DownloadCachedContentFile>
      */
     public function dispatchForEpisode(Episode $episode): Collection
     {
+        if (! $this->isEnabled()) {
+            return collect();
+        }
+
         $playlist = $episode->playlist;
         if (! $playlist) {
             return collect();
@@ -106,10 +124,17 @@ class CachedContentDispatchService
      *    (file, group) pair no-op the second insert instead of crashing
      *    on the unique key.
      *
+     * Short-circuits before any work when the global `enable_cache`
+     * setting is off (kill switch).
+     *
      * @return Collection<int, DownloadCachedContentFile>
      */
     public function dispatchForGroup(DynamicGroup $group): Collection
     {
+        if (! $this->isEnabled()) {
+            return collect();
+        }
+
         $group->loadMissing(['channels', 'series.episodes']);
 
         $jobs = collect();
@@ -141,6 +166,100 @@ class CachedContentDispatchService
         }
 
         return $jobs;
+    }
+
+    /**
+     * Whether the global `enable_cache` toggle in GeneralSettings is on.
+     *
+     * Centralized here so every public entrypoint (`dispatchForChannel`,
+     * `dispatchForEpisode`, `dispatchForGroup`) reads the same way -
+     * mirroring the read pattern used in the serve controllers and
+     * Filament action visibility guards.
+     */
+    public function isEnabled(): bool
+    {
+        return (bool) (app(GeneralSettings::class)->enable_cache ?? false);
+    }
+
+    /**
+     * Look up an existing CachedContentFile row for an item's content
+     * fingerprint, regardless of status. Used by the "Cache Now" UI
+     * handlers to disambiguate "dispatcher returned empty because the
+     * row is already cached / queued" from a genuine empty result.
+     *
+     * Prefers a row matching the item's source playlist when one exists;
+     * falls back to ANY row for the fingerprint so cross-playlist hits
+     * are still surfaced as "Already cached" even when the local playlist
+     * has no row of its own.
+     */
+    public function describeExisting(Channel|Episode $item): ?CachedContentFile
+    {
+        $fingerprint = $item->cacheFingerprint();
+        $playlistId = $item->playlist_id;
+
+        $hit = CachedContentFile::query()
+            ->where('content_fingerprint', $fingerprint)
+            ->when($playlistId !== null, fn ($q) => $q->where('playlist_id', $playlistId))
+            ->first();
+
+        if ($hit) {
+            return $hit;
+        }
+
+        return CachedContentFile::query()
+            ->where('content_fingerprint', $fingerprint)
+            ->first();
+    }
+
+    /**
+     * Build the Filament notification for a "Cache Now" dispatch result.
+     *
+     * Centralizes the result-to-notification mapping for both the VOD
+     * (Channel) and Episode Cache Now action handlers so the wording,
+     * severity, and key copies stay in lockstep. The body text is keyed
+     * off whether `$item` is a Channel or an Episode; callers must pass
+     * the same item they passed to `dispatchCacheNowFor*()`.
+     *
+     * Severity choices:
+     *  - New dispatch queued (success): success toast
+     *  - Already cached / already queued (no-op): info toast
+     *  - Failure (no URL, kill switch, no row found): danger toast
+     *
+     * @param  array{queued: bool, already?: 'cached'|'queued', error?: string}  $result
+     */
+    public static function cacheNowNotification(Channel|Episode $item, array $result): Notification
+    {
+        if ($result['queued']) {
+            $already = $result['already'] ?? null;
+
+            if ($already === 'cached') {
+                return Notification::make()
+                    ->info()
+                    ->title(__('Already cached'))
+                    ->body($item instanceof Episode
+                        ? __('This episode already has a completed cached file.')
+                        : __('This VOD already has a completed cached file.'));
+            }
+
+            if ($already === 'queued') {
+                return Notification::make()
+                    ->info()
+                    ->title(__('Already queued for caching'))
+                    ->body($item instanceof Episode
+                        ? __('A pending or downloading cached file already exists for this episode.')
+                        : __('A pending or downloading cached file already exists for this VOD.'));
+            }
+
+            return Notification::make()
+                ->success()
+                ->title(__('Cache download queued'))
+                ->body(__('Track progress on the Cached Downloads page.'));
+        }
+
+        return Notification::make()
+            ->danger()
+            ->title(__('Could not queue cache'))
+            ->body($result['error'] ?? __('Unknown error.'));
     }
 
     /**

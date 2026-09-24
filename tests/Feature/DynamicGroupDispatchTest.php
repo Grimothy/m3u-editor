@@ -9,6 +9,7 @@ use App\Models\Playlist;
 use App\Models\Series;
 use App\Models\User;
 use App\Services\CachedContentDispatchService;
+use App\Settings\GeneralSettings;
 use Illuminate\Foundation\Testing\RefreshDatabase;
 use Illuminate\Support\Facades\Auth;
 use Illuminate\Support\Facades\Bus;
@@ -16,12 +17,20 @@ use Illuminate\Support\Facades\DB;
 
 uses(RefreshDatabase::class);
 
+function setEnableCacheForGroupDispatchTest(bool $value): void
+{
+    $mock = Mockery::mock(GeneralSettings::class);
+    $mock->enable_cache = $value;
+    app()->instance(GeneralSettings::class, $mock);
+}
+
 // Playlist::factory fires SyncPipelineService -> dispatch(ProcessM3uImport)
 // via a listener; Bus::fake() catches it. dispatchForGroup tests also need
 // Bus::fake to prevent the DownloadCachedContentFile jobs themselves from
 // running (they'd try to do HTTP downloads in tests).
 beforeEach(function () {
     Bus::fake();
+    setEnableCacheForGroupDispatchTest(true);
 });
 
 // --- dispatchForGroup for VOD-type groups: dispatches one job per channel ---

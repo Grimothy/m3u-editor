@@ -6,6 +6,7 @@ use App\Models\Channel;
 use App\Models\Episode;
 use App\Models\Playlist;
 use App\Services\CachedContentDispatchService;
+use App\Settings\GeneralSettings;
 use Illuminate\Console\Command;
 use Illuminate\Support\Facades\Log;
 
@@ -41,6 +42,17 @@ class CacheContentCommand extends Command
     {
         $isDryRun = (bool) $this->option('dry-run');
         $playlistId = $this->option('playlist');
+
+        // Kill switch: respect the global `enable_cache` setting so the
+        // hourly scheduled `--dry-run` is harmless when the operator has
+        // turned the feature off. An ad-hoc `cache:content --playlist=42`
+        // is also a no-op so a stale cron entry can't dispatch against a
+        // disabled feature.
+        if (! (bool) (app(GeneralSettings::class)->enable_cache ?? false)) {
+            $this->warn('Caching is disabled in Settings; nothing dispatched.');
+
+            return self::SUCCESS;
+        }
 
         $totalDispatched = 0;
         $totalSkipped = 0;

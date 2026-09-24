@@ -2,6 +2,7 @@
 
 namespace App\Filament\Resources\Series\RelationManagers;
 
+use App\Enums\CachedContentFileStatus;
 use App\Filament\Tables\ProbeStatusColumn;
 use App\Jobs\ProbeStreamsChunk;
 use App\Jobs\ProbeStreamsComplete;
@@ -180,23 +181,7 @@ class EpisodesRelationManager extends RelationManager
                     ->modalSubmitActionLabel(__('Cache now'))
                     ->action(function (Episode $record): void {
                         $result = self::dispatchCacheNowForEpisode($record);
-                        if ($result['queued']) {
-                            Notification::make()
-                                ->success()
-                                ->title($result['already'] ? __('Already cached or queued') : __('Cache download queued'))
-                                ->body($result['already']
-                                    ? __('A pending or completed cached file already exists for this episode.')
-                                    : __('Track progress on the Cached Downloads page.'))
-                                ->send();
-
-                            return;
-                        }
-
-                        Notification::make()
-                            ->danger()
-                            ->title(__('Could not queue cache'))
-                            ->body($result['error'] ?? __('Unknown error.'))
-                            ->send();
+                        CachedContentDispatchService::cacheNowNotification($record, $result)->send();
                     }),
                 Action::make('play')
                     ->tooltip(__('Play Episode'))
@@ -489,7 +474,7 @@ class EpisodesRelationManager extends RelationManager
     }
 
     /**
-     * @return array{queued: bool, already?: bool, error?: string}
+     * @return array{queued: bool, already?: 'cached'|'queued', error?: string}
      */
     public static function dispatchCacheNowForEpisode(Episode $record): array
     {
@@ -497,15 +482,22 @@ class EpisodesRelationManager extends RelationManager
             return ['queued' => false, 'error' => __('This episode has no resolvable source URL.')];
         }
 
-        if ($record->isCached()) {
-            return ['queued' => true, 'already' => true];
+        $service = app(CachedContentDispatchService::class);
+        $jobs = $service->dispatchForEpisode($record);
+
+        if ($jobs->isNotEmpty()) {
+            return ['queued' => true];
         }
 
-        $jobs = app(CachedContentDispatchService::class)->dispatchForEpisode($record);
+        $existing = $service->describeExisting($record);
+        if ($existing === null) {
+            return ['queued' => false, 'error' => __('Unknown error.')];
+        }
 
-        return [
-            'queued' => $jobs->isNotEmpty(),
-            'already' => $jobs->isEmpty(),
-        ];
+        if ($existing->status === CachedContentFileStatus::Completed) {
+            return ['queued' => true, 'already' => 'cached'];
+        }
+
+        return ['queued' => true, 'already' => 'queued'];
     }
 }

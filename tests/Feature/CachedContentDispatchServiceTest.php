@@ -10,6 +10,7 @@ use App\Models\Playlist;
 use App\Models\Series;
 use App\Models\User;
 use App\Services\CachedContentDispatchService;
+use App\Settings\GeneralSettings;
 use Illuminate\Foundation\Testing\RefreshDatabase;
 use Illuminate\Support\Facades\Auth;
 use Illuminate\Support\Facades\Bus;
@@ -18,12 +19,23 @@ use Illuminate\Support\Facades\DB;
 uses(RefreshDatabase::class);
 
 /**
+ * Bind a Mockery-mocked GeneralSettings with the requested `enable_cache` value.
+ */
+function setEnableCacheForDispatchTest(bool $value): void
+{
+    $mock = Mockery::mock(GeneralSettings::class);
+    $mock->enable_cache = $value;
+    app()->instance(GeneralSettings::class, $mock);
+}
+
+/**
  * Playlist::factory()->create() fires PlaylistListener -> SyncPipelineService
  * -> dispatch(ProcessM3uImport). Bus::fake() catches that; the dispatch
  * service tests never trigger the listener.
  */
 beforeEach(function () {
     Bus::fake();
+    setEnableCacheForDispatchTest(true);
 });
 
 // --- dispatchForChannel: ownership stamping ---
@@ -367,4 +379,241 @@ it('dispatchForGroup returns empty Collection when called on an empty DynamicGro
 
     expect($jobs)->toBeEmpty()
         ->and(CachedContentFile::count())->toBe(0);
+});
+
+// --- enable_cache kill switch: dispatch is a no-op when the toggle is off ---
+
+it('dispatchForChannel returns empty Collection without creating a row when enable_cache is off', function () {
+    // PR #1524 review item 5: no path may dispatch when the kill switch
+    // is off. Even with a valid playlist + URL, the dispatcher must
+    // short-circuit before any INSERT.
+    setEnableCacheForDispatchTest(false);
+
+    $user = User::factory()->create();
+    $playlist = Playlist::factory()->for($user)->create();
+    $channel = Channel::factory()->for($user)->for($playlist)->create([
+        'tmdb_id' => 7777,
+        'url' => 'https://example.com/kill-switch.mp4',
+    ]);
+
+    Auth::login($user);
+
+    $jobs = app(CachedContentDispatchService::class)->dispatchForChannel($channel);
+
+    expect($jobs)->toBeEmpty()
+        ->and(CachedContentFile::count())->toBe(0);
+    Bus::assertNotDispatched(DownloadCachedContentFile::class);
+});
+
+it('dispatchForEpisode returns empty Collection without creating a row when enable_cache is off', function () {
+    setEnableCacheForDispatchTest(false);
+
+    $user = User::factory()->create();
+    $playlist = Playlist::factory()->for($user)->create();
+    $series = Series::factory()->for($user)->for($playlist)->create(['tmdb_id' => 8888]);
+    $episode = Episode::factory()->for($user)->for($playlist)->for($series, 'series')->create([
+        'season' => 1,
+        'episode_num' => 1,
+        'url' => 'https://example.com/kill-switch-ep.mp4',
+    ]);
+
+    Auth::login($user);
+
+    $jobs = app(CachedContentDispatchService::class)->dispatchForEpisode($episode);
+
+    expect($jobs)->toBeEmpty()
+        ->and(CachedContentFile::count())->toBe(0);
+    Bus::assertNotDispatched(DownloadCachedContentFile::class);
+});
+
+it('dispatchForGroup short-circuits before iterating when enable_cache is off', function () {
+    // PR #1524 review item 5: dispatchForGroup must short-circuit BEFORE
+    // iterating channels/episodes so it never even hits the membership
+    // load. The empty Collection result + zero pivot rows verify the
+    // dispatch path was never entered.
+    setEnableCacheForDispatchTest(false);
+
+    $user = User::factory()->create();
+    $playlist = Playlist::factory()->for($user)->create();
+    $group = DynamicGroup::factory()->for($playlist)->for($user)->create(['type' => 'vod']);
+
+    $channel = Channel::factory()->for($user)->for($playlist)->create([
+        'tmdb_id' => 9999,
+        'url' => 'https://example.com/group-kill-switch.mp4',
+    ]);
+    $channel->dynamicGroups()->attach($group->id);
+
+    Auth::login($user);
+
+    $jobs = app(CachedContentDispatchService::class)->dispatchForGroup($group);
+
+    expect($jobs)->toBeEmpty()
+        ->and(CachedContentFile::count())->toBe(0)
+        ->and(DB::table('cached_content_file_dynamic_groups')->count())->toBe(0);
+    Bus::assertNotDispatched(DownloadCachedContentFile::class);
+});
+
+// --- describeExisting: lookup helper for the "Cache Now" UI disambiguation ---
+
+it('describeExisting returns the matching Pending row when one exists for the item playlist', function () {
+    $user = User::factory()->create();
+    $playlist = Playlist::factory()->for($user)->create();
+    $channel = Channel::factory()->for($user)->for($playlist)->create([
+        'tmdb_id' => 1010,
+        'url' => 'https://example.com/describe.mp4',
+    ]);
+
+    $existing = CachedContentFile::factory()->create([
+        'content_type' => 'movie',
+        'tmdb_id' => '1010',
+        'status' => CachedContentFileStatus::Pending,
+        'playlist_id' => $playlist->id,
+        'user_id' => $user->id,
+    ]);
+
+    $hit = app(CachedContentDispatchService::class)->describeExisting($channel);
+
+    expect($hit)->not->toBeNull()
+        ->and($hit->id)->toBe($existing->id)
+        ->and($hit->status)->toBe(CachedContentFileStatus::Pending);
+});
+
+it('describeExisting falls back to a fingerprint-only match when no row exists for the item playlist', function () {
+    // Cross-playlist sharing rule: even if the source playlist has no
+    // row for the fingerprint, a row stamped to another playlist with
+    // the same fingerprint is still surfaced so the UI can say "Already
+    // cached" rather than the red failure notification.
+    $ownerA = User::factory()->create();
+    $ownerB = User::factory()->create();
+    $playlistA = Playlist::factory()->for($ownerA)->create();
+    $playlistB = Playlist::factory()->for($ownerB)->create();
+    $channel = Channel::factory()->for($ownerB)->for($playlistB)->create([
+        'tmdb_id' => 2020,
+        'url' => 'https://example.com/describe-cross.mp4',
+    ]);
+
+    $existing = CachedContentFile::factory()->completed()->create([
+        'content_type' => 'movie',
+        'tmdb_id' => '2020',
+        'playlist_id' => $playlistA->id,
+        'user_id' => $ownerA->id,
+    ]);
+
+    $hit = app(CachedContentDispatchService::class)->describeExisting($channel);
+
+    expect($hit)->not->toBeNull()
+        ->and($hit->id)->toBe($existing->id);
+});
+
+it('describeExisting returns null when no row matches the fingerprint at all', function () {
+    $user = User::factory()->create();
+    $playlist = Playlist::factory()->for($user)->create();
+    $channel = Channel::factory()->for($user)->for($playlist)->create([
+        'tmdb_id' => 3030,
+        'url' => 'https://example.com/describe-none.mp4',
+    ]);
+
+    expect(app(CachedContentDispatchService::class)->describeExisting($channel))->toBeNull();
+});
+
+// --- cacheNowNotification: shared result->notification mapping ---
+
+it('cacheNowNotification returns an info "Already cached" notification when result.already is "cached"', function () {
+    // Review item 3: a single shared helper covers both VOD + episode
+    // action handlers. Severity must be info (not success) for the no-op
+    // cases so users don't think a fresh download was queued.
+    $user = User::factory()->create();
+    $playlist = Playlist::factory()->for($user)->create();
+    $channel = Channel::factory()->for($user)->for($playlist)->create([
+        'tmdb_id' => 4040,
+        'url' => 'https://example.com/cached.mp4',
+    ]);
+
+    $notification = CachedContentDispatchService::cacheNowNotification($channel, [
+        'queued' => true,
+        'already' => 'cached',
+    ]);
+
+    expect($notification->getTitle())->toBe('Already cached')
+        ->and($notification->getBody())->toBe('This VOD already has a completed cached file.')
+        ->and($notification->getStatus())->toBe('info');
+});
+
+it('cacheNowNotification returns an info "Already queued for caching" notification when result.already is "queued"', function () {
+    $user = User::factory()->create();
+    $playlist = Playlist::factory()->for($user)->create();
+    $channel = Channel::factory()->for($user)->for($playlist)->create([
+        'tmdb_id' => 4041,
+        'url' => 'https://example.com/queued.mp4',
+    ]);
+
+    $notification = CachedContentDispatchService::cacheNowNotification($channel, [
+        'queued' => true,
+        'already' => 'queued',
+    ]);
+
+    expect($notification->getTitle())->toBe('Already queued for caching')
+        ->and($notification->getBody())->toBe('A pending or downloading cached file already exists for this VOD.')
+        ->and($notification->getStatus())->toBe('info');
+});
+
+it('cacheNowNotification returns a success "Cache download queued" notification for a fresh dispatch', function () {
+    // Only the new-dispatch path keeps the success severity.
+    $user = User::factory()->create();
+    $playlist = Playlist::factory()->for($user)->create();
+    $channel = Channel::factory()->for($user)->for($playlist)->create([
+        'tmdb_id' => 4042,
+        'url' => 'https://example.com/fresh.mp4',
+    ]);
+
+    $notification = CachedContentDispatchService::cacheNowNotification($channel, ['queued' => true]);
+
+    expect($notification->getTitle())->toBe('Cache download queued')
+        ->and($notification->getBody())->toBe('Track progress on the Cached Downloads page.')
+        ->and($notification->getStatus())->toBe('success');
+});
+
+it('cacheNowNotification returns a danger notification for a failed dispatch', function () {
+    $user = User::factory()->create();
+    $playlist = Playlist::factory()->for($user)->create();
+    $channel = Channel::factory()->for($user)->for($playlist)->create([
+        'tmdb_id' => 4043,
+        'url' => 'https://example.com/fail.mp4',
+    ]);
+
+    $notification = CachedContentDispatchService::cacheNowNotification($channel, [
+        'queued' => false,
+        'error' => 'Caching is disabled in Settings.',
+    ]);
+
+    expect($notification->getTitle())->toBe('Could not queue cache')
+        ->and($notification->getBody())->toBe('Caching is disabled in Settings.')
+        ->and($notification->getStatus())->toBe('danger');
+});
+
+it('cacheNowNotification uses the episode-specific body copy for Episodes', function () {
+    // The helper must key its copy off the item type so VOD and episode
+    // rows get the right "This episode..." / "This VOD..." wording.
+    $user = User::factory()->create();
+    $playlist = Playlist::factory()->for($user)->create();
+    $series = Series::factory()->for($user)->for($playlist)->create(['tmdb_id' => 5050]);
+    $episode = Episode::factory()->for($user)->for($playlist)->for($series, 'series')->create([
+        'season' => 1,
+        'episode_num' => 1,
+        'url' => 'https://example.com/ep.mp4',
+    ]);
+
+    $cached = CachedContentDispatchService::cacheNowNotification($episode, [
+        'queued' => true,
+        'already' => 'cached',
+    ]);
+    $queued = CachedContentDispatchService::cacheNowNotification($episode, [
+        'queued' => true,
+        'already' => 'queued',
+    ]);
+
+    expect($cached->getTitle())->toBe('Already cached')
+        ->and($cached->getBody())->toBe('This episode already has a completed cached file.')
+        ->and($queued->getTitle())->toBe('Already queued for caching')
+        ->and($queued->getBody())->toBe('A pending or downloading cached file already exists for this episode.');
 });
