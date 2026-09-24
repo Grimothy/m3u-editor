@@ -498,7 +498,8 @@ class DownloadCachedContentFile implements ShouldQueue
 
                 $written = fwrite($out, $chunk);
                 if ($written === false || $written !== strlen($chunk)) {
-                    throw new \RuntimeException("Temp file write failed at {$downloaded} bytes (returned ".var_export($written, true).').');
+                    $writtenLabel = $written === false ? 'false' : (string) $written;
+                    throw new \RuntimeException("Temp file write failed at {$downloaded} bytes (returned {$writtenLabel}).");
                 }
                 $downloaded += $written;
 
