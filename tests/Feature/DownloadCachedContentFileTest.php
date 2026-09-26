@@ -1,6 +1,7 @@
 <?php
 
 use App\Enums\CachedContentFileStatus;
+use App\Enums\CacheDispatchResult;
 use App\Jobs\DownloadCachedContentFile;
 use App\Models\CachedContentFile;
 use App\Models\Channel;
@@ -12,6 +13,7 @@ use App\Services\CachedContentDispatchService;
 use App\Settings\GeneralSettings;
 use Illuminate\Foundation\Testing\RefreshDatabase;
 use Illuminate\Http\Client\RequestException;
+use Illuminate\Queue\Middleware\WithoutOverlapping;
 use Illuminate\Support\Facades\Bus;
 use Illuminate\Support\Facades\Cache;
 use Illuminate\Support\Facades\Http;
@@ -61,7 +63,7 @@ it('happy path: Channel with a real URL lands the file on disk and the row is Co
         'https://example.com/movie.mp4' => Http::response('binary file bytes', 200),
     ]);
 
-    $row = CachedContentFile::factory()->create([
+    $row = CachedContentFile::factory()->forItem($channel)->create([
         'content_type' => 'movie',
         'tmdb_id' => '550',
         'playlist_id' => $playlist->id,
@@ -72,7 +74,7 @@ it('happy path: Channel with a real URL lands the file on disk and the row is Co
     // Run the job synchronously (no queue). RefreshDatabase has wrapped
     // each test in a transaction, but the job's Storage::disk('cache')
     // call goes through Laravel's Storage fake, which is in-memory.
-    (new DownloadCachedContentFile($channel, $row->id))->handle();
+    (new DownloadCachedContentFile($row->id))->handle();
 
     $fresh = $row->fresh();
     expect($fresh->status)->toBe(CachedContentFileStatus::Completed)
@@ -102,7 +104,7 @@ it('happy path: Episode with a real URL lands the file on disk and the row is Co
         'https://example.com/episode.mp4' => Http::response('binary file bytes', 200),
     ]);
 
-    $row = CachedContentFile::factory()->create([
+    $row = CachedContentFile::factory()->forItem($episode)->create([
         'content_type' => 'episode',
         'tmdb_id' => '60625',
         'tvdb_id' => '888',
@@ -113,7 +115,7 @@ it('happy path: Episode with a real URL lands the file on disk and the row is Co
         'status' => CachedContentFileStatus::Pending,
     ]);
 
-    (new DownloadCachedContentFile($episode, $row->id))->handle();
+    (new DownloadCachedContentFile($row->id))->handle();
 
     $fresh = $row->fresh();
     expect($fresh->status)->toBe(CachedContentFileStatus::Completed)
@@ -137,7 +139,7 @@ it('failure path: HTTP error -> row is Failed and failure_count increments', fun
         'url' => 'https://example.com/broken.mp4',
     ]);
 
-    $row = CachedContentFile::factory()->create([
+    $row = CachedContentFile::factory()->forItem($channel)->create([
         'content_type' => 'movie',
         'tmdb_id' => '551',
         'playlist_id' => $playlist->id,
@@ -147,7 +149,7 @@ it('failure path: HTTP error -> row is Failed and failure_count increments', fun
     ]);
 
     try {
-        (new DownloadCachedContentFile($channel, $row->id))->handle();
+        (new DownloadCachedContentFile($row->id))->handle();
     } catch (RequestException) {
         // Expected - the job re-throws so Horizon marks it failed. PR B's
         // minimal job lets the exception bubble (PR C adds
@@ -174,7 +176,7 @@ it('failure path: empty URL -> row is Failed without throwing', function () {
         'url' => null, // empty source URL
     ]);
 
-    $row = CachedContentFile::factory()->create([
+    $row = CachedContentFile::factory()->forItem($channel)->create([
         'content_type' => 'movie',
         'tmdb_id' => '552',
         'playlist_id' => $playlist->id,
@@ -183,7 +185,7 @@ it('failure path: empty URL -> row is Failed without throwing', function () {
     ]);
 
     // Should NOT throw - the empty-URL path is an early-return.
-    (new DownloadCachedContentFile($channel, $row->id))->handle();
+    (new DownloadCachedContentFile($row->id))->handle();
 
     $fresh = $row->fresh();
     expect($fresh->status)->toBe(CachedContentFileStatus::Failed)
@@ -205,7 +207,7 @@ it('failure path: missing cached_content_files row -> job logs and returns clean
     ]);
 
     // Pass a non-existent row ID.
-    (new DownloadCachedContentFile($channel, 999999))->handle();
+    (new DownloadCachedContentFile(999999))->handle();
 
     expect(CachedContentFile::count())->toBe(0);
 });
@@ -235,7 +237,7 @@ it('regression: HTTP error -> last_error_message is persisted on the row', funct
         'url' => 'https://example.com/broken.mp4',
     ]);
 
-    $row = CachedContentFile::factory()->create([
+    $row = CachedContentFile::factory()->forItem($channel)->create([
         'content_type' => 'movie',
         'tmdb_id' => '554',
         'playlist_id' => $playlist->id,
@@ -245,7 +247,7 @@ it('regression: HTTP error -> last_error_message is persisted on the row', funct
     ]);
 
     try {
-        (new DownloadCachedContentFile($channel, $row->id))->handle();
+        (new DownloadCachedContentFile($row->id))->handle();
     } catch (RequestException) {
         // Expected - the job re-throws so Horizon applies backoff.
     }
@@ -283,7 +285,7 @@ it('upgrade: byte-level progress reporting writes bytes_downloaded and bytes_per
         'url' => 'https://example.com/big.mp4',
     ]);
 
-    $row = CachedContentFile::factory()->create([
+    $row = CachedContentFile::factory()->forItem($channel)->create([
         'content_type' => 'movie',
         'tmdb_id' => '555',
         'playlist_id' => $playlist->id,
@@ -291,7 +293,7 @@ it('upgrade: byte-level progress reporting writes bytes_downloaded and bytes_per
         'status' => CachedContentFileStatus::Pending,
     ]);
 
-    (new DownloadCachedContentFile($channel, $row->id))->handle();
+    (new DownloadCachedContentFile($row->id))->handle();
 
     $fresh = $row->fresh();
     expect($fresh->status)->toBe(CachedContentFileStatus::Completed)
@@ -315,7 +317,7 @@ it('upgrade: final progress reporting writes small downloads before completion',
         'tmdb_id' => 556,
         'url' => 'https://example.com/small.mp4',
     ]);
-    $row = CachedContentFile::factory()->create([
+    $row = CachedContentFile::factory()->forItem($channel)->create([
         'content_type' => 'movie',
         'tmdb_id' => '556',
         'playlist_id' => $playlist->id,
@@ -323,7 +325,7 @@ it('upgrade: final progress reporting writes small downloads before completion',
         'status' => CachedContentFileStatus::Pending,
     ]);
 
-    (new DownloadCachedContentFile($channel, $row->id))->handle();
+    (new DownloadCachedContentFile($row->id))->handle();
 
     expect($row->fresh()->bytes_downloaded)->toBe(strlen($body));
 });
@@ -345,7 +347,7 @@ it('upgrade: cancellation key observed during a live download flips the row to F
         'url' => 'https://example.com/cancel-me.mp4',
     ]);
 
-    $row = CachedContentFile::factory()->create([
+    $row = CachedContentFile::factory()->forItem($channel)->create([
         'content_type' => 'movie',
         'tmdb_id' => '556',
         'playlist_id' => $playlist->id,
@@ -358,7 +360,7 @@ it('upgrade: cancellation key observed during a live download flips the row to F
     // where the row stays alive when the worker picks it up.
     Cache::put(CachedContentFile::cancellationCacheKey($row->id), true, 60);
 
-    (new DownloadCachedContentFile($channel, $row->id))->handle();
+    (new DownloadCachedContentFile($row->id))->handle();
 
     $fresh = $row->fresh();
     // PR #1524 review item 2: a live row that observes the cancel flag
@@ -401,13 +403,14 @@ it('regression (item 7): cancelling a Pending row does not leave a fingerprint-s
     $playlist = Playlist::factory()->for($user)->create();
     $channel = Channel::factory()->for($user)->for($playlist)->create([
         'tmdb_id' => 560,
+        'is_vod' => true,
         'url' => 'https://example.com/redispatch.mp4',
     ]);
 
     // 1) Original Pending row, then cancel via the widget helper. The
     // widget sets the row-id key + deletes the row; that is the
     // realistic input shape.
-    $row1 = CachedContentFile::factory()->create([
+    $row1 = CachedContentFile::factory()->forItem($channel)->create([
         'content_type' => 'movie',
         'tmdb_id' => '560',
         'playlist_id' => $playlist->id,
@@ -428,13 +431,12 @@ it('regression (item 7): cancelling a Pending row does not leave a fingerprint-s
     // 3) Dispatch the same content again and run the new job. The new
     // row reaches Completed - the only thing that would suppress it is a
     // stale fingerprint-scoped flag, which no longer exists.
-    $service = app(CachedContentDispatchService::class);
-    $jobs = $service->dispatchForChannel($channel);
+    $result = app(CachedContentDispatchService::class)->dispatch($channel);
 
-    expect($jobs)->toHaveCount(1);
-    $row2Id = $jobs->first()->cachedContentFileId;
+    expect($result)->toBe(CacheDispatchResult::Queued);
+    $row2Id = $channel->cachedContentFile()->value('id');
 
-    (new DownloadCachedContentFile($channel, $row2Id))->handle();
+    (new DownloadCachedContentFile($row2Id))->handle();
 
     $row2 = CachedContentFile::find($row2Id);
     expect($row2)->not->toBeNull()
@@ -468,7 +470,7 @@ it('regression (item 2): markCancelled does not recreate a deleted row', functio
         'url' => 'https://example.com/deleted-row.mp4',
     ]);
 
-    $row = CachedContentFile::factory()->create([
+    $row = CachedContentFile::factory()->forItem($channel)->create([
         'content_type' => 'movie',
         'tmdb_id' => '561',
         'playlist_id' => $playlist->id,
@@ -488,7 +490,7 @@ it('regression (item 2): markCancelled does not recreate a deleted row', functio
     // row - this is the race the fix is hardening against. We run the
     // job normally; the worker's `find()` returns null and exits before
     // markCancelled() is reached, which is the safe path.
-    (new DownloadCachedContentFile($channel, $rowId))->handle();
+    (new DownloadCachedContentFile($rowId))->handle();
 
     // The row stays deleted - no resurrection.
     expect(CachedContentFile::find($rowId))->toBeNull();
@@ -517,7 +519,7 @@ it('regression (item 2): markCancelled on a LIVE row flips it to Failed with Can
         'url' => 'https://example.com/before-start-cancel.mp4',
     ]);
 
-    $row = CachedContentFile::factory()->create([
+    $row = CachedContentFile::factory()->forItem($channel)->create([
         'content_type' => 'movie',
         'tmdb_id' => '562',
         'playlist_id' => $playlist->id,
@@ -532,7 +534,7 @@ it('regression (item 2): markCancelled on a LIVE row flips it to Failed with Can
     // fail the test if the GET fired.
     Cache::put(CachedContentFile::cancellationCacheKey($row->id), true, 60);
 
-    (new DownloadCachedContentFile($channel, $row->id))->handle();
+    (new DownloadCachedContentFile($row->id))->handle();
 
     $fresh = $row->fresh();
     expect($fresh)->not->toBeNull()
@@ -565,7 +567,7 @@ it('upgrade: Failed -> Downloading atomic reclaim transitions through Downloadin
         'url' => 'https://example.com/retry.mp4',
     ]);
 
-    $row = CachedContentFile::factory()->create([
+    $row = CachedContentFile::factory()->forItem($channel)->create([
         'content_type' => 'movie',
         'tmdb_id' => '558',
         'playlist_id' => $playlist->id,
@@ -576,7 +578,7 @@ it('upgrade: Failed -> Downloading atomic reclaim transitions through Downloadin
         'last_error_message' => 'Previous attempt died.',
     ]);
 
-    (new DownloadCachedContentFile($channel, $row->id))->handle();
+    (new DownloadCachedContentFile($row->id))->handle();
 
     $fresh = $row->fresh();
     expect($fresh->status)->toBe(CachedContentFileStatus::Completed)
@@ -602,7 +604,7 @@ it('upgrade: row already Downloading (another worker claimed it) returns early w
 
     // Row already in Downloading state - simulate another worker having
     // claimed it first.
-    $row = CachedContentFile::factory()->create([
+    $row = CachedContentFile::factory()->forItem($channel)->create([
         'content_type' => 'movie',
         'tmdb_id' => '559',
         'playlist_id' => $playlist->id,
@@ -611,23 +613,25 @@ it('upgrade: row already Downloading (another worker claimed it) returns early w
         'bytes_downloaded' => 524288,
     ]);
 
-    (new DownloadCachedContentFile($channel, $row->id))->handle();
+    (new DownloadCachedContentFile($row->id))->handle();
 
     // Status unchanged - the second worker returned early.
     expect($row->fresh()->status)->toBe(CachedContentFileStatus::Downloading);
 });
 
-it('upgrade: tries=3 and backoff()=[10,60,300] are configured for transient retry', function () {
-    // We don't simulate a true retry in this test (that would require
-    // queue worker integration); we verify the configuration is what the
-    // framework will use when a transient failure occurs.
-    $job = new DownloadCachedContentFile(
-        Channel::factory()->make(['url' => 'https://example.com/x.mp4']),
-        999999,
-    );
+it('retries up to 3 exceptions with backoff and serializes downloads per playlist', function () {
+    $row = CachedContentFile::factory()->create();
+    $job = new DownloadCachedContentFile($row->id);
 
-    expect($job->tries)->toBe(3)
-        ->and($job->backoff())->toBe([10, 60, 300]);
+    $middleware = $job->middleware();
+
+    expect($job->maxExceptions)->toBe(3)
+        ->and($job->backoff())->toBe([10, 60, 300])
+        ->and($job->retryUntil()->isFuture())->toBeTrue()
+        ->and($job->queue)->toBe('cache')
+        ->and($middleware)->toHaveCount(1)
+        ->and($middleware[0])->toBeInstanceOf(WithoutOverlapping::class)
+        ->and($middleware[0]->key)->toBe('cached-content-download:playlist:'.$row->playlist_id);
 });
 
 // --- enable_cache kill switch: jobs queued before the toggle flipped off ---
@@ -650,7 +654,7 @@ it('handle marks the row Failed with "Caching disabled" when enable_cache is off
         'url' => 'https://example.com/kill-switch.mp4',
     ]);
 
-    $row = CachedContentFile::factory()->create([
+    $row = CachedContentFile::factory()->forItem($channel)->create([
         'content_type' => 'movie',
         'tmdb_id' => '560',
         'playlist_id' => $playlist->id,
@@ -661,13 +665,13 @@ it('handle marks the row Failed with "Caching disabled" when enable_cache is off
 
     // No exception bubbles - Horizon should not retry a disabled-by-toggle
     // failure.
-    (new DownloadCachedContentFile($channel, $row->id))->handle();
+    (new DownloadCachedContentFile($row->id))->handle();
 
     $fresh = $row->fresh();
     expect($fresh->status)->toBe(CachedContentFileStatus::Failed)
         ->and($fresh->failure_count)->toBe(1)
         ->and($fresh->last_failed_at)->not->toBeNull()
-        ->and($fresh->last_error_message)->toBe('Caching disabled');
+        ->and($fresh->last_error_message)->toBe('Caching is disabled.');
 });
 
 it('handle returns cleanly without touching the row when enable_cache is off AND the row is missing', function () {
@@ -685,7 +689,7 @@ it('handle returns cleanly without touching the row when enable_cache is off AND
     ]);
 
     expect(CachedContentFile::count())->toBe(0);
-    (new DownloadCachedContentFile($channel, 999999))->handle();
+    (new DownloadCachedContentFile(999999))->handle();
     expect(CachedContentFile::count())->toBe(0);
 });
 
@@ -725,7 +729,7 @@ it('redirect walk: public -> public -> 200 completes and lands the file on disk'
         'url' => 'http://198.51.100.1/origin.mp4',
     ]);
 
-    $row = CachedContentFile::factory()->create([
+    $row = CachedContentFile::factory()->forItem($channel)->create([
         'content_type' => 'movie',
         'tmdb_id' => '570',
         'playlist_id' => $playlist->id,
@@ -733,7 +737,7 @@ it('redirect walk: public -> public -> 200 completes and lands the file on disk'
         'status' => CachedContentFileStatus::Pending,
     ]);
 
-    (new DownloadCachedContentFile($channel, $row->id))->handle();
+    (new DownloadCachedContentFile($row->id))->handle();
 
     $fresh = $row->fresh();
     expect($fresh->status)->toBe(CachedContentFileStatus::Completed)
@@ -766,7 +770,7 @@ it('redirect walk: public -> http://127.0.0.1/... is rejected and no private req
         'url' => 'http://198.51.100.1/payload.mp4',
     ]);
 
-    $row = CachedContentFile::factory()->create([
+    $row = CachedContentFile::factory()->forItem($channel)->create([
         'content_type' => 'movie',
         'tmdb_id' => '571',
         'playlist_id' => $playlist->id,
@@ -775,7 +779,7 @@ it('redirect walk: public -> http://127.0.0.1/... is rejected and no private req
         'failure_count' => 0,
     ]);
 
-    (new DownloadCachedContentFile($channel, $row->id))->handle();
+    (new DownloadCachedContentFile($row->id))->handle();
 
     $fresh = $row->fresh();
     // The job's catch(InvalidArgumentException) marks Failed with the
@@ -785,7 +789,7 @@ it('redirect walk: public -> http://127.0.0.1/... is rejected and no private req
         ->and($fresh->failure_count)->toBe(1)
         ->and($fresh->last_failed_at)->not->toBeNull()
         ->and($fresh->last_error_message)->not->toBeNull()
-        ->and($fresh->last_error_message)->toContain('Redirect rejected (SSRF guard)')
+        ->and($fresh->last_error_message)->toContain('Redirect rejected (private network guard)')
         ->and($fresh->last_error_message)->toContain('127.0.0.1')
         // No file_path - the abort happened before any bytes were written.
         ->and($fresh->file_path)->toBeNull();
@@ -820,7 +824,7 @@ it('redirect walk: relative Location header resolves against the current URL', f
         'url' => 'http://198.51.100.1/origin',
     ]);
 
-    $row = CachedContentFile::factory()->create([
+    $row = CachedContentFile::factory()->forItem($channel)->create([
         'content_type' => 'movie',
         'tmdb_id' => '572',
         'playlist_id' => $playlist->id,
@@ -828,7 +832,7 @@ it('redirect walk: relative Location header resolves against the current URL', f
         'status' => CachedContentFileStatus::Pending,
     ]);
 
-    (new DownloadCachedContentFile($channel, $row->id))->handle();
+    (new DownloadCachedContentFile($row->id))->handle();
 
     $fresh = $row->fresh();
     expect($fresh->status)->toBe(CachedContentFileStatus::Completed)
@@ -867,7 +871,7 @@ it('redirect walk: more than $maxRedirects hops ends the row Failed with the red
         'url' => 'http://198.51.100.1/start',
     ]);
 
-    $row = CachedContentFile::factory()->create([
+    $row = CachedContentFile::factory()->forItem($channel)->create([
         'content_type' => 'movie',
         'tmdb_id' => '573',
         'playlist_id' => $playlist->id,
@@ -877,7 +881,7 @@ it('redirect walk: more than $maxRedirects hops ends the row Failed with the red
     ]);
 
     try {
-        (new DownloadCachedContentFile($channel, $row->id))->handle();
+        (new DownloadCachedContentFile($row->id))->handle();
     } catch (RuntimeException) {
         // Expected - handle() marks Failed via markFailed() and then
         // re-throws so Horizon applies backoff (matching the existing
@@ -912,7 +916,7 @@ it('redirect walk: redirect to a non-http scheme (file:///etc/passwd) is rejecte
         'url' => 'http://198.51.100.1/payload.mp4',
     ]);
 
-    $row = CachedContentFile::factory()->create([
+    $row = CachedContentFile::factory()->forItem($channel)->create([
         'content_type' => 'movie',
         'tmdb_id' => '574',
         'playlist_id' => $playlist->id,
@@ -921,15 +925,138 @@ it('redirect walk: redirect to a non-http scheme (file:///etc/passwd) is rejecte
         'failure_count' => 0,
     ]);
 
-    (new DownloadCachedContentFile($channel, $row->id))->handle();
+    (new DownloadCachedContentFile($row->id))->handle();
 
     $fresh = $row->fresh();
     expect($fresh->status)->toBe(CachedContentFileStatus::Failed)
         ->and($fresh->failure_count)->toBe(1)
-        ->and($fresh->last_error_message)->toContain('Redirect rejected (SSRF guard)')
+        ->and($fresh->last_error_message)->toContain('Redirect rejected (private network guard)')
         ->and($fresh->file_path)->toBeNull();
 
     // Pin the scheme rejection in the surfaced error - operators reading
     // the activity widget should be able to tell WHY this was rejected.
     expect($fresh->last_error_message)->toContain('file');
+});
+
+// ---------------------------------------------------------------------------
+// Source URL, storage path, provider limits, and crash recovery
+// ---------------------------------------------------------------------------
+
+/**
+ * A Pending row for a fresh VOD channel with the given attributes.
+ *
+ * @param  array<string, mixed>  $channelAttributes
+ * @param  array<string, mixed>  $playlistAttributes
+ */
+function pendingDownloadRow(array $channelAttributes = [], array $playlistAttributes = []): CachedContentFile
+{
+    $playlist = Playlist::factory()->create($playlistAttributes);
+    $channel = Channel::factory()->create(array_merge([
+        'user_id' => $playlist->user_id,
+        'playlist_id' => $playlist->id,
+        'is_vod' => true,
+        'tmdb_id' => 777,
+        'url' => 'https://example.com/source.mkv',
+    ], $channelAttributes));
+
+    return CachedContentFile::factory()->forItem($channel)->create();
+}
+
+it('downloads url_custom instead of url and sends the playlist User-Agent', function () {
+    Storage::fake('cache');
+    Http::fake(['https://example.net/*' => Http::response('bytes', 200)]);
+
+    $row = pendingDownloadRow(
+        ['url_custom' => 'https://example.net/override.mkv'],
+        ['user_agent' => 'MyPlayer/1.0'],
+    );
+
+    (new DownloadCachedContentFile($row->id))->handle();
+
+    Http::assertSent(fn ($request) => $request->url() === 'https://example.net/override.mkv'
+        && $request->header('User-Agent')[0] === 'MyPlayer/1.0');
+    expect($row->fresh()->status)->toBe(CachedContentFileStatus::Completed);
+});
+
+it('writes each row to its own uuid path and leaves no partial file behind', function () {
+    Storage::fake('cache');
+    Http::fake(['https://example.com/*' => Http::response('bytes', 200)]);
+
+    $row = pendingDownloadRow();
+
+    (new DownloadCachedContentFile($row->id))->handle();
+
+    $fresh = $row->fresh();
+    expect($fresh->file_path)->toBe("{$row->playlist_id}/{$row->uuid}.mkv");
+    Storage::disk('cache')->assertExists($fresh->file_path);
+    Storage::disk('cache')->assertMissing($fresh->file_path.'.part');
+});
+
+it('fails the row when the provider answers with an HLS manifest', function () {
+    Storage::fake('cache');
+    Http::fake(['https://example.com/*' => Http::response("#EXTM3U\n", 200, ['Content-Type' => 'application/vnd.apple.mpegurl'])]);
+
+    $row = pendingDownloadRow();
+
+    (new DownloadCachedContentFile($row->id))->handle();
+
+    $fresh = $row->fresh();
+    expect($fresh->status)->toBe(CachedContentFileStatus::Failed)
+        ->and($fresh->last_error_message)->toContain('HLS');
+});
+
+it('fails the row when its source channel no longer exists', function () {
+    Storage::fake('cache');
+    Http::preventStrayRequests();
+
+    $row = pendingDownloadRow();
+    Channel::whereKey($row->cacheable_id)->delete();
+
+    (new DownloadCachedContentFile($row->id))->handle();
+
+    expect($row->fresh()->status)->toBe(CachedContentFileStatus::Failed);
+});
+
+it('waits (releases the job) while the playlist is at its connection limit', function () {
+    Storage::fake('cache');
+    config(['proxy.m3u_proxy_host' => 'http://proxy.test', 'proxy.m3u_proxy_port' => null]);
+    Http::fake([
+        'http://proxy.test/streams/by-metadata*' => Http::response(['total_matching' => 1]),
+        'https://example.com/*' => Http::response('bytes', 200),
+    ]);
+
+    $row = pendingDownloadRow(playlistAttributes: ['available_streams' => 1]);
+    $job = (new DownloadCachedContentFile($row->id))->withFakeQueueInteractions();
+
+    $job->handle();
+
+    $job->assertReleased();
+    expect($row->fresh()->status)->toBe(CachedContentFileStatus::Pending);
+    Http::assertNotSent(fn ($request) => str_starts_with($request->url(), 'https://example.com/'));
+});
+
+it('reclaims a Downloading row whose worker went quiet', function () {
+    Storage::fake('cache');
+    Http::fake(['https://example.com/*' => Http::response('bytes', 200)]);
+
+    $row = pendingDownloadRow();
+    CachedContentFile::whereKey($row->id)->update([
+        'status' => CachedContentFileStatus::Downloading->value,
+        'updated_at' => now()->subSeconds(DownloadCachedContentFile::STALE_DOWNLOAD_SECONDS + 60),
+    ]);
+
+    (new DownloadCachedContentFile($row->id))->handle();
+
+    expect($row->fresh()->status)->toBe(CachedContentFileStatus::Completed);
+});
+
+it('failed() marks an in-flight row Failed so it is never stuck in Downloading', function () {
+    $row = pendingDownloadRow();
+    $row->update(['status' => CachedContentFileStatus::Downloading]);
+
+    (new DownloadCachedContentFile($row->id))->failed(new RuntimeException('Job timed out.'));
+
+    $fresh = $row->fresh();
+    expect($fresh->status)->toBe(CachedContentFileStatus::Failed)
+        ->and($fresh->last_error_message)->toBe('Job timed out.');
 });

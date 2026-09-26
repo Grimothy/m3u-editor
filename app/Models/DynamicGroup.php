@@ -6,7 +6,6 @@ use Illuminate\Database\Eloquent\Builder;
 use Illuminate\Database\Eloquent\Factories\HasFactory;
 use Illuminate\Database\Eloquent\Model;
 use Illuminate\Database\Eloquent\Relations\BelongsTo;
-use Illuminate\Database\Eloquent\Relations\BelongsToMany;
 use Illuminate\Database\Eloquent\Relations\MorphToMany;
 
 /**
@@ -63,18 +62,6 @@ class DynamicGroup extends Model
     }
 
     /**
-     * Enabled, already-materialized groups owned by $userId on a playlist they also own.
-     */
-    public function scopePublishableBy(Builder $query, int $userId): Builder
-    {
-        return $query
-            ->where('user_id', $userId)
-            ->where('enabled', true)
-            ->whereNotNull('last_synced_at')
-            ->whereHas('playlist', fn (Builder $playlistQuery) => $playlistQuery->where('user_id', $userId));
-    }
-
-    /**
      * VOD (Channel) members of this dynamic group.
      */
     public function channels(): MorphToMany
@@ -88,23 +75,6 @@ class DynamicGroup extends Model
     public function series(): MorphToMany
     {
         return $this->morphedByMany(Series::class, 'item', 'dynamic_group_items');
-    }
-
-    /**
-     * CachedContentFile rows this DynamicGroup requested be cached
-     * (Phase 2 / PR E). Inverse of `CachedContentFile::dynamicGroups()`.
-     *
-     * `withPivot('dropped_at')` exposes the soft-unshare timestamp so
-     * callers can distinguish live (`dropped_at IS NULL`) from
-     * stale (`dropped_at IS NOT NULL`) memberships without a separate
-     * pivot query.
-     */
-    public function cachedContentFiles(): BelongsToMany
-    {
-        return $this->belongsToMany(
-            CachedContentFile::class,
-            'cached_content_file_dynamic_groups',
-        )->withPivot('dropped_at')->withTimestamps();
     }
 
     /**

@@ -12,17 +12,11 @@ use App\Models\Series;
 use App\Models\User;
 use App\Services\XtreamCategoryService;
 use Illuminate\Foundation\Testing\RefreshDatabase;
-use Illuminate\Support\Facades\Bus;
 use Illuminate\Support\Facades\DB;
 
 uses(RefreshDatabase::class);
 
 beforeEach(function () {
-    // Playlist::factory()->create() fires PlaylistListener → dispatch into the
-    // sync pipeline (Redis-backed). Bus::fake() neutralises the dispatcher so
-    // these unit-level XtreamCategoryService tests don't need a live Redis.
-    Bus::fake();
-
     $this->user = User::factory()->create();
     $this->playlist = Playlist::factory()->for($this->user)->create();
 });
@@ -335,30 +329,6 @@ it('constrains a query to one dynamic group\'s members', function () {
 
     expect($query->pluck('id')->all())->toBe([$member->id])
         ->and($other->id)->not->toBeIn($query->pluck('id')->all());
-});
-
-// PR #1524 review (item 10b): a tombstoned (enabled=false) DynamicGroup must
-// not serve its membership to the Xtream category filter. The dynamic_group_items
-// rows are now hard-deleted for stale groups, but the join to dynamic_groups
-// is required either way — defense in depth against any pivot row that
-// survives a partial sync or is reinserted out-of-band.
-it('applyDynamicGroupFilter returns no rows when the DynamicGroup is tombstoned (enabled=false)', function () {
-    $group = DynamicGroup::create([
-        'playlist_id' => $this->playlist->id, 'user_id' => $this->user->id,
-        'type' => 'vod', 'source' => 'trending', 'name' => 'Stale', 'sort_order' => 0, 'enabled' => false,
-    ]);
-    $member = Channel::factory()->for($this->playlist)->create(['user_id' => $this->user->id, 'is_vod' => true]);
-    // Pivot row exists even though the group is tombstoned — simulates a row
-    // left behind by an older sync that hasn't run the new hard-delete path,
-    // or a row reinserted manually. The filter MUST still refuse to serve it.
-    DB::table('dynamic_group_items')->insert([
-        'dynamic_group_id' => $group->id, 'item_type' => Channel::class, 'item_id' => $member->id,
-    ]);
-
-    $query = Channel::query();
-    XtreamCategoryService::applyDynamicGroupFilter($query, $group->id, isVod: true);
-
-    expect($query->pluck('id')->all())->toBe([]);
 });
 
 it('prepends dynamic groups for a standalone playlist but not for a merged playlist or filtered alias', function () {

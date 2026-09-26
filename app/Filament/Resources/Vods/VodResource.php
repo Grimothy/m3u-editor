@@ -2,7 +2,6 @@
 
 namespace App\Filament\Resources\Vods;
 
-use App\Enums\CachedContentFileStatus;
 use App\Facades\LogoFacade;
 use App\Facades\SortFacade;
 use App\Filament\Actions\AssetPickerAction;
@@ -34,7 +33,6 @@ use App\Services\CachedContentDispatchService;
 use App\Services\DateFormatService;
 use App\Services\LogoCacheService;
 use App\Services\PlaylistService;
-use App\Services\PlaylistUrlService;
 use App\Services\TmdbService;
 use App\Settings\GeneralSettings;
 use App\Traits\HasUserFiltering;
@@ -253,13 +251,14 @@ class VodResource extends Resource implements CopilotResource
                 ->color(fn ($record): string => $record->has_metadata ? 'success' : 'gray'),
             IconColumn::make('is_cached')
                 ->label(__('Cached'))
+                ->visible(fn (): bool => app(CachedContentDispatchService::class)->isEnabled())
                 ->getStateUsing(fn (Channel $record): bool => $record->isCached())
                 ->boolean()
                 ->trueIcon('heroicon-o-circle-stack')
                 ->falseIcon('heroicon-o-circle-stack')
                 ->trueColor('info')
                 ->falseColor('gray')
-                ->tooltip(fn (Channel $record): string => $record->isCached()
+                ->tooltip(fn (?bool $state): string => $state
                     ? __('Cached file available. Playback will use the local cache.')
                     : __('Not cached. Use "Cache Now" to download the file for offline playback.'))
                 ->toggleable(),
@@ -531,13 +530,17 @@ class VodResource extends Resource implements CopilotResource
             ->label(__('Cache Now'))
             ->icon('heroicon-o-arrow-down-tray')
             ->color('info')
-            ->visible(fn (Channel $record): bool => self::canCacheNow($record))
+            ->visible(function (Channel $record): bool {
+                $service = app(CachedContentDispatchService::class);
+
+                return $service->isEnabled() && $service->canCache($record);
+            })
             ->requiresConfirmation()
             ->modalHeading(__('Cache this VOD?'))
-            ->modalDescription(fn (Channel $record): string => self::cacheNowDescription($record))
+            ->modalDescription(fn (Channel $record): string => __('Dispatch a background job to download ":title" to local storage for offline playback.', ['title' => $record->display_title]))
             ->modalSubmitActionLabel(__('Cache now'))
             ->action(function (Channel $record): void {
-                $result = self::dispatchCacheNowForChannel($record);
+                $result = app(CachedContentDispatchService::class)->dispatch($record);
                 CachedContentDispatchService::cacheNowNotification($record, $result)->send();
             });
     }
@@ -546,7 +549,6 @@ class VodResource extends Resource implements CopilotResource
     {
         return [
             ActionGroup::make([
-                self::getCacheNowAction(),
                 Action::make('fetch_tmdb_ids')
                     ->label(__('Fetch TMDB Metadata'))
                     ->icon('heroicon-o-film')
@@ -747,6 +749,7 @@ class VodResource extends Resource implements CopilotResource
                     ->modalIcon('heroicon-o-signal')
                     ->modalDescription(__('Probe this VOD with ffprobe to collect stream metadata (codec, resolution, bitrate, HDR). This data enables Trash Guide naming with stream-stat-based detection.'))
                     ->modalSubmitActionLabel(__('Start probing')),
+                self::getCacheNowAction(),
                 DeleteAction::make()
                     ->modalIcon('heroicon-o-trash')
                     ->modalDescription(__('Are you sure you want to delete this VOD channel? This action cannot be undone.'))
@@ -2336,75 +2339,5 @@ class VodResource extends Resource implements CopilotResource
         }
 
         return $channel;
-    }
-
-    /**
-     * Whether the "Cache Now" action should be visible on this row.
-     *  - Global cache feature must be enabled.
-     *  - The row must have a resolvable source URL.
-     *  - The row must not be a custom channel with no URL.
-     */
-    public static function canCacheNow(Channel $record): bool
-    {
-        if (! (bool) (app(GeneralSettings::class)->enable_cache ?? false)) {
-            return false;
-        }
-
-        $playlist = $record->playlist;
-        if (! $playlist) {
-            return false;
-        }
-
-        $url = PlaylistUrlService::getChannelUrl($record, $playlist);
-
-        return $url !== '' && $url !== null;
-    }
-
-    /**
-     * Confirmation modal description text for the "Cache Now" action.
-     */
-    public static function cacheNowDescription(Channel $record): string
-    {
-        $title = $record->title_custom ?: $record->title ?: $record->name;
-
-        return __('Dispatch a background job to download ":title" to local storage for offline playback.', ['title' => $title]);
-    }
-
-    /**
-     * Run the cache dispatch for a single VOD channel row. Returns a
-     * normalized shape so the action handler can pick a notification
-     * without re-checking conditions.
-     *
-     * When the dispatcher returns an empty Collection (idempotent re-dispatch
-     * for a row that already exists), we look the existing row up by
-     * fingerprint via `describeExisting()` so the UI can show "Already cached"
-     * vs "Already queued for caching" vs the red "Could not queue cache"
-     * failure - the dispatcher alone can't tell those apart.
-     *
-     * @return array{queued: bool, already?: 'cached'|'queued', error?: string}
-     */
-    public static function dispatchCacheNowForChannel(Channel $record): array
-    {
-        if (! self::canCacheNow($record)) {
-            return ['queued' => false, 'error' => __('This VOD has no resolvable source URL.')];
-        }
-
-        $service = app(CachedContentDispatchService::class);
-        $jobs = $service->dispatchForChannel($record);
-
-        if ($jobs->isNotEmpty()) {
-            return ['queued' => true];
-        }
-
-        $existing = $service->describeExisting($record);
-        if ($existing === null) {
-            return ['queued' => false, 'error' => __('Unknown error.')];
-        }
-
-        if ($existing->status === CachedContentFileStatus::Completed) {
-            return ['queued' => true, 'already' => 'cached'];
-        }
-
-        return ['queued' => true, 'already' => 'queued'];
     }
 }

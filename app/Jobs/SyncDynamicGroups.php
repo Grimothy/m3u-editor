@@ -140,52 +140,7 @@ class SyncDynamicGroups implements ShouldQueue
             ->all();
 
         if ($staleIds !== []) {
-            // Phase 2 / PR E: SOFT-UNSHARE instead of hard-delete.
-            //
-            // PR #1500 hard-deleted the stale DynamicGroup rows here, which
-            // cascade-deleted the pivot rows in cached_content_file_dynamic_groups
-            // BEFORE the retention sweep could see them. The retention sweep
-            // would then look at any file the stale group had pinned, see zero
-            // pivot references, and hard-delete the file (regardless of
-            // per-rule retention modes / never_expire on the file itself).
-            //
-            // PR E's fix: stamp `dropped_at = now()` on the pivot rows for
-            // each stale group, then mark the DynamicGroup row as
-            // enabled=false (tombstoned). The pivot rows SURVIVE so the next
-            // retention sweep sees them and applies the correct per-rule mode
-            // (or the match_group_lifetime fallback). never_expire on the
-            // CachedContentFile row is independent of pivot state and remains
-            // honored regardless.
-            //
-            // We deliberately don't DELETE the DynamicGroup row: the FK
-            // cascade would wipe the (now-soft-unshared) pivot rows, defeating
-            // the soft-unshare entirely. Leaving the DG row as a tombstone
-            // (enabled=false) costs one row per stale rule — bounded by how
-            // many times operators rename rules.
-            //
-            // PR #1524 review: the stale rule's `dynamic_group_items` rows
-            // (the membership pivot used by the Xtream category filter and the
-            // per-channel membership on the View page) MUST also be dropped.
-            // Without this, a client requesting the old Xtream category_id
-            // keeps getting the stale list because XtreamCategoryService::
-            // applyDynamicGroupFilter() only filters by dynamic_group_id. The
-            // CachedContentFile pivot above is a separate table and is
-            // soft-unshared, not deleted; this one is membership only and has
-            // no retention semantics attached, so a plain delete is fine and
-            // is what callers expect when a rule disappears.
-            DB::table('cached_content_file_dynamic_groups')
-                ->whereIn('dynamic_group_id', $staleIds)
-                ->whereNull('dropped_at')
-                ->update([
-                    'dropped_at' => now(),
-                    'updated_at' => now(),
-                ]);
-
-            DB::table('dynamic_group_items')
-                ->whereIn('dynamic_group_id', $staleIds)
-                ->delete();
-
-            DynamicGroup::whereIn('id', $staleIds)->update(['enabled' => false]);
+            DynamicGroup::whereIn('id', $staleIds)->delete();
         }
     }
 

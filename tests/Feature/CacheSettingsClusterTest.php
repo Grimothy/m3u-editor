@@ -1,11 +1,12 @@
 <?php
 
+use App\Filament\Clusters\Settings\Pages\ManageApiSettings;
+use App\Filament\Clusters\Settings\Pages\ManageCacheSettings;
 use App\Filament\Clusters\Settings\Pages\ManageIntegrationSettings;
+use App\Filament\Clusters\Settings\SettingsCluster;
 use App\Filament\Resources\Playlists\Pages\CreatePlaylist;
 use App\Models\User;
 use App\Settings\GeneralSettings;
-use Filament\Schemas\Components\Tabs;
-use Filament\Schemas\Schema;
 use Illuminate\Foundation\Testing\RefreshDatabase;
 use Livewire\Livewire;
 
@@ -15,13 +16,13 @@ beforeEach(function () {
     $this->actingAs(User::factory()->admin()->create());
 });
 
-it('renders the Integrations settings page with the Cache tab open', function () {
-    Livewire::test(ManageIntegrationSettings::class)
+it('renders the Cache settings page', function () {
+    Livewire::test(ManageCacheSettings::class)
         ->assertOk();
 });
 
 it('saves the enable_cache toggle', function () {
-    Livewire::test(ManageIntegrationSettings::class)
+    Livewire::test(ManageCacheSettings::class)
         ->fillForm(['enable_cache' => true])
         ->call('save')
         ->assertHasNoFormErrors();
@@ -30,7 +31,7 @@ it('saves the enable_cache toggle', function () {
 });
 
 it('saves the default_share_cache_across_playlists toggle', function () {
-    Livewire::test(ManageIntegrationSettings::class)
+    Livewire::test(ManageCacheSettings::class)
         ->fillForm(['default_share_cache_across_playlists' => true])
         ->call('save')
         ->assertHasNoFormErrors();
@@ -39,7 +40,7 @@ it('saves the default_share_cache_across_playlists toggle', function () {
 });
 
 it('saves the cache_retention_mode select value', function () {
-    Livewire::test(ManageIntegrationSettings::class)
+    Livewire::test(ManageCacheSettings::class)
         ->fillForm(['cache_retention_mode' => 'never-expire'])
         ->call('save')
         ->assertHasNoFormErrors();
@@ -52,7 +53,7 @@ it('does not wipe enable_cache when saving an unrelated field on the same page',
     $settings->enable_cache = true;
     $settings->save();
 
-    Livewire::test(ManageIntegrationSettings::class)
+    Livewire::test(ManageCacheSettings::class)
         ->fillForm(['cache_retention_mode' => 'manual'])
         ->call('save')
         ->assertHasNoFormErrors();
@@ -63,28 +64,37 @@ it('does not wipe enable_cache when saving an unrelated field on the same page',
         ->and($fresh->cache_retention_mode)->toBe('manual');
 });
 
-it('rejects non-admin users from the integrations settings page', function () {
+it('rejects non-admin users from the Cache settings page', function () {
     auth()->logout();
     $this->actingAs(User::factory()->create());
 
-    expect(ManageIntegrationSettings::canAccess())->toBeFalse();
+    expect(ManageCacheSettings::canAccess())->toBeFalse();
 });
 
-it('opens the Integrations page on the new cache tab', function () {
-    request()->merge(['tab' => 'cache']);
+it('lists the Cache page between API and Integrations', function () {
+    $pages = SettingsCluster::getClusteredComponents();
 
-    $page = new ManageIntegrationSettings;
-    $schema = $page->form(Schema::make($page));
+    expect(ManageCacheSettings::getNavigationSort())->toBeGreaterThan(ManageApiSettings::getNavigationSort())
+        ->and(ManageCacheSettings::getNavigationSort())->toBeLessThan(ManageIntegrationSettings::getNavigationSort())
+        ->and(array_search(ManageCacheSettings::class, $pages, true))
+        ->toBe(array_search(ManageApiSettings::class, $pages, true) + 1);
+});
 
-    $tabs = collect($schema->getComponents())
-        ->first(fn ($c) => $c instanceof Tabs);
-
-    expect($tabs->getActiveTab())->toBe(4); // tmdb(1) + aiostreams(2) + mediaflow(3) + cache(4)
+it('shows the Docker volume callout only while caching is enabled', function () {
+    Livewire::test(ManageCacheSettings::class)
+        ->fillForm(['enable_cache' => false])
+        ->assertDontSee('Mount a volume for cached files')
+        ->fillForm(['enable_cache' => true])
+        ->assertSee('Mount a volume for cached files')
+        ->assertSee((string) config('filesystems.disks.cache.root'));
 });
 
 it('pre-fills the per-playlist share toggle from the global default on create', function (bool $globalDefault) {
     $settings = app(GeneralSettings::class);
     $settings->default_share_cache_across_playlists = $globalDefault;
+    $settings->save();
+
+    $settings->enable_cache = true;
     $settings->save();
 
     Livewire::test(CreatePlaylist::class)

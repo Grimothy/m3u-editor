@@ -1,9 +1,12 @@
 <?php
 
+use App\Jobs\DownloadCachedContentFile;
+use App\Models\CachedContentFile;
 use App\Models\Channel;
 use App\Models\Playlist;
 use App\Models\User;
 use App\Settings\GeneralSettings;
+use Illuminate\Console\Scheduling\Schedule;
 use Illuminate\Foundation\Testing\RefreshDatabase;
 use Illuminate\Support\Facades\Bus;
 
@@ -21,9 +24,6 @@ beforeEach(function () {
 });
 
 it('cache:content warns and returns SUCCESS without dispatching when enable_cache is off (dry-run)', function () {
-    // PR #1524 review item 5: the hourly scheduled dry-run must be a
-    // no-op when the kill switch is off - otherwise operators see
-    // log spam every hour for a feature they intentionally disabled.
     setEnableCacheForCommandTest(false);
 
     $user = User::factory()->create();
@@ -78,4 +78,57 @@ it('cache:content dispatches when enable_cache is on', function () {
     // dry-run path increments the counter but never inserts rows or
     // dispatches jobs (those are only issued on the non-dry-run path).
     $this->assertDatabaseCount('cached_content_files', 0);
+});
+
+it('cache:content queues VOD channels but never live channels', function () {
+    setEnableCacheForCommandTest(true);
+
+    $user = User::factory()->create();
+    $playlist = Playlist::factory()->for($user)->create();
+    $vod = Channel::factory()->for($user)->for($playlist)->create([
+        'enabled' => true,
+        'is_vod' => true,
+        'tmdb_id' => 400,
+        'url' => 'https://example.com/movie.mkv',
+    ]);
+    Channel::factory()->for($user)->for($playlist)->create([
+        'enabled' => true,
+        'is_vod' => false,
+        'url' => 'https://example.com/live/1.ts',
+    ]);
+
+    $this->artisan('cache:content', ['--playlist' => $playlist->id])
+        ->expectsOutputToContain('queued=1')
+        ->assertExitCode(0);
+
+    $this->assertDatabaseCount('cached_content_files', 1);
+    expect(CachedContentFile::sole()->cacheable_id)->toBe($vod->id);
+    Bus::assertDispatchedTimes(DownloadCachedContentFile::class, 1);
+});
+
+it('cache:content --dry-run reports what would be queued without writing', function () {
+    setEnableCacheForCommandTest(true);
+
+    $user = User::factory()->create();
+    $playlist = Playlist::factory()->for($user)->create();
+    Channel::factory()->for($user)->for($playlist)->create([
+        'enabled' => true,
+        'is_vod' => true,
+        'tmdb_id' => 500,
+        'url' => 'https://example.com/movie.mkv',
+    ]);
+
+    $this->artisan('cache:content', ['--playlist' => $playlist->id, '--dry-run' => true])
+        ->expectsOutputToContain('would-queue=1')
+        ->assertExitCode(0);
+
+    $this->assertDatabaseCount('cached_content_files', 0);
+});
+
+it('is not scheduled to run automatically', function () {
+    $scheduled = collect(app(Schedule::class)->events())
+        ->map(fn ($event) => $event->command ?? '')
+        ->filter(fn (string $command) => str_contains($command, 'cache:content'));
+
+    expect($scheduled)->toBeEmpty();
 });

@@ -183,14 +183,10 @@ Route::get('/dvr/{username}/{password}/{uuid}/edl', [DvrStreamController::class,
 Route::get('/dvr/{username}/{password}/{uuid}.{format?}', [DvrStreamController::class, 'stream'])
     ->name('dvr.recording.stream');
 
-// Cached content stream route - serves cached VOD/Series files when a
-// matching Completed row exists for the authenticated playlist. Declared
-// after the DVR routes so the DVR {uuid} pattern cannot accidentally
-// shadow it (different path prefix: /cached-content/ vs /dvr/). Auth is
-// identical to the DVR route: username + password (playlist UUID) or
-// PlaylistAuth credentials.
+// Cached VOD/episode files. Auth matches the DVR route: owner name + playlist
+// UUID, or PlaylistAuth credentials.
 Route::get('/cached-content/{username}/{password}/{uuid}.{format?}', [CachedContentStreamController::class, 'stream'])
-    ->name('dynamic-group-cache.stream');
+    ->name('cached-content.stream');
 
 // Auth-aware HDHR routes (path-based auth to support clients that ignore query string auth)
 Route::get('/{uuid}/hdhr/{username}/{password}/device.xml', [PlaylistGenerateController::class, 'hdhr'])

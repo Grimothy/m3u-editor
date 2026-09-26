@@ -1,17 +1,15 @@
 <?php
 
 use App\Enums\CachedContentFileStatus;
-use App\Filament\Widgets\CachedContentActivityWidget;
+use App\Filament\Resources\CachedContentFiles\CachedContentFileResource;
+use App\Filament\Resources\CachedContentFiles\Pages\ListCachedContentFiles;
 use App\Jobs\DownloadCachedContentFile;
 use App\Models\CachedContentFile;
 use App\Models\Channel;
-use App\Models\Episode;
 use App\Models\Playlist;
-use App\Models\Season;
-use App\Models\Series;
 use App\Models\User;
-use App\Services\CachedContentDispatchService;
 use App\Settings\GeneralSettings;
+use App\Tables\Columns\ProgressColumn;
 use Illuminate\Foundation\Testing\RefreshDatabase;
 use Illuminate\Support\Facades\Bus;
 use Illuminate\Support\Facades\Cache;
@@ -34,28 +32,28 @@ beforeEach(function () {
     Bus::fake();
 });
 
-// canView()
+// canAccess()
 
-it('canView returns false when enable_cache is off', function () {
+it('canAccess returns false when enable_cache is off', function () {
     setEnableCacheForActivityWidget(false);
 
     $user = User::factory()->create();
     $this->actingAs($user);
 
-    expect(CachedContentActivityWidget::canView())->toBeFalse();
+    expect(CachedContentFileResource::canAccess())->toBeFalse();
 });
 
-it('canView returns false for unauthenticated visitors', function () {
+it('canAccess returns false for unauthenticated visitors', function () {
     auth()->logout();
 
-    expect(CachedContentActivityWidget::canView())->toBeFalse();
+    expect(CachedContentFileResource::canAccess())->toBeFalse();
 });
 
-it('canView returns true when enable_cache is on and the visitor is authenticated', function () {
+it('canAccess returns true when enable_cache is on and the visitor is authenticated', function () {
     $user = User::factory()->create();
     $this->actingAs($user);
 
-    expect(CachedContentActivityWidget::canView())->toBeTrue();
+    expect(CachedContentFileResource::canAccess())->toBeTrue();
 });
 
 // Rendering
@@ -64,7 +62,7 @@ it('renders for an authenticated user when enable_cache is on', function () {
     $user = User::factory()->create();
     $this->actingAs($user);
 
-    Livewire::test(CachedContentActivityWidget::class)->assertOk();
+    Livewire::test(ListCachedContentFiles::class)->assertOk();
 });
 
 it('does not render for an authenticated user when enable_cache is off', function () {
@@ -73,7 +71,7 @@ it('does not render for an authenticated user when enable_cache is off', functio
     $user = User::factory()->create();
     $this->actingAs($user);
 
-    Livewire::test(CachedContentActivityWidget::class)->assertSet('mounted', false);
+    Livewire::test(ListCachedContentFiles::class)->assertSet('mounted', false);
 });
 
 // Ownership scoping (table query)
@@ -100,7 +98,7 @@ it('table query only shows the current user\'s cached files for non-admin users'
 
     $this->actingAs($owner);
 
-    Livewire::test(CachedContentActivityWidget::class)
+    Livewire::test(ListCachedContentFiles::class)
         ->assertOk()
         ->loadTable()
         ->assertCanSeeTableRecords([$mine])
@@ -130,7 +128,7 @@ it('table query shows every cached file for an admin regardless of user_id', fun
 
     $this->actingAs($admin);
 
-    Livewire::test(CachedContentActivityWidget::class)
+    Livewire::test(ListCachedContentFiles::class)
         ->assertOk()
         ->loadTable()
         ->assertCanSeeTableRecords([$adminRow, $otherRow]);
@@ -146,40 +144,35 @@ it('per-row retry action re-dispatches DownloadCachedContentFile for a Failed ro
         'tmdb_id' => 700,
         'url' => 'https://example.com/movie.mp4',
     ]);
-    $row = CachedContentFile::factory()->failed()->create([
-        'user_id' => $user->id,
-        'playlist_id' => $playlist->id,
-        'content_type' => 'movie',
-        'tmdb_id' => '700',
+    $row = CachedContentFile::factory()->failed()->forItem($channel)->create([
         'title' => 'Failed movie',
     ]);
 
     $this->actingAs($user);
 
-    Livewire::test(CachedContentActivityWidget::class)
+    Livewire::test(ListCachedContentFiles::class)
         ->callTableAction('retry', $row)
         ->assertNotified();
 
     Bus::assertDispatched(DownloadCachedContentFile::class);
 });
 
-it('per-row retry action surfaces a notification when the source Channel cannot be resolved', function () {
+it('per-row retry action reports Could not retry when the source channel is gone', function () {
     $user = User::factory()->create();
     $playlist = Playlist::factory()->for($user)->create();
     $row = CachedContentFile::factory()->failed()->create([
         'user_id' => $user->id,
         'playlist_id' => $playlist->id,
         'content_type' => 'movie',
-        'tmdb_id' => '999-no-channel',
+        'tmdb_id' => '999',
         'title' => 'Missing source',
     ]);
+    // The movie left the playlist since the download failed.
+    Channel::whereKey($row->cacheable_id)->delete();
 
     $this->actingAs($user);
 
-    // No matching Channel row exists for playlist=this, tmdb=999-no-channel
-    // so resolveChannel() returns null. The retry action should report a
-    // "Could not retry" notification instead of dispatching.
-    Livewire::test(CachedContentActivityWidget::class)
+    Livewire::test(ListCachedContentFiles::class)
         ->callTableAction('retry', $row)
         ->assertNotified('Could not retry');
 
@@ -201,13 +194,11 @@ it('per-row deleteCache action removes the row and storage file', function () {
         'file_path' => 'cache/fingerprint.mp4',
     ]);
 
-    // Match the widget's resolution: file_path is resolved relative to the
-    // cache disk's root, so the on-disk file lives at cache/fingerprint.mp4.
     Storage::disk('cache')->put('cache/fingerprint.mp4', 'bytes');
 
     $this->actingAs($user);
 
-    Livewire::test(CachedContentActivityWidget::class)
+    Livewire::test(ListCachedContentFiles::class)
         ->callTableAction('deleteCache', $row)
         ->assertNotified();
 
@@ -216,12 +207,8 @@ it('per-row deleteCache action removes the row and storage file', function () {
 });
 
 it('per-row cancel action sets a row-id cancellation flag and deletes the row (no fingerprint flag)', function () {
-    // PR #1524 review item 7: the previous implementation ALSO wrote a
-    // fingerprint-scoped `pendingCancellationCacheKey` when cancelling a
-    // Pending row. That flag lingered for 10 minutes and silently
-    // suppressed the next legitimate dispatch for the same content.
-    // The fix removes the fingerprint flag entirely; the row-id
-    // `cancellationCacheKey` + row deletion cover both windows.
+    // Cancelling signals the worker through the row-id key only; no
+    // content-wide flag that could block a later download of the same item.
     $user = User::factory()->create();
     $playlist = Playlist::factory()->for($user)->create();
     $fingerprint = 'movie:1234:::1080p';
@@ -246,7 +233,7 @@ it('per-row cancel action sets a row-id cancellation flag and deletes the row (n
 
     $this->actingAs($user);
 
-    Livewire::test(CachedContentActivityWidget::class)
+    Livewire::test(ListCachedContentFiles::class)
         ->callTableAction('cancel', $row)
         ->assertNotified();
 
@@ -267,7 +254,7 @@ it('per-row viewError action opens a modal containing the failure message', func
 
     $this->actingAs($user);
 
-    Livewire::test(CachedContentActivityWidget::class)
+    Livewire::test(ListCachedContentFiles::class)
         ->mountTableAction('viewError', $row)
         ->assertHasNoErrors();
 });
@@ -288,11 +275,10 @@ it('per-row retry helper refuses to dispatch when the row belongs to another use
     // We can't drive callTableAction() for a row filtered out by
     // ownedBy() - Filament throws "Record no longer exists" before the
     // closure runs. Test the ownership gate directly via the helper
-    // the action uses, mirroring PR #1500's review requirement that
-    // retryCachedFile() MUST return false on ownership mismatch.
+    // the action uses, so retryCachedFile() must return false on ownership mismatch.
     $this->actingAs($intruder);
 
-    expect(CachedContentActivityWidget::retryCachedFile($row))->toBeFalse();
+    expect(CachedContentFileResource::retryCachedFile($row))->toBeFalse();
 
     Bus::assertNotDispatched(DownloadCachedContentFile::class);
 });
@@ -303,30 +289,16 @@ it('bulkRetry re-dispatches DownloadCachedContentFile for every Failed row in th
     $user = User::factory()->create();
     $playlist = Playlist::factory()->for($user)->create();
 
-    // Create matching channels so retry's source resolution succeeds. The
-    // widget's resolveChannel() filters on is_vod=true; the default factory
-    // leaves is_vod=false, which would silently fail retry's lookup.
+    // Retry needs a cacheable (VOD, with URL) source item.
     $channelA = Channel::factory()->for($user)->for($playlist)->create(['is_vod' => true, 'tmdb_id' => 1001, 'url' => 'https://example.com/a.mp4']);
     $channelB = Channel::factory()->for($user)->for($playlist)->create(['is_vod' => true, 'tmdb_id' => 1002, 'url' => 'https://example.com/b.mp4']);
 
-    $rowA = CachedContentFile::factory()->failed()->create([
-        'user_id' => $user->id,
-        'playlist_id' => $playlist->id,
-        'content_type' => 'movie',
-        'tmdb_id' => '1001',
-        'title' => 'A',
-    ]);
-    $rowB = CachedContentFile::factory()->failed()->create([
-        'user_id' => $user->id,
-        'playlist_id' => $playlist->id,
-        'content_type' => 'movie',
-        'tmdb_id' => '1002',
-        'title' => 'B',
-    ]);
+    $rowA = CachedContentFile::factory()->failed()->forItem($channelA)->create(['title' => 'A']);
+    $rowB = CachedContentFile::factory()->failed()->forItem($channelB)->create(['title' => 'B']);
 
     $this->actingAs($user);
 
-    Livewire::test(CachedContentActivityWidget::class)
+    Livewire::test(ListCachedContentFiles::class)
         ->callTableBulkAction('bulkRetry', [$rowA->id, $rowB->id])
         ->assertNotified();
 
@@ -352,7 +324,7 @@ it('bulkRetry skips rows owned by another user (no dispatch, no surprise side ef
     // the helper directly instead.
     $this->actingAs($intruder);
 
-    expect(CachedContentActivityWidget::retryCachedFile($theirRow))->toBeFalse();
+    expect(CachedContentFileResource::retryCachedFile($theirRow))->toBeFalse();
 
     Bus::assertNotDispatched(DownloadCachedContentFile::class);
 });
@@ -379,7 +351,7 @@ it('bulkCancel removes every Pending or Downloading row in the selection', funct
 
     $this->actingAs($user);
 
-    Livewire::test(CachedContentActivityWidget::class)
+    Livewire::test(ListCachedContentFiles::class)
         ->callTableBulkAction('bulkCancel', [$pendingRow->id, $completedRow->id])
         ->assertNotified();
 
@@ -417,7 +389,7 @@ it('bulkDelete removes every selected row', function () {
 
     $this->actingAs($user);
 
-    Livewire::test(CachedContentActivityWidget::class)
+    Livewire::test(ListCachedContentFiles::class)
         ->callTableBulkAction('bulkDelete', [$rowA->id, $rowB->id])
         ->assertNotified();
 
@@ -437,7 +409,7 @@ it('getProgressLabel returns the Pending label for Pending rows', function () {
         'status' => CachedContentFileStatus::Pending,
     ]);
 
-    expect(CachedContentActivityWidget::getProgressLabel($row))->toBe(__('Pending'));
+    expect(CachedContentFileResource::getProgressLabel($row))->toBe(__('Pending'));
 });
 
 it('getProgressLabel formats the final file size for Completed rows', function () {
@@ -447,7 +419,7 @@ it('getProgressLabel formats the final file size for Completed rows', function (
         'file_size_bytes' => 1_572_864, // 1.50 MB
     ]);
 
-    $label = CachedContentActivityWidget::getProgressLabel($row);
+    $label = CachedContentFileResource::getProgressLabel($row);
 
     expect($label)->toContain('MB')
         ->and($label)->toContain('1.50');
@@ -461,7 +433,7 @@ it('getProgressLabel falls back to bytes_downloaded when file_size_bytes is null
         'bytes_downloaded' => 2_097_152, // 2.00 MB
     ]);
 
-    $label = CachedContentActivityWidget::getProgressLabel($row);
+    $label = CachedContentFileResource::getProgressLabel($row);
 
     expect($label)->toContain('MB')
         ->and($label)->toContain('2.00');
@@ -475,7 +447,7 @@ it('getProgressLabel returns the Completed label when no size is recorded', func
         'bytes_downloaded' => null,
     ]);
 
-    expect(CachedContentActivityWidget::getProgressLabel($row))->toBe(__('Completed'));
+    expect(CachedContentFileResource::getProgressLabel($row))->toBe(__('Completed'));
 });
 
 it('getProgressLabel formats last-known bytes for Failed rows', function () {
@@ -485,7 +457,7 @@ it('getProgressLabel formats last-known bytes for Failed rows', function () {
         'bytes_downloaded' => 999,
     ]);
 
-    $label = CachedContentActivityWidget::getProgressLabel($row);
+    $label = CachedContentFileResource::getProgressLabel($row);
 
     expect($label)->toContain('KB');
 });
@@ -497,7 +469,7 @@ it('getProgressLabel returns the Failed label when no bytes are recorded', funct
         'bytes_downloaded' => null,
     ]);
 
-    expect(CachedContentActivityWidget::getProgressLabel($row))->toBe(__('Failed'));
+    expect(CachedContentFileResource::getProgressLabel($row))->toBe(__('Failed'));
 });
 
 it('getProgressLabel formats bytes for Downloading rows', function () {
@@ -506,9 +478,45 @@ it('getProgressLabel formats bytes for Downloading rows', function () {
         'tmdb_id' => '1',
     ]);
 
-    $label = CachedContentActivityWidget::getProgressLabel($row);
+    $label = CachedContentFileResource::getProgressLabel($row);
 
-    expect($label)->toContain('MB');
+    expect($label)->toContain('MB')
+        ->and($label)->toContain(' / ')
+        ->and($label)->not->toContain('%');
+});
+
+it('getProgressPercent reports bytes downloaded vs expected, 100 when Completed, 0 without a size', function () {
+    $downloading = CachedContentFile::factory()->downloading(536_870_912, 2_147_483_648)->create();
+    $unknownSize = CachedContentFile::factory()->downloading(536_870_912, null)->create();
+    $completed = CachedContentFile::factory()->completed()->create();
+    $pending = CachedContentFile::factory()->create();
+
+    expect(CachedContentFileResource::getProgressPercent($downloading))->toBe(25)
+        ->and(CachedContentFileResource::getProgressPercent($unknownSize))->toBe(0)
+        ->and(CachedContentFileResource::getProgressPercent($completed))->toBe(100)
+        ->and(CachedContentFileResource::getProgressPercent($pending))->toBe(0);
+});
+
+it('getProgressColor follows status and flags stalled downloads', function () {
+    $active = CachedContentFile::factory()->downloading()->create();
+    $stalled = CachedContentFile::factory()->downloading()->create(['last_progress_at' => now()->subMinutes(2)]);
+
+    expect(CachedContentFileResource::getProgressColor($active))->toBe('primary')
+        ->and(CachedContentFileResource::getProgressColor($stalled))->toBe('warning')
+        ->and(CachedContentFileResource::getProgressColor(CachedContentFile::factory()->completed()->create()))->toBe('success')
+        ->and(CachedContentFileResource::getProgressColor(CachedContentFile::factory()->failed()->create()))->toBe('danger');
+});
+
+it('renders the shared progress bar with the percent for a downloading row', function () {
+    $user = User::factory()->create();
+    $this->actingAs($user);
+    $row = CachedContentFile::factory()->downloading(536_870_912, 2_147_483_648)->create(['user_id' => $user->id]);
+
+    Livewire::test(ListCachedContentFiles::class)
+        ->loadTable()
+        ->assertTableColumnExists('progress', fn ($column) => $column instanceof ProgressColumn, $row)
+        ->assertSee('25%')
+        ->assertSee('512.00 MB / 2.00 GB');
 });
 
 it('getEtaLabel returns null for stalled rows', function () {
@@ -522,7 +530,7 @@ it('getEtaLabel returns null for stalled rows', function () {
         'last_progress_at' => now()->subMinutes(2),
     ]);
 
-    expect(CachedContentActivityWidget::getEtaLabel($row))->toBeNull();
+    expect(CachedContentFileResource::getEtaLabel($row))->toBeNull();
 });
 
 it('getContentLabel prefers the persisted title when present', function () {
@@ -532,92 +540,7 @@ it('getContentLabel prefers the persisted title when present', function () {
         'title' => 'Inception',
     ]);
 
-    expect(CachedContentActivityWidget::getContentLabel($row))->toBe('Inception');
-});
-
-it('getContentLabel returns the movie Channel display title when title is null and a Channel matches', function () {
-    $user = User::factory()->create();
-    $playlist = Playlist::factory()->for($user)->create();
-    Channel::factory()->for($user)->for($playlist)->create([
-        'is_vod' => true,
-        'tmdb_id' => 5000,
-        'title' => 'The Big Lebowski',
-        'url' => 'https://example.com/big_lebowski.mp4',
-    ]);
-
-    $row = CachedContentFile::factory()->create([
-        'user_id' => $user->id,
-        'playlist_id' => $playlist->id,
-        'content_type' => 'movie',
-        'tmdb_id' => '5000',
-        'title' => null,
-    ]);
-
-    // Simulate the projection the widget query attaches when the row is
-    // loaded via the table. Direct attribute injection is enough for
-    // unit-level coverage; the integration table-render assertion below
-    // exercises the full query path.
-    $row->setAttribute('movie_source_title', 'The Big Lebowski');
-
-    expect(CachedContentActivityWidget::getContentLabel($row))->toBe('The Big Lebowski');
-});
-
-it('getContentLabel returns the episode title when title is null and an Episode matches', function () {
-    $user = User::factory()->create();
-    $playlist = Playlist::factory()->for($user)->create();
-    $series = Series::factory()->for($user)->for($playlist)->create(['tmdb_id' => 6000]);
-    $season = Season::factory()->for($series)->create(['season_number' => 1]);
-    Episode::factory()->for($series)->create([
-        'season_id' => $season->id,
-        'season' => 1,
-        'episode_num' => 3,
-        'title' => 'The One With the Rumor',
-        'url' => 'https://example.com/s1e3.mp4',
-    ]);
-
-    $row = CachedContentFile::factory()->create([
-        'user_id' => $user->id,
-        'playlist_id' => $playlist->id,
-        'content_type' => 'episode',
-        'tmdb_id' => '6000',
-        'season_number' => 1,
-        'episode_number' => 3,
-        'title' => null,
-    ]);
-
-    $row->setAttribute('episode_source_title', 'The One With the Rumor');
-
-    expect(CachedContentActivityWidget::getContentLabel($row))->toBe('The One With the Rumor');
-});
-
-it('getContentLabel falls back to fingerprint when source row exists but its display title is empty', function () {
-    $user = User::factory()->create();
-    $playlist = Playlist::factory()->for($user)->create();
-    Channel::factory()->for($user)->for($playlist)->create([
-        'is_vod' => true,
-        'tmdb_id' => 7000,
-        'title' => null,
-        'title_custom' => null,
-        'name' => null,
-        'name_custom' => null,
-        'url' => 'https://example.com/empty.mp4',
-    ]);
-
-    $row = CachedContentFile::factory()->create([
-        'user_id' => $user->id,
-        'playlist_id' => $playlist->id,
-        'content_type' => 'movie',
-        'tmdb_id' => '7000',
-        'title' => null,
-    ]);
-
-    // Projection returns null when the source row has no usable title.
-    $row->setAttribute('movie_source_title', null);
-
-    $label = CachedContentActivityWidget::getContentLabel($row);
-
-    expect($label)->toContain('movie')
-        ->and($label)->toContain('7000');
+    expect(CachedContentFileResource::getContentLabel($row))->toBe('Inception');
 });
 
 it('getContentLabel falls back to a fingerprint label when title is null and no source row matches', function () {
@@ -627,174 +550,15 @@ it('getContentLabel falls back to a fingerprint label when title is null and no 
         'title' => null,
     ]);
 
-    $label = CachedContentActivityWidget::getContentLabel($row);
+    $label = CachedContentFileResource::getContentLabel($row);
 
     expect($label)->toContain('movie')
         ->and($label)->toContain('42');
 });
 
-// Integration: end-to-end widget render proves the projection path actually
-// runs through the table query (catches widget-query-level mistakes).
-
-it('table renders the resolved source title for a null-title row with a matching Channel', function () {
-    $user = User::factory()->create();
-    $playlist = Playlist::factory()->for($user)->create();
-    Channel::factory()->for($user)->for($playlist)->create([
-        'is_vod' => true,
-        'tmdb_id' => 8000,
-        'title' => 'Pulp Fiction',
-        'url' => 'https://example.com/pulp_fiction.mp4',
-    ]);
-    CachedContentFile::factory()->completed()->create([
-        'user_id' => $user->id,
-        'playlist_id' => $playlist->id,
-        'content_type' => 'movie',
-        'tmdb_id' => '8000',
-        'title' => null,
-    ]);
-
-    $this->actingAs($user);
-
-    Livewire::test(CachedContentActivityWidget::class)
-        ->assertOk()
-        ->loadTable()
-        ->assertSee('Pulp Fiction');
-});
-
-// Resolution helpers
-
-it('resolveSource returns a Channel when the source playlist matches by tmdb_id', function () {
-    $user = User::factory()->create();
-    $playlist = Playlist::factory()->for($user)->create();
-    $channel = Channel::factory()->for($user)->for($playlist)->create([
-        'is_vod' => true,
-        'tmdb_id' => 999,
-        'url' => 'https://example.com/x.mp4',
-    ]);
-
-    $row = CachedContentFile::factory()->create([
-        'user_id' => $user->id,
-        'playlist_id' => $playlist->id,
-        'content_type' => 'movie',
-        'tmdb_id' => '999',
-    ]);
-
-    $reflection = new ReflectionClass(CachedContentActivityWidget::class);
-    $method = $reflection->getMethod('resolveSource');
-    $method->setAccessible(true);
-    $resolved = $method->invoke(null, $playlist, $row, Channel::class);
-
-    expect($resolved)->not->toBeNull()
-        ->and($resolved->id)->toBe($channel->id);
-});
-
-it('resolveSource returns an Episode when the source series matches by tmdb_id', function () {
-    $user = User::factory()->create();
-    $playlist = Playlist::factory()->for($user)->create();
-    $series = Series::factory()->for($user)->for($playlist)->create([
-        'tmdb_id' => 5_111,
-    ]);
-    $season = Season::factory()->for($series)->create(['season_number' => 2]);
-    $episode = Episode::factory()->for($series)->create([
-        'season_id' => $season->id,
-        'season' => 2,
-        'episode_num' => 7,
-        'url' => 'https://example.com/s2e7.mp4',
-    ]);
-
-    $row = CachedContentFile::factory()->create([
-        'user_id' => $user->id,
-        'playlist_id' => $playlist->id,
-        'content_type' => 'episode',
-        'tmdb_id' => '5111',
-        'season_number' => 2,
-        'episode_number' => 7,
-    ]);
-
-    $reflection = new ReflectionClass(CachedContentActivityWidget::class);
-    $method = $reflection->getMethod('resolveSource');
-    $method->setAccessible(true);
-    $resolved = $method->invoke(null, $playlist, $row, Episode::class);
-
-    expect($resolved)->not->toBeNull()
-        ->and($resolved->id)->toBe($episode->id);
-});
-
-// Title persistence at dispatch time (PR #1524 reuse/efficiency)
-
-it('dispatchForChannel stores the source Channel display title on the new row', function () {
-    // PR #1524 reuse/efficiency: persist the resolved title at dispatch time
-    // so the widget can render the title cell straight from the row's own
-    // column on every poll, avoiding the Channel/Episode projection
-    // subquery for rows that already have a stored title.
-    $user = User::factory()->create();
-    $playlist = Playlist::factory()->for($user)->create();
-    $channel = Channel::factory()->for($user)->for($playlist)->create([
-        'is_vod' => true,
-        'tmdb_id' => 9_001,
-        'title' => 'Arrival',
-        'url' => 'https://example.com/arrival.mp4',
-    ]);
-
-    Auth::login($user);
-    app(CachedContentDispatchService::class)->dispatchForChannel($channel);
-
-    $row = CachedContentFile::sole();
-    expect($row->title)->toBe('Arrival');
-});
-
-it('dispatchForEpisode stores the source Episode title on the new row', function () {
-    $user = User::factory()->create();
-    $playlist = Playlist::factory()->for($user)->create();
-    $series = Series::factory()->for($user)->for($playlist)->create([
-        'tmdb_id' => 9_002,
-    ]);
-    $season = Season::factory()->for($series)->create(['season_number' => 1]);
-    $episode = Episode::factory()->for($series)->create([
-        'season_id' => $season->id,
-        'season' => 1,
-        'episode_num' => 1,
-        'title' => 'Pilot',
-        'url' => 'https://example.com/pilot.mp4',
-    ]);
-
-    Auth::login($user);
-    app(CachedContentDispatchService::class)->dispatchForEpisode($episode);
-
-    $row = CachedContentFile::sole();
-    expect($row->title)->toBe('Pilot');
-});
-
-it('dispatchForChannel leaves title null when the source Channel display title is empty', function () {
-    // Mirrors the widget projection's `nullif(trim(...), '')` behaviour:
-    // an empty source title must not be persisted as an empty string, so
-    // the widget still falls through to its subquery path.
-    $user = User::factory()->create();
-    $playlist = Playlist::factory()->for($user)->create();
-    $channel = Channel::factory()->for($user)->for($playlist)->create([
-        'is_vod' => true,
-        'tmdb_id' => 9_003,
-        'title' => null,
-        'title_custom' => null,
-        'name' => null,
-        'name_custom' => null,
-        'url' => 'https://example.com/empty.mp4',
-    ]);
-
-    Auth::login($user);
-    app(CachedContentDispatchService::class)->dispatchForChannel($channel);
-
-    $row = CachedContentFile::sole();
-    expect($row->title)->toBeNull();
-});
-
-// Title column renders the stored value without re-running the subquery
+// Title column
 
 it('table renders the stored title for a row whose title was set at dispatch time', function () {
-    // Title resolution from the row's own `title` column - no subquery
-    // involvement. The factory creates the row with a non-null title,
-    // simulating a freshly-dispatched row whose title was filled by
-    // CachedContentDispatchService::dispatchNew().
     $user = User::factory()->create();
     $playlist = Playlist::factory()->for($user)->create();
     CachedContentFile::factory()->completed()->create([
@@ -807,46 +571,16 @@ it('table renders the stored title for a row whose title was set at dispatch tim
 
     $this->actingAs($user);
 
-    Livewire::test(CachedContentActivityWidget::class)
+    Livewire::test(ListCachedContentFiles::class)
         ->assertOk()
         ->loadTable()
         ->assertSee('Persisted Title');
 });
 
-it('getStoredTitleOrFallback returns the stored title when present', function () {
-    $row = CachedContentFile::factory()->create([
-        'content_type' => 'movie',
-        'tmdb_id' => '42',
-        'title' => 'Stored',
-    ]);
-
-    expect(CachedContentActivityWidget::getStoredTitleOrFallback($row))->toBe('Stored');
-});
-
-it('getStoredTitleOrFallback falls back to the projection when stored title is null', function () {
-    $row = CachedContentFile::factory()->create([
-        'content_type' => 'movie',
-        'tmdb_id' => '42',
-        'title' => null,
-    ]);
-
-    // Without a matching Channel and no stored title, getContentLabel
-    // produces the structured fingerprint fallback. The stored-title
-    // helper must thread the same fallback through.
-    $label = CachedContentActivityWidget::getStoredTitleOrFallback($row);
-
-    expect($label)->toContain('movie')
-        ->and($label)->toContain('42');
-});
-
 // Adaptive poll: 5s while an in-flight row is visible, 60s otherwise
 
 it('table poll slows to 60s when no visible rows are Pending or Downloading', function () {
-    // PR #1524 reuse/efficiency: slow polling to 60s once every visible
-    // row is terminal (Completed/Failed) so the table doesn't re-render
-    // every 5s, while newly scheduled downloads still appear. The Closure passed
-    // to ->poll() is evaluated by Table::getPollingInterval(), which
-    // is what drives the wire:poll directive in the Blade view.
+    // Terminal rows only: poll slowly so the table doesn't re-render every 5s.
     $user = User::factory()->create();
     $playlist = Playlist::factory()->for($user)->create();
 
@@ -865,7 +599,7 @@ it('table poll slows to 60s when no visible rows are Pending or Downloading', fu
 
     $this->actingAs($user);
 
-    $instance = Livewire::test(CachedContentActivityWidget::class)->instance();
+    $instance = Livewire::test(ListCachedContentFiles::class)->instance();
     $reflection = new ReflectionClass($instance);
     $tableProperty = $reflection->getProperty('table');
     $tableProperty->setAccessible(true);
@@ -895,7 +629,7 @@ it('table poll resolves to 5s when at least one visible row is Downloading', fun
 
     $this->actingAs($user);
 
-    $instance = Livewire::test(CachedContentActivityWidget::class)->instance();
+    $instance = Livewire::test(ListCachedContentFiles::class)->instance();
     $table = $instance->getTable();
     expect($table->getPollingInterval())->toBe('5s');
 });

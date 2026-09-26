@@ -266,18 +266,16 @@ return [
             'maxProcesses' => $horizonIntEnv('HORIZON_AIOSTREAMS_MAX_PROCESSES', 2),
             'maxTime' => $horizonIntEnv('HORIZON_AIOSTREAMS_MAX_TIME', 1800), // recycle every 30 min, jobs are short
             'maxJobs' => $horizonIntEnv('HORIZON_AIOSTREAMS_MAX_JOBS', 300),
-            'memory' => $horizonIntEnv('HORIZON_AIOSTREAMS_MEMORY', 256),
+            'memory' => $horizonIntEnv('HORIZON_AIOSTREAMS_MEMORY', 256), // MB
             'tries' => 1, // jobs handle their own empty-result retry/backoff internally
             'timeout' => 60 * 5,
             'nice' => 5,
         ],
 
-        // Cache downloads (DownloadCachedContentFile + CachedContentRetentionCleanup)
-        // run here exclusively. Isolated from the general queue so a slow upsteam
-        // proxy can't stall import / sync work, and so a 1-hour cache-download timeout
-        // doesn't pollute the general queue's timeout budget. SQLite deployments
-        // collapse to maxProcesses=1 to avoid lock contention (mirrors the
-        // m3u-editor-queue pattern).
+        // Cached content downloads (DownloadCachedContentFile) run here only, so a
+        // slow provider or a 1-hour download can't stall import/sync work. The job
+        // itself allows one download per playlist at a time; maxProcesses caps
+        // downloads across playlists. SQLite deployments collapse to 1 process.
         'cache-queue' => [
             'connection' => 'redis',
             'queue' => ['cache'],

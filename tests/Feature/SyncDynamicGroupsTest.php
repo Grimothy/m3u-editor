@@ -186,16 +186,7 @@ it('drops stale membership rows when faked results change on a re-run', function
 // Job: rule removed from config
 // ──────────────────────────────────────────────────────────────────────────────
 
-it('tombstones the DynamicGroup row (enabled=false) when the rule is removed from config (Phase 2 / PR E soft-unshare fix)', function () {
-    // Phase 2 / PR E fix: PR #1500 hard-deleted the DynamicGroup row when
-    // the rule was removed, which cascade-deleted the pivot rows in
-    // `cached_content_file_dynamic_groups` BEFORE the retention sweep
-    // could see them. PR E keeps the DynamicGroup row as a tombstone
-    // (enabled=false) and soft-unshares the pivot rows instead. The
-    // pivot rows therefore SURVIVE the rename/disable path so
-    // CachedContentRetentionService can apply the per-rule retention
-    // mode (or the match_group_lifetime fallback) instead of seeing
-    // zero references and hard-deleting the file.
+it('deletes the DynamicGroup row (and cascades its items) when the rule is removed from config', function () {
     Http::fake([
         'https://api.themoviedb.org/3/trending/movie/week*' => Http::response([
             'results' => [
@@ -229,12 +220,7 @@ it('tombstones the DynamicGroup row (enabled=false) when the rule is removed fro
     $this->playlist->update(['dynamic_groups_config' => []]);
     (new SyncDynamicGroups(playlistId: $this->playlist->id))->handle();
 
-    // The DynamicGroup row SURVIVES (tombstoned via enabled=false).
-    // PR #1500 deleted it here; PR E keeps it so the pivot rows can be
-    // soft-unshared in the same pass.
-    expect(DynamicGroup::where('playlist_id', $this->playlist->id)->count())->toBe(1);
-    $tombstone = DynamicGroup::where('playlist_id', $this->playlist->id)->sole();
-    expect($tombstone->enabled)->toBeFalse();
+    expect(DynamicGroup::where('playlist_id', $this->playlist->id)->count())->toBe(0);
 });
 
 // ──────────────────────────────────────────────────────────────────────────────

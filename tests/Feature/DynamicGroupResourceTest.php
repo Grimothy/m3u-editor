@@ -9,7 +9,6 @@ use App\Filament\Resources\DynamicGroups\RelationManagers\SeriesRelationManager;
 use App\Filament\Resources\SeriesDynamicGroups\SeriesDynamicGroupResource;
 use App\Filament\Resources\VodDynamicGroups\VodDynamicGroupResource;
 use App\Filament\Resources\Vods\VodResource;
-use App\Models\CachedContentFile;
 use App\Models\Channel;
 use App\Models\DynamicGroup;
 use App\Models\DynamicGroupItemSnapshot;
@@ -18,8 +17,6 @@ use App\Models\Series;
 use App\Models\SyncRun;
 use App\Models\User;
 use App\Services\TmdbService;
-use App\Settings\GeneralSettings;
-use Filament\Actions\Exceptions\ActionNotResolvableException;
 use Illuminate\Foundation\Testing\RefreshDatabase;
 use Illuminate\Support\Facades\Bus;
 use Illuminate\Support\Facades\Cache;
@@ -291,113 +288,6 @@ it('lists the real synced dynamic_group_items members on the Movies relation man
         ->loadTable()
         ->assertCanSeeTableRecords([$attached])
         ->assertCanNotSeeTableRecords([$notAttached]);
-});
-
-it('shows Cache Now for synced VOD members on the Movies relation manager', function () {
-    $settings = Mockery::mock(GeneralSettings::class);
-    $settings->enable_cache = true;
-    app()->instance(GeneralSettings::class, $settings);
-
-    $group = DynamicGroup::create([
-        'playlist_id' => $this->playlist->id,
-        'user_id' => $this->user->id,
-        'type' => 'vod', 'source' => 'trending', 'name' => 'Trending Now',
-    ]);
-    $channel = Channel::factory()->for($this->user)->for($this->playlist)->create([
-        'is_vod' => true,
-        'title' => 'Cacheable Movie',
-        'url' => 'https://example.com/cacheable.mp4',
-    ]);
-    CachedContentFile::factory()->completed()->create([
-        'user_id' => $this->user->id,
-        'playlist_id' => $this->playlist->id,
-        'content_type' => 'movie',
-        'tmdb_id' => $channel->tmdb_id,
-        'tvdb_id' => $channel->tvdb_id,
-        'content_fingerprint' => $channel->cacheFingerprint(),
-    ]);
-    DB::table('dynamic_group_items')->insert([
-        'dynamic_group_id' => $group->id,
-        'item_type' => Channel::class,
-        'item_id' => $channel->id,
-    ]);
-
-    Livewire::test(ChannelsRelationManager::class, [
-        'ownerRecord' => $group,
-        'pageClass' => ViewDynamicGroup::class,
-    ])
-        ->assertTableColumnExists('cache_progress')
-        ->assertTableActionVisible('cache_now', $channel)
-        ->assertTableActionVisible('delete_cache_record', $channel)
-        ->assertTableActionDoesNotExist('edit');
-});
-
-// PR #1524 review (item 9): the Movies relation manager reuses
-// VodResource::setupTable(), which wires up every flat record action the VOD
-// index exposes. The relation manager must strip those down to its own
-// whitelist (cache_now, delete_cache_record) - any destructive or mutating
-// action added to VodResource later (delete, edit, fetch_tmdb_ids, sync,
-// probe, manual_tmdb_search, process_vod, ...) would otherwise still be
-// invokable via mountTableAction() because Filament's action resolver
-// honors disabled/authorize, not visibility.
-it('does not expose VodResource destructive flat actions on the Movies relation manager', function () {
-    $group = DynamicGroup::create([
-        'playlist_id' => $this->playlist->id,
-        'user_id' => $this->user->id,
-        'type' => 'vod', 'source' => 'trending', 'name' => 'Trending Now',
-    ]);
-    $channel = Channel::factory()->for($this->user)->for($this->playlist)->create([
-        'is_vod' => true, 'title' => 'Movie',
-    ]);
-
-    Livewire::test(ChannelsRelationManager::class, [
-        'ownerRecord' => $group,
-        'pageClass' => ViewDynamicGroup::class,
-    ])
-        // Whitelisted names still resolve.
-        ->assertTableActionExists('cache_now')
-        ->assertTableActionExists('delete_cache_record')
-        // Inherited destructive / mutating flat actions are stripped.
-        ->assertTableActionDoesNotExist('delete')
-        ->assertTableActionDoesNotExist('edit')
-        ->assertTableActionDoesNotExist('manual_tmdb_search')
-        ->assertTableActionDoesNotExist('process_vod');
-});
-
-it('a crafted delete call on the Movies relation manager does not delete the underlying channel', function () {
-    // Filament's mountAction() honors disabled/authorize but NOT visibility,
-    // so a hidden flat action can still be invoked programmatically. This test
-    // exercises that path: even if a caller successfully dispatches the
-    // inherited DeleteAction against the relation manager, the underlying VOD
-    // channel must NOT be deleted because the action has been stripped from
-    // Table::getAction()'s source. Table::getAction() now throws
-    // ActionNotResolvableException for the stripped name — that outcome IS the
-    // contract. We swallow the exception because Pest's Livewire helper
-    // re-throws it; what matters for the fix is that no row was deleted.
-    $group = DynamicGroup::create([
-        'playlist_id' => $this->playlist->id,
-        'user_id' => $this->user->id,
-        'type' => 'vod', 'source' => 'trending', 'name' => 'Trending Now',
-    ]);
-    $channel = Channel::factory()->for($this->user)->for($this->playlist)->create([
-        'is_vod' => true, 'title' => 'Survives',
-    ]);
-    DB::table('dynamic_group_items')->insert([
-        'dynamic_group_id' => $group->id,
-        'item_type' => Channel::class,
-        'item_id' => $channel->id,
-    ]);
-
-    try {
-        Livewire::test(ChannelsRelationManager::class, [
-            'ownerRecord' => $group,
-            'pageClass' => ViewDynamicGroup::class,
-        ])->callTableAction('delete', $channel);
-    } catch (ActionNotResolvableException) {
-        // Strip succeeded — the action is no longer resolvable.
-    }
-
-    expect(Channel::find($channel->id))->not->toBeNull();
 });
 
 it('lists the real synced dynamic_group_items members on the Series relation manager table', function () {

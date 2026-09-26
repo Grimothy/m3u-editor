@@ -22,7 +22,7 @@ class CacheContentCleanupCommand extends Command
     protected $signature = 'cache:cleanup
                                 {--dry-run : Report what would be deleted without deleting}';
 
-    protected $description = 'Delete cached files whose content is no longer in any live playlist scope';
+    protected $description = 'Delete cached files whose channel or episode is no longer in its playlist';
 
     public function handle(CachedContentRetentionService $service): int
     {

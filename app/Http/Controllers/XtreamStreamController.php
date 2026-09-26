@@ -2,7 +2,6 @@
 
 namespace App\Http\Controllers;
 
-use App\Enums\CachedContentFileStatus;
 use App\Http\Controllers\Api\M3uProxyApiController;
 use App\Models\CachedContentFile;
 use App\Models\Channel;
@@ -348,11 +347,7 @@ class XtreamStreamController extends Controller
         $format = $format ?? 'ts'; // Default to 'ts' if no format provided
         [$playlist, $channel, $playlistAuth] = $this->findAuthenticatedPlaylistAndStreamModel($username, $password, $streamId, 'vod');
         if ($channel instanceof Channel) {
-            // Cache-hit gate (PR C): if a Completed CachedContentFile exists for this
-            // channel's content fingerprint, redirect to the cache stream URL. The
-            // gate respects `enable_cache` on BOTH serve and dispatch (PR #1500 review
-            // constraint #3) so disabling after caching stops serving. Lazy-dispatch
-            // (caching on first watch) is left to PR D and is currently off by default.
+            // Serve a locally cached copy when one is available (see resolveCacheHit()).
             if ($cacheRedirect = $this->resolveCacheHit($channel, $playlist, $username, $password, $format)) {
                 return $cacheRedirect;
             }
@@ -403,9 +398,7 @@ class XtreamStreamController extends Controller
         $format = $format ?? 'mp4'; // Default to 'mp4' if no format provided
         [$playlist, $episode, $playlistAuth] = $this->findAuthenticatedPlaylistAndStreamModel($username, $password, $streamId, 'episode');
         if ($episode instanceof Episode) {
-            // Cache-hit gate (PR C): see handleVod() for full rationale. Same gate
-            // applied to episodes, keyed by content_type=episode and the season/episode
-            // numbers in the fingerprint input.
+            // Serve a locally cached copy when one is available (see resolveCacheHit()).
             if ($cacheRedirect = $this->resolveCacheHit($episode, $playlist, $username, $password, $format)) {
                 return $cacheRedirect;
             }
@@ -539,31 +532,15 @@ class XtreamStreamController extends Controller
     }
 
     /**
-     * Cache-hit gate. Returns a Redirect to the cache stream URL if a
-     * Completed `CachedContentFile` exists for the given Channel/Episode,
-     * or null to fall through to the existing redirect/proxy logic.
+     * Cache-hit gate. Redirects to the cached-content stream route when a
+     * playable cached file exists for this item (its own, or one shared by
+     * another of the same user's playlists), otherwise returns null so the
+     * normal live/proxy path runs.
      *
-     * The `enable_cache` toggle gates BOTH serve and dispatch. When off,
-     * even with a Completed row present, returns null so disabling after
-     * caching stops serving.
-     *
-     * The fingerprint is `Channel::cacheFingerprint()` or
-     * `Episode::cacheFingerprint()` - the single source of truth shared
-     * with the dispatcher and retention sweep.
-     *
-     * Servability (PR #1524 review items 1 + 2): the gate uses
-     * `CachedContentFile::scopeServableForPlaylist()` so a Completed row
-     * shared by another of the same user's playlists (with
-     * `share_cache_across_playlists = true`) is honored. Cross-USER
-     * sharing is never allowed - the scope subquery filters sharing
-     * candidates by `playlists.user_id = $playlist->user_id`.
-     *
-     * Numeric-id collision guard: `cached_content_files.playlist_id` is
-     * a FK into `playlists` (not polymorphic). When the caller passes a
-     * CustomPlaylist / MergedPlaylist / PlaylistAlias, their numeric
-     * `id` could collide with a real Playlist id. Reject non-Playlist
-     * types here so the cache-hit gate never matches a row that belongs
-     * to an unrelated plain Playlist.
+     * Skipped entirely while `enable_cache` is off, and for Custom/Merged
+     * playlists and aliases (only plain Playlists own cached files). A row
+     * whose file is missing on disk falls back to live instead of sending
+     * the client to a 404.
      */
     private function resolveCacheHit(Channel|Episode $item, Playlist|CustomPlaylist|MergedPlaylist|PlaylistAlias $playlist, string $username, string $password, string $routeFormat): ?RedirectResponse
     {
@@ -575,20 +552,13 @@ class XtreamStreamController extends Controller
             return null;
         }
 
-        $fingerprint = $item->cacheFingerprint();
+        $cached = CachedContentFile::findServableFor($item);
 
-        $cached = CachedContentFile::query()
-            ->servableForPlaylist($playlist)
-            ->where('content_fingerprint', $fingerprint)
-            ->where('status', CachedContentFileStatus::Completed->value)
-            ->orderByRaw('CASE WHEN playlist_id = ? THEN 0 ELSE 1 END', [$playlist->id])
-            ->first();
-
-        if ($cached === null || ! $cached->hasFilePath()) {
+        if ($cached === null || ! $cached->isPlayable()) {
             return null;
         }
 
-        return Redirect::to(route('dynamic-group-cache.stream', [
+        return Redirect::to(route('cached-content.stream', [
             'username' => $username,
             'password' => $password,
             'uuid' => $cached->uuid,

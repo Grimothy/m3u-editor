@@ -7,15 +7,25 @@ use Illuminate\Database\Eloquent\Builder;
 use Illuminate\Database\Eloquent\Factories\HasFactory;
 use Illuminate\Database\Eloquent\Model;
 use Illuminate\Database\Eloquent\Relations\BelongsTo;
-use Illuminate\Database\Eloquent\Relations\BelongsToMany;
+use Illuminate\Database\Eloquent\Relations\MorphTo;
 use Illuminate\Support\Carbon;
+use Illuminate\Support\Facades\Storage;
 use Illuminate\Support\Str;
 
 /**
+ * A locally cached copy of one VOD channel or series episode.
+ *
+ * Each row belongs to exactly one source item (`cacheable`: a Channel or
+ * an Episode). `content_fingerprint` is the item's TMDB/TVDB identity and
+ * is only used to find a copy that another of the same user's playlists
+ * shares (see `scopeSharedWithPlaylist()`).
+ *
  * @property int $id
  * @property string $uuid
  * @property int|null $user_id
  * @property int|null $playlist_id
+ * @property string $cacheable_type
+ * @property int $cacheable_id
  * @property string $content_type
  * @property string|null $tmdb_id
  * @property string|null $tvdb_id
@@ -36,22 +46,27 @@ use Illuminate\Support\Str;
  * @property Carbon|null $last_failed_at
  * @property string|null $last_error_message
  * @property int $failure_count
- * @property bool $never_expire
  * @property Carbon $created_at
  * @property Carbon $updated_at
  *
  * @method static Builder<static> ownedBy(int $userId)
- * @method static Builder<static> ownedByPlaylist(int $playlistId)
- * @method static Builder<static> ownedByDynamicGroup(int $dynamicGroupId)
- * @method static Builder<static> servableForPlaylist(Playlist|int $playlist)
+ * @method static Builder<static> sharedWithPlaylist(Playlist|int $playlist)
+ * @method static Builder<static> servableFor(Channel|Episode $item)
  */
 class CachedContentFile extends Model
 {
     use HasFactory;
 
+    /**
+     * Storage disk every cached file is written to (config/filesystems.php).
+     */
+    public const DISK = 'cache';
+
     protected $fillable = [
         'user_id',
         'playlist_id',
+        'cacheable_type',
+        'cacheable_id',
         'content_type',
         'tmdb_id',
         'tvdb_id',
@@ -72,7 +87,6 @@ class CachedContentFile extends Model
         'last_failed_at',
         'last_error_message',
         'failure_count',
-        'never_expire',
     ];
 
     /**
@@ -83,7 +97,6 @@ class CachedContentFile extends Model
         return [
             'status' => CachedContentFileStatus::class,
             'failure_count' => 'integer',
-            'never_expire' => 'boolean',
             'last_verified_at' => 'datetime',
             'last_failed_at' => 'datetime',
             'last_progress_at' => 'datetime',
@@ -122,14 +135,10 @@ class CachedContentFile extends Model
      * - content_type: lowercased+trimmed, REQUIRED (throws if empty)
      * - quality: lowercased+trimmed
      * - tmdb_id/tvdb_id: string-coerced
-     * - season_number/episode_number: (int) cast then stringified (no leading zeros)
-     * - local_key: OPTIONAL disambiguator appended ONLY when both tmdb_id
-     *   and tvdb_id are empty (i.e. the content has no external identity we
-     *   can match on). Without it, two unmatched movies on the same playlist
-     *   would collapse to one fingerprint and one cache row - see PR #1524
-     *   review item 6. When set, rows keyed by a local_key are naturally
-     *   unique to their source and CANNOT be shared across playlists (the
-     *   fingerprint is per-row); this is intentional and acceptable.
+     * - season_number/episode_number: (int) cast then stringified
+     * - local_key: appended only when both tmdb_id and tvdb_id are empty, so
+     *   unmatched items never look like the same content (and so can never
+     *   be shared across playlists).
      *
      * @param  array{content_type: string, tmdb_id?: string|int|null, tvdb_id?: string|int|null, season_number?: int|null, episode_number?: int|null, quality?: string|null, local_key?: string|null}  $parts
      */
@@ -150,9 +159,6 @@ class CachedContentFile extends Model
 
         $base = $contentType.':'.$tmdbId.':'.$tvdbId.':'.$seasonStr.':'.$episodeStr.':'.$quality;
 
-        // Only attach the local_key segment when BOTH external ids are empty.
-        // Matched content fingerprints stay byte-identical to the prior
-        // contract - existing tests pin those exact strings.
         $localKey = $parts['local_key'] ?? null;
         if ($localKey !== null && $localKey !== '' && $tmdbId === '' && $tvdbId === '') {
             return $base.':'.(string) $localKey;
@@ -170,28 +176,13 @@ class CachedContentFile extends Model
     }
 
     /**
-     * Cache key used to signal cancellation of an in-flight (Downloading)
-     * download to the worker running DownloadCachedContentFile::handle().
-     * Keyed by row id, which is never reused (Postgres bigserial), so a
-     * cancelled row's key can never collide with a later, unrelated
-     * dispatch for the same content.
-     *
-     * Covers BOTH windows:
-     *  - Pending rows: the widget writes the flag, then deletes the row.
-     *    The worker's `find()` returns null and it exits cleanly before
-     *    doing anything.
-     *  - Already-reclaimed (Downloading) rows: the worker polls the key
-     *    from `checkCancellation()` and aborts the stream.
-     *
-     * The previous fingerprint-keyed `pendingCancellationCacheKey` was
-     * removed because deleting the row before pickup already covers the
-     * Pending window, and a fingerprint-scoped flag with a TTL would
-     * silently suppress the NEXT legitimate dispatch for the same content
-     * if the flag outlived the original cancel.
+     * Cache-store key used to signal cancellation of an in-flight download
+     * to the worker running DownloadCachedContentFile. Keyed by row id,
+     * which is never reused.
      */
     public static function cancellationCacheKey(int $id): string
     {
-        return "dynamic-group-cache:cancel:{$id}";
+        return "cached-content:cancel:{$id}";
     }
 
     /**
@@ -203,44 +194,15 @@ class CachedContentFile extends Model
     }
 
     /**
-     * DynamicGroups that requested this file cached (Phase 2 / PR E).
-     *
-     * Many-to-many via the `cached_content_file_dynamic_groups` pivot.
-     * The pivot carries `dropped_at` (nullable timestamp) so the relation
-     * can be filtered to "live" (unshared) rows with
-     * `->wherePivot('dropped_at', null)` at the call site. The
-     * `scopeOwnedByDynamicGroup()` below applies that filter at the query
-     * level — callers that just want "the rows this group ever cached"
-     * should call `->dynamicGroups()` directly and check `pivot->dropped_at`
-     * in PHP.
-     *
-     * `withPivot('dropped_at')` exposes the column on the pivot model
-     * for both reads (retention checks) and writes (SyncDynamicGroups'
-     * soft-unshare path).
+     * The Channel or Episode this file was downloaded for.
      */
-    public function dynamicGroups(): BelongsToMany
+    public function cacheable(): MorphTo
     {
-        return $this->belongsToMany(
-            DynamicGroup::class,
-            'cached_content_file_dynamic_groups',
-        )->withPivot('dropped_at')->withTimestamps();
+        return $this->morphTo();
     }
 
     /**
      * Filter to cached files owned by the given user.
-     *
-     * Ownership is stored directly on `cached_content_files.user_id` (PR A
-     * migration `2026_09_16_120000_add_user_id_to_cached_content_files_table`)
-     * so this is a single `where user_id = ?` with no pivot traversal.
-     *
-     * Rows with `user_id IS NULL` (historical rows predating the column)
-     * are intentionally excluded — they have no claimable owner and must
-     * not leak across users.
-     *
-     * Admin bypass is intentionally NOT in this scope. Callers that need
-     * admin visibility (the activity widget in PR D) wrap the query at
-     * a higher layer: `->when(! auth()->user()?->isAdmin(), fn ($q) =>
-     * $q->ownedBy(auth()->id()))`.
      *
      * @param  Builder<static>  $query
      * @return Builder<static>
@@ -251,104 +213,77 @@ class CachedContentFile extends Model
     }
 
     /**
-     * Filter to cached files owned by the given playlist.
+     * Filter to cached files that another of the same user's playlists
+     * shares with `$playlist` (`share_cache_across_playlists = true` on the
+     * owning playlist). Never matches rows owned by a different user, and
+     * never matches `$playlist`'s own rows.
      *
-     * Used by PR B's source-owns-file sharing rule: cross-playlist
-     * dedup looks for Completed rows stamped with the source playlist's
-     * id (and only honors them when that playlist has
-     * `share_cache_across_playlists` enabled).
-     *
-     * @param  Builder<static>  $query
-     * @return Builder<static>
-     */
-    public function scopeOwnedByPlaylist(Builder $query, int $playlistId): Builder
-    {
-        return $query->where('playlist_id', $playlistId);
-    }
-
-    /**
-     * Filter to cached files currently linked to a live (unshared)
-     * DynamicGroup pivot row.
-     *
-     * Phase 2 / PR E addition. `dropped_at IS NULL` is the live-membership
-     * gate — a soft-unshared pivot row (renamed/disabled rule, retention
-     * sweep that found the content out of membership) is excluded here.
-     * The retention sweep uses this scope as its lookup primitive when
-     * walking the pivot from the group side; the dispatcher's
-     * pivot-INSERT path doesn't read through it (it writes, doesn't read).
-     *
-     * Implementation: a whereHas on the pivot relationship. The composite
-     * index `(dynamic_group_id, cached_content_file_id)` from migration
-     * `2026_09_16_160100_add_user_id_index_to_cached_content_file_dynamic_groups`
-     * keeps this lookup indexed.
+     * Accepts a Playlist or its id; the owner's user_id is resolved in a
+     * subquery so hot per-row callers don't need to load the Playlist.
      *
      * @param  Builder<static>  $query
      * @return Builder<static>
      */
-    public function scopeOwnedByDynamicGroup(Builder $query, int $dynamicGroupId): Builder
-    {
-        return $query->whereHas('dynamicGroups', function (Builder $q) use ($dynamicGroupId): void {
-            $q->where('dynamic_groups.id', $dynamicGroupId)
-                ->whereNull('cached_content_file_dynamic_groups.dropped_at');
-        });
-    }
-
-    /**
-     * Filter to cached files that the given playlist is allowed to serve.
-     *
-     * "Servable" covers two cases:
-     *  - The row's own playlist IS `$playlist` (the playlist that originally
-     *    cached the file).
-     *  - The row belongs to a DIFFERENT playlist owned by the same user that
-     *    has `share_cache_across_playlists = true` (cross-playlist sharing
-     *    within a single user only; never across users).
-     *
-     * Accepts either a loaded `Playlist` model or just its `int` id. The
-     * int path (used by hot per-row code like `Channel::isCached()`)
-     * resolves the owner `user_id` via a nested scalar subquery so the
-     * caller doesn't have to `->playlist` eager-load - on a 50-row
-     * Filament table that's the difference between 1 query/row and
-     * 2 queries/row (the relation load + the cached-content lookup).
-     *
-     * The OR-with-subquery uses an inline whereIn over a correlated
-     * `playlists` lookup so we don't pull a list of sharing playlist ids
-     * into PHP and re-issue a second query. The composite
-     * `(content_fingerprint, playlist_id)` unique index from migration
-     * `2026_09_16_120100_add_playlist_id_...` is the lookup path for the
-     * owning-playlist branch; the sharing branch re-uses
-     * `playlists.user_id` and the existing `playlists.user_id` index.
-     *
-     * Callers that want the OWN playlist row preferred over a shared row
-     * pair this scope with `->orderByRaw('playlist_id = ? desc', [$playlistId])`.
-     *
-     * @param  Builder<static>  $query
-     * @return Builder<static>
-     */
-    public function scopeServableForPlaylist(Builder $query, Playlist|int $playlist): Builder
+    public function scopeSharedWithPlaylist(Builder $query, Playlist|int $playlist): Builder
     {
         $playlistId = $playlist instanceof Playlist ? (int) $playlist->id : (int) $playlist;
 
-        return $query->where(function (Builder $q) use ($playlistId): void {
-            $q->where('playlist_id', $playlistId)
-                ->orWhereIn('playlist_id', function ($sub) use ($playlistId): void {
-                    $sub->select('id')
+        return $query->whereIn('playlist_id', function ($sub) use ($playlistId): void {
+            $sub->select('id')
+                ->from('playlists')
+                ->where('share_cache_across_playlists', true)
+                ->where('id', '!=', $playlistId)
+                ->where('user_id', function ($userSub) use ($playlistId): void {
+                    $userSub->select('user_id')
                         ->from('playlists')
-                        ->where('share_cache_across_playlists', true)
-                        ->where('id', '!=', $playlistId)
-                        // Nested scalar subquery: re-resolve the requester
-                        // playlist's user_id so we don't have to load the
-                        // Playlist model just to read it.
-                        ->where('user_id', function ($userSub) use ($playlistId): void {
-                            $userSub->select('user_id')
-                                ->from('playlists')
-                                ->where('id', $playlistId);
-                        });
+                        ->where('id', $playlistId);
                 });
         });
     }
 
     /**
-     * Whether this cached file has a completed file on disk.
+     * Filter to Completed rows that can serve `$item`: the item's own row,
+     * or a copy of the same content shared by another of the same user's
+     * playlists. Unmatched items (no TMDB/TVDB id) have a per-item
+     * fingerprint, so they only ever match their own row.
+     *
+     * @param  Builder<static>  $query
+     * @return Builder<static>
+     */
+    public function scopeServableFor(Builder $query, Channel|Episode $item): Builder
+    {
+        $playlistId = (int) $item->playlist_id;
+        $fingerprint = $item->cacheFingerprint();
+
+        return $query
+            ->where('status', CachedContentFileStatus::Completed->value)
+            ->where(function (Builder $q) use ($item, $playlistId, $fingerprint): void {
+                $q->whereMorphedTo('cacheable', $item)
+                    ->orWhere(function (Builder $shared) use ($playlistId, $fingerprint): void {
+                        $shared->where('content_fingerprint', $fingerprint)
+                            ->sharedWithPlaylist($playlistId);
+                    });
+            });
+    }
+
+    /**
+     * Find the Completed cached file that can serve `$item`, preferring the
+     * item's own row over a shared copy. Returns null when there is none.
+     */
+    public static function findServableFor(Channel|Episode $item): ?self
+    {
+        if (! $item->playlist_id) {
+            return null;
+        }
+
+        return static::query()
+            ->servableFor($item)
+            ->orderByRaw('CASE WHEN cacheable_type = ? AND cacheable_id = ? THEN 0 ELSE 1 END', [$item->getMorphClass(), $item->getKey()])
+            ->first();
+    }
+
+    /**
+     * Whether this row is Completed and has a file path recorded.
      */
     public function hasFilePath(): bool
     {
@@ -356,11 +291,55 @@ class CachedContentFile extends Model
     }
 
     /**
+     * Whether this row is Completed and its file is actually present on disk.
+     * Playback checks this before redirecting so a missing file falls back to
+     * the live provider stream instead of a 404.
+     */
+    public function isPlayable(): bool
+    {
+        if (! $this->hasFilePath()) {
+            return false;
+        }
+
+        try {
+            return Storage::disk($this->resolveStorageDisk())->exists($this->file_path);
+        } catch (\Throwable) {
+            return false;
+        }
+    }
+
+    /**
+     * Delete the file on disk (if any). Failures are swallowed; the caller
+     * decides what to do with the row.
+     */
+    public function deleteStoredFile(): void
+    {
+        if (empty($this->file_path)) {
+            return;
+        }
+
+        try {
+            Storage::disk($this->resolveStorageDisk())->delete($this->file_path);
+        } catch (\Throwable) {
+            // Missing file or unwritable disk; nothing else to clean up.
+        }
+    }
+
+    /**
      * Resolve the storage disk this cached file lives on.
      */
     public function resolveStorageDisk(): string
     {
-        return $this->disk ?: config('filesystems.default');
+        return $this->disk ?: self::DISK;
+    }
+
+    /**
+     * Relative path on the cache disk for this row's file. Uses the row
+     * uuid (never shared between rows), grouped by playlist.
+     */
+    public function storagePathFor(string $extension): string
+    {
+        return ($this->playlist_id ?? 'unassigned').'/'.$this->uuid.'.'.ltrim($extension, '.');
     }
 
     /**
@@ -368,9 +347,11 @@ class CachedContentFile extends Model
      */
     public function resolveMimeType(): string
     {
-        return match (strtolower(pathinfo($this->file_path, PATHINFO_EXTENSION))) {
-            'mp4' => 'video/mp4',
+        return match (strtolower(pathinfo((string) $this->file_path, PATHINFO_EXTENSION))) {
+            'mp4', 'm4v' => 'video/mp4',
             'mkv' => 'video/x-matroska',
+            'avi' => 'video/x-msvideo',
+            'webm' => 'video/webm',
             default => 'video/mp2t',
         };
     }

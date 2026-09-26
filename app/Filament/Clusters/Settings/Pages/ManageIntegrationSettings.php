@@ -28,7 +28,7 @@ class ManageIntegrationSettings extends BaseSettingsPage
 
     protected static ?string $slug = 'integrations';
 
-    protected static ?int $navigationSort = 10;
+    protected static ?int $navigationSort = 11;
 
     public static function getNavigationLabel(): string
     {
@@ -402,39 +402,6 @@ class ManageIntegrationSettings extends BaseSettingsPage
                                             ->inline(false)
                                             ->columnSpanFull()
                                             ->helperText(__('When enabled, individual stream URLs in generated playlists and Xtream API responses will be rewritten to route through MediaFlow Proxy. Applies only when the m3u-proxy is not already in use for a given playlist or stream.')),
-                                    ]),
-                            ]),
-                        Tab::make(__('Cache'))
-                            ->id('cache')
-                            ->icon('heroicon-m-circle-stack')
-                            ->schema([
-                                Section::make(__('Cache'))
-                                    ->description(__('Configure the standalone per-Channel / per-Episode content cache. When enabled, the Xtream API serves cached files for completed downloads and the dispatch path can lazily cache new content on first play.'))
-                                    ->columnSpanFull()
-                                    ->icon('heroicon-m-circle-stack')
-                                    ->collapsible()
-                                    ->columns(2)
-                                    ->schema([
-                                        Toggle::make('enable_cache')
-                                            ->label(__('Enable cache'))
-                                            ->inline(false)
-                                            ->live()
-                                            ->helperText(__('Master switch for the standalone content cache. When off, the cache-hit gate stops serving cached files and the dispatcher stops queuing new downloads. Existing cached files are kept but ignored.'))
-                                            ->default(false),
-                                        Select::make('cache_retention_mode')
-                                            ->label(__('Cache retention mode'))
-                                            ->options([
-                                                'never-expire' => __('Never expire'),
-                                                'time-based' => __('Automatic (remove when content leaves the playlist)'),
-                                                'manual' => __('Manual'),
-                                            ])
-                                            ->default('time-based')
-                                            ->helperText(__('How cached files are kept across the cleanup job. "Never expire" and "Manual" both disable automatic cleanup. "Automatic" removes a cached file once its content is no longer live in its owning playlist.')),
-                                        Toggle::make('default_share_cache_across_playlists')
-                                            ->label(__('Share cache across playlists by default'))
-                                            ->inline(false)
-                                            ->helperText(__('Default value for the per-playlist "Share cache across playlists" toggle. When on, a cached file owned by this playlist is reused by other playlists pointing at the same content (subject to per-playlist overrides).'))
-                                            ->default(false),
                                     ]),
                             ]),
                     ]),

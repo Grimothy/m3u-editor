@@ -3,6 +3,7 @@
 use App\Enums\CachedContentFileStatus;
 use App\Filament\Resources\Series\Pages\ListSeries;
 use App\Filament\Resources\Series\RelationManagers\EpisodesRelationManager;
+use App\Filament\Resources\Series\SeriesResource;
 use App\Jobs\DownloadCachedContentFile;
 use App\Models\CachedContentFile;
 use App\Models\Episode;
@@ -11,10 +12,12 @@ use App\Models\Season;
 use App\Models\Series;
 use App\Models\User;
 use App\Settings\GeneralSettings;
+use Filament\Actions\ActionGroup;
 use Filament\Actions\Testing\TestAction;
 use Illuminate\Foundation\Testing\RefreshDatabase;
 use Illuminate\Support\Facades\Bus;
 use Illuminate\Support\Facades\DB;
+use Illuminate\Support\Facades\Storage;
 use Livewire\Livewire;
 
 uses(RefreshDatabase::class);
@@ -29,25 +32,21 @@ function setEnableCacheForEpisodeTest(bool $value): void
 beforeEach(function () {
     setEnableCacheForEpisodeTest(true);
     Bus::fake();
+    Storage::fake(CachedContentFile::DISK);
     $this->user = User::factory()->create();
     $this->actingAs($this->user);
+    $this->playlist = Playlist::factory()->for($this->user)->create();
 });
 
 /**
- * Build a Series + Season + Episode row owned by $user with the given
- * season/episode numbers. Returns the Episode model.
- *
- * The Episode factory defaults to Playlist::factory() for playlist_id;
- * we explicitly stamp the parent playlist + user so Episode::isCached()
- * can resolve the cache row by playlist_id (a Playlist created via the
- * factory default would have a fresh uuid and never match the Cached
- * ContentFile row's playlist_id).
+ * Series + Season + Episode owned by $user on $playlist.
  */
-function makeCacheTestEpisode(User $user, Playlist $playlist, int $seasonNum, int $episodeNum, int $tmdbId, string $url): Episode
+function makeCacheTestEpisode(User $user, Playlist $playlist, int $seasonNum, int $episodeNum, string $url, ?Series $series = null): Episode
 {
-    $series = Series::factory()->for($user)->for($playlist)->create(['tmdb_id' => $tmdbId]);
+    $series ??= Series::factory()->for($user)->for($playlist)->create(['tmdb_id' => 1399]);
     $season = Season::factory()->for($series)->create(['season_number' => $seasonNum]);
-    $episode = Episode::factory()->for($series)->create([
+
+    return Episode::factory()->for($series)->create([
         'playlist_id' => $playlist->id,
         'user_id' => $user->id,
         'season_id' => $season->id,
@@ -55,340 +54,129 @@ function makeCacheTestEpisode(User $user, Playlist $playlist, int $seasonNum, in
         'episode_num' => $episodeNum,
         'url' => $url,
     ]);
-
-    return $episode;
 }
 
-it('renders the EpisodesRelationManager for the Series resource', function () {
-    $playlist = Playlist::factory()->for($this->user)->create();
-    $series = Series::factory()->for($this->user)->for($playlist)->create();
-
-    Livewire::test(EpisodesRelationManager::class, [
+function episodesManager(Series $series)
+{
+    return Livewire::test(EpisodesRelationManager::class, [
         'ownerRecord' => $series,
         'pageClass' => ListSeries::class,
-    ])->assertOk();
+    ]);
+}
+
+// --- episode row action ---
+
+it('shows Cache Now on an episode with a cacheable URL', function () {
+    $episode = makeCacheTestEpisode($this->user, $this->playlist, 1, 1, 'https://example.com/s1e1.mp4');
+
+    episodesManager($episode->series)->assertTableActionVisible('cache_now', $episode);
 });
 
-it('shows the Cache Now row action on an Episode with a resolvable URL', function () {
-    $playlist = Playlist::factory()->for($this->user)->create();
-    $episode = makeCacheTestEpisode($this->user, $playlist, 1, 1, 1234, 'https://example.com/s1e1.mp4');
-
-    $series = $episode->series;
-
-    Livewire::test(EpisodesRelationManager::class, [
-        'ownerRecord' => $series,
-        'pageClass' => ListSeries::class,
-    ])
-        ->assertTableActionVisible('cache_now', $episode);
-});
-
-it('hides the Cache Now row action when enable_cache is off', function () {
+it('hides Cache Now and the Cached column when caching is off', function () {
     setEnableCacheForEpisodeTest(false);
+    $episode = makeCacheTestEpisode($this->user, $this->playlist, 1, 2, 'https://example.com/s1e2.mp4');
 
-    $playlist = Playlist::factory()->for($this->user)->create();
-    $episode = makeCacheTestEpisode($this->user, $playlist, 1, 2, 2345, 'https://example.com/s1e2.mp4');
-
-    Livewire::test(EpisodesRelationManager::class, [
-        'ownerRecord' => $episode->series,
-        'pageClass' => ListSeries::class,
-    ])
-        ->assertTableActionHidden('cache_now', $episode);
+    episodesManager($episode->series)
+        ->assertTableActionHidden('cache_now', $episode)
+        ->assertTableColumnHidden('is_cached');
 });
 
-it('hides the Cache Now row action when the episode has no resolvable URL', function () {
-    $playlist = Playlist::factory()->for($this->user)->create();
-    $episode = makeCacheTestEpisode($this->user, $playlist, 1, 3, 3456, '');
+it('hides Cache Now when the episode has no URL', function () {
+    $episode = makeCacheTestEpisode($this->user, $this->playlist, 1, 3, '');
 
-    Livewire::test(EpisodesRelationManager::class, [
-        'ownerRecord' => $episode->series,
-        'pageClass' => ListSeries::class,
-    ])
-        ->assertTableActionHidden('cache_now', $episode);
+    episodesManager($episode->series)->assertTableActionHidden('cache_now', $episode);
 });
 
-it('clicking Cache Now dispatches DownloadCachedContentFile for the episode', function () {
-    $playlist = Playlist::factory()->for($this->user)->create();
-    $episode = makeCacheTestEpisode($this->user, $playlist, 2, 5, 4567, 'https://example.com/s2e5.mp4');
+it('renders Cache Now as the last row action, as a small icon button', function () {
+    $episode = makeCacheTestEpisode($this->user, $this->playlist, 1, 1, 'https://example.com/s1e1.mp4');
+    $table = episodesManager($episode->series)->instance()->getTable();
 
-    Livewire::test(EpisodesRelationManager::class, [
-        'ownerRecord' => $episode->series,
-        'pageClass' => ListSeries::class,
-    ])
+    $actions = array_values(array_filter($table->getRecordActions(), fn ($action) => ! $action instanceof ActionGroup));
+    $last = end($actions);
+
+    expect($last->getName())->toBe('cache_now')
+        ->and($last->isIconButton() || $last->isButton())->toBeTrue()
+        ->and($last->isLabelHidden())->toBeTrue()
+        ->and($last->getSize())->toBe('sm');
+});
+
+it('queues a download when Cache Now is clicked', function () {
+    $episode = makeCacheTestEpisode($this->user, $this->playlist, 1, 4, 'https://example.com/s1e4.mp4');
+
+    episodesManager($episode->series)
         ->callAction(TestAction::make('cache_now')->table($episode))
         ->assertNotified('Cache download queued');
 
     Bus::assertDispatched(DownloadCachedContentFile::class);
 });
 
-it('Cache Now on an episode that already has a Completed cached file surfaces the "Already cached" notification', function () {
-    $playlist = Playlist::factory()->for($this->user)->create();
-    $series = Series::factory()->for($this->user)->for($playlist)->create(['tmdb_id' => 5678]);
-    $season = Season::factory()->for($series)->create(['season_number' => 3]);
-    $episode = Episode::factory()->for($series)->create([
-        'playlist_id' => $playlist->id,
-        'user_id' => $this->user->id,
-        'season_id' => $season->id,
-        'season' => 3,
-        'episode_num' => 9,
-        'url' => 'https://example.com/s3e9.mp4',
-    ]);
+it('says "Already cached" when a playable file exists', function () {
+    $episode = makeCacheTestEpisode($this->user, $this->playlist, 1, 5, 'https://example.com/s1e5.mp4');
+    $file = CachedContentFile::factory()->completed()->forItem($episode)->create();
+    Storage::disk(CachedContentFile::DISK)->put($file->file_path, 'bytes');
 
-    CachedContentFile::factory()->completed()->create([
-        'user_id' => $this->user->id,
-        'playlist_id' => $playlist->id,
-        'content_type' => 'episode',
-        'tmdb_id' => '5678',
-        'season_number' => 3,
-        'episode_number' => 9,
-    ]);
-
-    Livewire::test(EpisodesRelationManager::class, [
-        'ownerRecord' => $series,
-        'pageClass' => ListSeries::class,
-    ])
+    episodesManager($episode->series)
         ->callAction(TestAction::make('cache_now')->table($episode))
         ->assertNotified('Already cached');
-
-    Bus::assertNotDispatched(DownloadCachedContentFile::class);
 });
 
-it('EpisodesRelationManager::canCacheNow returns false when enable_cache is off', function () {
+it('says "Already queued for caching" while a download is pending', function () {
+    $episode = makeCacheTestEpisode($this->user, $this->playlist, 1, 6, 'https://example.com/s1e6.mp4');
+    CachedContentFile::factory()->forItem($episode)->create();
+
+    episodesManager($episode->series)
+        ->callAction(TestAction::make('cache_now')->table($episode))
+        ->assertNotified('Already queued for caching');
+});
+
+// --- series "Cache all episodes" ---
+
+it('Cache all episodes queues every episode of the series', function () {
+    $first = makeCacheTestEpisode($this->user, $this->playlist, 1, 1, 'https://example.com/s1e1.mp4');
+    makeCacheTestEpisode($this->user, $this->playlist, 1, 2, 'https://example.com/s1e2.mp4', $first->series);
+    makeCacheTestEpisode($this->user, $this->playlist, 2, 1, 'https://example.com/s2e1.mp4', $first->series);
+
+    Livewire::test(ListSeries::class)
+        ->callAction(TestAction::make('cache_all_episodes')->table($first->series))
+        ->assertNotified('Queued 3 episodes for caching');
+
+    expect(CachedContentFile::where('status', CachedContentFileStatus::Pending)->count())->toBe(3);
+    Bus::assertDispatchedTimes(DownloadCachedContentFile::class, 3);
+});
+
+it('places Cache all episodes directly above Delete on the series row actions', function () {
+    $group = collect(SeriesResource::getTableActions())->first(fn ($action) => $action instanceof ActionGroup);
+    $names = array_map(fn ($action) => $action->getName(), $group->getActions());
+
+    expect(array_search('cache_all_episodes', $names, true))->toBe(array_search('delete', $names, true) - 1);
+});
+
+it('hides Cache all episodes when caching is off', function () {
     setEnableCacheForEpisodeTest(false);
+    $episode = makeCacheTestEpisode($this->user, $this->playlist, 1, 1, 'https://example.com/s1e1.mp4');
 
-    $playlist = Playlist::factory()->for($this->user)->create();
-    $episode = makeCacheTestEpisode($this->user, $playlist, 4, 4, 6789, 'https://example.com/s4e4.mp4');
-
-    expect(EpisodesRelationManager::canCacheNow($episode))->toBeFalse();
+    Livewire::test(ListSeries::class)->assertTableActionHidden('cache_all_episodes', $episode->series);
 });
 
-it('EpisodesRelationManager::canCacheNow returns true for an episode with a resolvable URL', function () {
-    $playlist = Playlist::factory()->for($this->user)->create();
-    $episode = makeCacheTestEpisode($this->user, $playlist, 4, 5, 7890, 'https://example.com/s4e5.mp4');
+// --- Episode::isCached() ---
 
-    expect(EpisodesRelationManager::canCacheNow($episode))->toBeTrue();
-});
-
-it('cacheNowDescription falls back to "Episode :seasonx:episode" when the title is missing', function () {
-    $playlist = Playlist::factory()->for($this->user)->create();
-    $series = Series::factory()->for($this->user)->for($playlist)->create(['tmdb_id' => 8901]);
-    $season = Season::factory()->for($series)->create(['season_number' => 5]);
-    $episode = Episode::factory()->for($series)->create([
-        'playlist_id' => $playlist->id,
-        'user_id' => $this->user->id,
-        'season_id' => $season->id,
-        'season' => 5,
-        'episode_num' => 11,
-        'title' => null,
-        'url' => 'https://example.com/s5e11.mp4',
-    ]);
-
-    $description = EpisodesRelationManager::cacheNowDescription($episode);
-
-    expect($description)->toContain('Episode 5x11');
-});
-
-it('Episode::isCached returns false when no Completed row matches', function () {
-    $playlist = Playlist::factory()->for($this->user)->create();
-    $episode = makeCacheTestEpisode($this->user, $playlist, 6, 6, 9012, 'https://example.com/s6e6.mp4');
+it('isCached() is true only for a Completed row of this episode', function () {
+    $episode = makeCacheTestEpisode($this->user, $this->playlist, 1, 1, 'https://example.com/s1e1.mp4');
 
     expect($episode->isCached())->toBeFalse();
-});
 
-it('Episode::isCached returns true when a Completed row matches the playlist + season + episode', function () {
-    $playlist = Playlist::factory()->for($this->user)->create();
-    $series = Series::factory()->for($this->user)->for($playlist)->create(['tmdb_id' => 11_111]);
-    $season = Season::factory()->for($series)->create(['season_number' => 7]);
-    $episode = Episode::factory()->for($series)->create([
-        'playlist_id' => $playlist->id,
-        'user_id' => $this->user->id,
-        'season_id' => $season->id,
-        'season' => 7,
-        'episode_num' => 13,
-        'url' => 'https://example.com/s7e13.mp4',
-    ]);
-
-    CachedContentFile::factory()->completed()->create([
-        'user_id' => $this->user->id,
-        'playlist_id' => $playlist->id,
-        'content_type' => 'episode',
-        'tmdb_id' => '11111',
-        'season_number' => 7,
-        'episode_number' => 13,
-    ]);
+    CachedContentFile::factory()->completed()->forItem($episode)->create();
 
     expect($episode->isCached())->toBeTrue();
 });
 
-it('Episode::isCached returns false when an existing row is not in Completed status', function () {
-    $playlist = Playlist::factory()->for($this->user)->create();
-    $series = Series::factory()->for($this->user)->for($playlist)->create(['tmdb_id' => 13_131]);
-    $season = Season::factory()->for($series)->create(['season_number' => 8]);
-    $episode = Episode::factory()->for($series)->create([
-        'season_id' => $season->id,
-        'season' => 8,
-        'episode_num' => 14,
-        'url' => 'https://example.com/s8e14.mp4',
-    ]);
-
-    CachedContentFile::factory()->create([
-        'user_id' => $this->user->id,
-        'playlist_id' => $playlist->id,
-        'content_type' => 'episode',
-        'tmdb_id' => '13131',
-        'season_number' => 8,
-        'episode_number' => 14,
-        'status' => CachedContentFileStatus::Failed,
-    ]);
-
-    expect($episode->isCached())->toBeFalse();
-});
-
-// --- PR #1524 review item 6: "Cache Now" on an already-queued item must
-// not surface the red "Could not queue cache" failure ---
-
-it('Cache Now on an episode with a Pending row surfaces "Already queued for caching" (not a red failure)', function () {
-    $playlist = Playlist::factory()->for($this->user)->create();
-    $series = Series::factory()->for($this->user)->for($playlist)->create(['tmdb_id' => 14_141]);
-    $season = Season::factory()->for($series)->create(['season_number' => 9]);
-    $episode = Episode::factory()->for($series)->create([
-        'playlist_id' => $playlist->id,
-        'user_id' => $this->user->id,
-        'season_id' => $season->id,
-        'season' => 9,
-        'episode_num' => 1,
-        'url' => 'https://example.com/s9e1.mp4',
-    ]);
-
-    CachedContentFile::factory()->create([
-        'user_id' => $this->user->id,
-        'playlist_id' => $playlist->id,
-        'content_type' => 'episode',
-        'tmdb_id' => '14141',
-        'season_number' => 9,
-        'episode_number' => 1,
-        'status' => CachedContentFileStatus::Pending,
-    ]);
-
-    Livewire::test(EpisodesRelationManager::class, [
-        'ownerRecord' => $series,
-        'pageClass' => ListSeries::class,
-    ])
-        ->callAction(TestAction::make('cache_now')->table($episode))
-        ->assertNotified('Already queued for caching');
-
-    Bus::assertNotDispatched(DownloadCachedContentFile::class);
-});
-
-it('Cache Now on an episode with a Downloading row surfaces "Already queued for caching"', function () {
-    $playlist = Playlist::factory()->for($this->user)->create();
-    $series = Series::factory()->for($this->user)->for($playlist)->create(['tmdb_id' => 14_242]);
-    $season = Season::factory()->for($series)->create(['season_number' => 10]);
-    $episode = Episode::factory()->for($series)->create([
-        'playlist_id' => $playlist->id,
-        'user_id' => $this->user->id,
-        'season_id' => $season->id,
-        'season' => 10,
-        'episode_num' => 2,
-        'url' => 'https://example.com/s10e2.mp4',
-    ]);
-
-    CachedContentFile::factory()->create([
-        'user_id' => $this->user->id,
-        'playlist_id' => $playlist->id,
-        'content_type' => 'episode',
-        'tmdb_id' => '14242',
-        'season_number' => 10,
-        'episode_number' => 2,
-        'status' => CachedContentFileStatus::Downloading,
-    ]);
-
-    Livewire::test(EpisodesRelationManager::class, [
-        'ownerRecord' => $series,
-        'pageClass' => ListSeries::class,
-    ])
-        ->callAction(TestAction::make('cache_now')->table($episode))
-        ->assertNotified('Already queued for caching');
-
-    Bus::assertNotDispatched(DownloadCachedContentFile::class);
-});
-
-// --- PR #1524 review efficiency fix: Episode::isCached() must be single-query + no relation load ---
-
-/**
- * Count queries against `cached_content_files` only. The series
- * relation is also lazy-loaded by `Episode::cacheFingerprint()` but is
- * outside the PR review's hot-path concern. Named uniquely to avoid
- * colliding with the same-named helper in ChannelCacheNowActionTest
- * when both files are loaded in the same PHP process.
- */
-function episodeCountCachedContentFileQueries(): int
-{
-    return collect(DB::getQueryLog())
-        ->filter(fn (array $entry): bool => str_contains(strtolower($entry['query']), 'from "cached_content_files"'))
-        ->count();
-}
-
-it('Episode::isCached() runs one cached_content_files query and does not load the playlist relation on repeated calls', function () {
-    // Per review: isCached() is called twice per row on the Episodes
-    // table (getStateUsing + tooltip closures in
-    // EpisodesRelationManager), so a 50-row page would do 100 queries +
-    // 100 relation loads without memoization + int scope.
-    $user = User::factory()->create();
-    $playlist = Playlist::factory()->for($user)->create();
-    $series = Series::factory()->for($user)->for($playlist)->create(['tmdb_id' => 60625]);
-    $episode = Episode::factory()->for($user)->for($playlist)->for($series, 'series')->create([
-        'season' => 1,
-        'episode_num' => 5,
-        'url' => 'https://example.com/memo-episode.mp4',
-    ]);
-    CachedContentFile::factory()->completed()->create([
-        'user_id' => $user->id,
-        'playlist_id' => $playlist->id,
-        'content_type' => 'episode',
-        'tmdb_id' => '60625',
-        'season_number' => 1,
-        'episode_number' => 5,
-    ]);
+it('isCached() runs a single query when the series is already loaded', function () {
+    $episode = makeCacheTestEpisode($this->user, $this->playlist, 1, 1, 'https://example.com/s1e1.mp4')->fresh(['series']);
 
     DB::enableQueryLog();
-    $first = $episode->isCached();
-    $queriesAfterFirst = episodeCountCachedContentFileQueries();
-    $relationLoadedAfterFirst = $episode->relationLoaded('playlist');
-
-    $second = $episode->isCached();
-    $queriesAfterSecond = episodeCountCachedContentFileQueries();
-    $relationLoadedAfterSecond = $episode->relationLoaded('playlist');
+    $episode->isCached();
+    $queries = DB::getQueryLog();
     DB::disableQueryLog();
 
-    expect($first)->toBeTrue()
-        ->and($second)->toBeTrue()
-        ->and($queriesAfterFirst)->toBe(1)
-        ->and($queriesAfterSecond)->toBe(1)
-        ->and($relationLoadedAfterFirst)->toBeFalse()
-        ->and($relationLoadedAfterSecond)->toBeFalse();
-});
-
-it('Episode::isCached() memoizes a false result without issuing a second cached_content_files query', function () {
-    $user = User::factory()->create();
-    $playlist = Playlist::factory()->for($user)->create();
-    $series = Series::factory()->for($user)->for($playlist)->create(['tmdb_id' => 60626]);
-    $episode = Episode::factory()->for($user)->for($playlist)->for($series, 'series')->create([
-        'season' => 1,
-        'episode_num' => 1,
-        'url' => 'https://example.com/no-cache-ep.mp4',
-    ]);
-    // No CachedContentFile row.
-
-    DB::enableQueryLog();
-    $first = $episode->isCached();
-    $queriesAfterFirst = episodeCountCachedContentFileQueries();
-    $second = $episode->isCached();
-    $queriesAfterSecond = episodeCountCachedContentFileQueries();
-    DB::disableQueryLog();
-
-    expect($first)->toBeFalse()
-        ->and($second)->toBeFalse()
-        ->and($queriesAfterFirst)->toBe(1)
-        ->and($queriesAfterSecond)->toBe(1)
-        ->and($episode->relationLoaded('playlist'))->toBeFalse();
+    expect($queries)->toHaveCount(1);
 });

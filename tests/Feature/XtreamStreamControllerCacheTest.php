@@ -12,6 +12,7 @@ use App\Settings\GeneralSettings;
 use Illuminate\Foundation\Testing\RefreshDatabase;
 use Illuminate\Support\Facades\Bus;
 use Illuminate\Support\Facades\Http;
+use Illuminate\Support\Facades\Storage;
 
 uses(RefreshDatabase::class);
 
@@ -22,6 +23,7 @@ beforeEach(function () {
     // The cache-hit gate may consult the Xtream redirect path; prevent accidental
     // outbound HTTP during tests.
     Http::preventStrayRequests();
+    Storage::fake(CachedContentFile::DISK);
 });
 
 /**
@@ -47,13 +49,11 @@ it('redirects to the cache stream when enable_cache is on and a Completed row ma
         'enabled' => true,
     ]);
 
-    $cached = CachedContentFile::factory()->completed()->create([
+    $cached = CachedContentFile::factory()->completed()->forItem($channel)->create([
         'user_id' => $user->id,
         'playlist_id' => $playlist->id,
-        'content_type' => 'movie',
-        'tmdb_id' => '550',
-        'tvdb_id' => null,
     ]);
+    Storage::disk(CachedContentFile::DISK)->put($cached->file_path, 'bytes');
 
     $response = $this->get(
         "/movie/{$user->name}/{$playlist->uuid}/{$channel->id}.mp4"
@@ -85,7 +85,7 @@ it('falls through to the existing redirect when enable_cache is on but no Comple
     expect($location)->not->toContain('/cached-content/');
 });
 
-it('does NOT serve cache when enable_cache is off, even with a Completed row present (PR #1500 regression)', function () {
+it('does NOT serve cache when enable_cache is off, even with a Completed row present ', function () {
     setEnableCache(false);
 
     $user = User::factory()->create(['name' => 'testuser'.uniqid()]);
@@ -146,16 +146,11 @@ it('redirects to the cache stream when enable_cache is on and a Completed episod
         'episode_num' => 5,
     ]);
 
-    $cached = CachedContentFile::factory()->completed()->create([
+    $cached = CachedContentFile::factory()->completed()->forItem($episode)->create([
         'user_id' => $user->id,
         'playlist_id' => $playlist->id,
-        'content_type' => 'episode',
-        'tmdb_id' => '60625',
-        'tvdb_id' => null,
-        'season_number' => 1,
-        'episode_number' => 5,
-        'quality' => null,
     ]);
+    Storage::disk(CachedContentFile::DISK)->put($cached->file_path, 'bytes');
 
     $response = $this->get(
         "/series/{$user->name}/{$playlist->uuid}/{$episode->id}.mp4"
@@ -164,7 +159,7 @@ it('redirects to the cache stream when enable_cache is on and a Completed episod
     $response->assertRedirectContains("/cached-content/{$user->name}/{$playlist->uuid}/{$cached->uuid}.mp4");
 });
 
-it('does NOT serve cache for episodes when enable_cache is off (PR #1500 regression)', function () {
+it('does NOT serve cache for episodes when enable_cache is off ', function () {
     setEnableCache(false);
 
     $user = User::factory()->create(['name' => 'testuser'.uniqid()]);
@@ -225,12 +220,12 @@ it('falls through to the existing redirect when no Completed row matches and ena
     expect($location)->not->toContain('/cached-content/');
 });
 
-// --- PR #1524 review item 2: cache-hit gate honors cross-playlist sharing ---
+// --- cross-playlist sharing ---
 
 it('cache-hit gate honors a Completed row from a same-user sharing sibling playlist', function () {
     // PlaylistA has the row and sharing ON; PlaylistB (same user, no
     // row) requests the same content. The gate must redirect to A's
-    // cached uuid - this is what was broken pre-PR #1524.
+    // cached uuid.
     setEnableCache(true);
 
     $user = User::factory()->create(['name' => 'testuser'.uniqid()]);
@@ -241,12 +236,9 @@ it('cache-hit gate honors a Completed row from a same-user sharing sibling playl
         'enabled' => true,
     ]);
 
-    $cached = CachedContentFile::factory()->completed()->create([
-        'user_id' => $user->id,
-        'playlist_id' => $playlistA->id,
-        'content_type' => 'movie',
-        'tmdb_id' => '550',
-    ]);
+    $channelA = Channel::factory()->for($playlistA)->create(['user_id' => $user->id, 'tmdb_id' => '550', 'is_vod' => true]);
+    $cached = CachedContentFile::factory()->completed()->forItem($channelA)->create();
+    Storage::disk(CachedContentFile::DISK)->put($cached->file_path, 'bytes');
 
     $response = $this->get(
         "/movie/{$user->name}/{$playlistB->uuid}/{$channel->id}.mp4"
@@ -310,4 +302,35 @@ it('cache-hit gate never honors a row owned by a different user', function () {
     $response->assertRedirect();
     $location = $response->headers->get('Location') ?? '';
     expect($location)->not->toContain('/cached-content/');
+});
+
+it('falls back to the live stream when the Completed row file is missing on disk', function () {
+    setEnableCache(true);
+
+    $user = User::factory()->create(['name' => 'testuser'.uniqid()]);
+    $playlist = Playlist::factory()->for($user)->create();
+    $channel = Channel::factory()->for($playlist)->create(['tmdb_id' => '550', 'enabled' => true]);
+    CachedContentFile::factory()->completed()->forItem($channel)->create();
+    // No file written to the cache disk (e.g. container rebuilt without a volume).
+
+    $response = $this->get("/movie/{$user->name}/{$playlist->uuid}/{$channel->id}.mp4");
+
+    $response->assertRedirect();
+    expect($response->headers->get('Location') ?? '')->not->toContain('/cached-content/');
+});
+
+it('does not serve a same-TMDB release cached for a different channel in the same playlist', function () {
+    setEnableCache(true);
+
+    $user = User::factory()->create(['name' => 'testuser'.uniqid()]);
+    $playlist = Playlist::factory()->for($user)->create(['share_cache_across_playlists' => true]);
+    $german = Channel::factory()->for($playlist)->create(['tmdb_id' => '550', 'enabled' => true]);
+    $english = Channel::factory()->for($playlist)->create(['tmdb_id' => '550', 'enabled' => true]);
+    $cached = CachedContentFile::factory()->completed()->forItem($german)->create();
+    Storage::disk(CachedContentFile::DISK)->put($cached->file_path, 'bytes');
+
+    $response = $this->get("/movie/{$user->name}/{$playlist->uuid}/{$english->id}.mp4");
+
+    $response->assertRedirect();
+    expect($response->headers->get('Location') ?? '')->not->toContain('/cached-content/');
 });

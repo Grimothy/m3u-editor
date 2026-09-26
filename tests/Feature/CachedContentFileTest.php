@@ -2,11 +2,13 @@
 
 use App\Enums\CachedContentFileStatus;
 use App\Models\CachedContentFile;
+use App\Models\Channel;
 use App\Models\Playlist;
 use App\Models\User;
 use Illuminate\Database\QueryException;
 use Illuminate\Foundation\Testing\RefreshDatabase;
 use Illuminate\Support\Facades\Bus;
+use Illuminate\Support\Facades\Storage;
 
 uses(RefreshDatabase::class);
 
@@ -142,20 +144,18 @@ it('accepts factory defaults without an explicit content_type', function () {
 // Creating event - fingerprint auto-derivation
 
 it('auto-derives content_fingerprint from parts in the creating event', function () {
-    $file = CachedContentFile::factory()->forMovie('550')->create();
+    $file = CachedContentFile::factory()->forMovie('550', '1080p')->create();
 
     expect($file->content_fingerprint)->toBe('movie:550::::1080p');
 });
 
 it('auto-generates uuid in the creating event when not supplied', function () {
-    // PR B's download service will call CachedContentFile::create([...]) /
-    // firstOrCreate(...) without a pre-supplied uuid. The `creating` boot
-    // must populate it so the NOT NULL uuid column doesn't reject the row
-    // (mirrors DvrRecording's boot convention at app/Models/DvrRecording.php:56-57).
-    // Direct ::create() bypasses the factory's definition(), so this exercises
-    // the production-style path. uuid is intentionally NOT in $fillable, so
-    // the mass-assignment drop doesn't matter here.
+    // The dispatcher calls CachedContentFile::create([...]) without a uuid;
+    // the `creating` hook must fill it.
+    $channel = Channel::factory()->create(['is_vod' => true]);
     $file = CachedContentFile::create([
+        'cacheable_type' => $channel->getMorphClass(),
+        'cacheable_id' => $channel->id,
         'content_type' => 'movie',
         'tmdb_id' => '550',
     ]);
@@ -165,7 +165,7 @@ it('auto-generates uuid in the creating event when not supplied', function () {
 });
 
 it('auto-derives episode fingerprint with season and episode', function () {
-    $file = CachedContentFile::factory()->forEpisode('60625', 1, 5)->create();
+    $file = CachedContentFile::factory()->forEpisode('60625', 1, 5, '1080p')->create();
 
     expect($file->content_fingerprint)->toBe('episode:60625::1:5:1080p');
 });
@@ -205,10 +205,10 @@ it('returns the file disk when set', function () {
     expect($file->resolveStorageDisk())->toBe('s3');
 });
 
-it('falls back to config(filesystems.default) when disk is null', function () {
+it('falls back to the cache disk when disk is null', function () {
     $file = CachedContentFile::factory()->create(['disk' => null]);
 
-    expect($file->resolveStorageDisk())->toBe(config('filesystems.default'));
+    expect($file->resolveStorageDisk())->toBe(CachedContentFile::DISK);
 });
 
 // resolveMimeType()
@@ -237,32 +237,31 @@ it('returns video/mp2t as the default for null file_path', function () {
     expect($file->resolveMimeType())->toBe('video/mp2t');
 });
 
-// Uniqueness - DB-level guard on content_fingerprint (no service-layer firstOrCreate in Phase 1).
-// Phase 2's download service will use firstOrCreate against this column.
+// Uniqueness - one cached file per source item.
 
-it('rejects a second CachedContentFile with the same (content_fingerprint, playlist_id)', function () {
-    // PR #1524 review item 1: uniqueness is per (content_fingerprint,
-    // playlist_id), not global. Two rows with the same fingerprint for
-    // the SAME playlist must still reject the second insert (the
-    // "single row per playlist per fingerprint" invariant from PR #1500).
-    $playlist = Playlist::factory()->create();
-    CachedContentFile::factory()->forMovie('550')->create(['playlist_id' => $playlist->id]);
+it('rejects a second CachedContentFile for the same channel', function () {
+    $file = CachedContentFile::factory()->create();
 
-    expect(fn () => CachedContentFile::factory()->forMovie('550')->create(['playlist_id' => $playlist->id]))
-        ->toThrow(QueryException::class);
+    expect(fn () => CachedContentFile::factory()->create([
+        'user_id' => $file->user_id,
+        'playlist_id' => $file->playlist_id,
+        'cacheable_type' => $file->cacheable_type,
+        'cacheable_id' => $file->cacheable_id,
+    ]))->toThrow(QueryException::class);
 });
 
-it('allows two CachedContentFiles with the same fingerprint on different playlists', function () {
-    // PR #1524 review item 1: different playlists are entitled to
-    // their own copy of the same content. Two different playlists can
-    // both have a row for fingerprint `movie:550::::1080p` - the
-    // composite unique covers this case.
-    $playlistA = Playlist::factory()->create();
-    $playlistB = Playlist::factory()->create();
-    CachedContentFile::factory()->forMovie('550')->create(['playlist_id' => $playlistA->id]);
-    CachedContentFile::factory()->forMovie('550')->create(['playlist_id' => $playlistB->id]);
+it('allows two channels with the same TMDB id in one playlist to each have a cached file', function () {
+    // e.g. a German and an English release of the same film.
+    $playlist = Playlist::factory()->create();
+    $german = Channel::factory()->create(['playlist_id' => $playlist->id, 'user_id' => $playlist->user_id, 'is_vod' => true, 'tmdb_id' => 550]);
+    $english = Channel::factory()->create(['playlist_id' => $playlist->id, 'user_id' => $playlist->user_id, 'is_vod' => true, 'tmdb_id' => 550]);
 
-    expect(CachedContentFile::count())->toBe(2);
+    CachedContentFile::factory()->forItem($german)->create();
+    CachedContentFile::factory()->forItem($english)->create();
+
+    expect(CachedContentFile::count())->toBe(2)
+        ->and($german->cachedContentFile)->not->toBeNull()
+        ->and($english->cachedContentFile->id)->not->toBe($german->cachedContentFile->id);
 });
 
 // --- fingerprintFor(): local_key (PR #1524 review item 6) ---
@@ -318,12 +317,7 @@ it('maps content_fingerprint status to the CachedContentFileStatus enum', functi
         ->and($failed->status)->toBe(CachedContentFileStatus::Failed);
 });
 
-// --- scopeOwnedBy() + scopeOwnedByPlaylist() - PR A ownership scopes ---
-//
-// Ownership now lives directly on cached_content_files (user_id,
-// playlist_id) - no pivot traversal. These two scopes are the only
-// filter call sites PR D's UI uses for per-user visibility and PR B's
-// dispatcher uses for the source-owns-file sharing rule.
+// --- scopeOwnedBy() ---
 
 /**
  * Seed two users each with their own playlist and one cached file.
@@ -391,122 +385,109 @@ it('scopeOwnedBy() excludes NULL user_id rows (orphan-safe)', function () {
         ->and(CachedContentFile::count())->toBe(1);  // the orphan row still exists
 });
 
-it('scopeOwnedByPlaylist() returns only rows for the given playlist_id', function () {
-    [, , $playlistA, $playlistB, $fileA, $fileB] = seedTwoUsersWithCacheFiles();
+// --- findServableFor() / scopeSharedWithPlaylist() ---
 
-    $idsA = CachedContentFile::query()->ownedByPlaylist($playlistA->id)->pluck('id')->all();
-    $idsB = CachedContentFile::query()->ownedByPlaylist($playlistB->id)->pluck('id')->all();
+/**
+ * One user with two playlists, each with a VOD channel for TMDB 550.
+ *
+ * @return array{0: Playlist, 1: Playlist, 2: Channel, 3: Channel}
+ */
+function seedSiblingPlaylistsWithSameMovie(bool $shareFromA): array
+{
+    $user = User::factory()->create();
+    $playlistA = Playlist::factory()->for($user)->create(['share_cache_across_playlists' => $shareFromA]);
+    $playlistB = Playlist::factory()->for($user)->create();
+    $channelA = Channel::factory()->create(['user_id' => $user->id, 'playlist_id' => $playlistA->id, 'is_vod' => true, 'tmdb_id' => 550]);
+    $channelB = Channel::factory()->create(['user_id' => $user->id, 'playlist_id' => $playlistB->id, 'is_vod' => true, 'tmdb_id' => 550]);
 
-    expect($idsA)->toContain($fileA->id)
-        ->and($idsA)->not->toContain($fileB->id)
-        ->and($idsB)->toContain($fileB->id)
-        ->and($idsB)->not->toContain($fileA->id);
+    return [$playlistA, $playlistB, $channelA, $channelB];
+}
+
+it('findServableFor() returns the item own Completed row', function () {
+    [, , $channelA] = seedSiblingPlaylistsWithSameMovie(false);
+    $file = CachedContentFile::factory()->completed()->forItem($channelA)->create();
+
+    expect(CachedContentFile::findServableFor($channelA)?->id)->toBe($file->id);
 });
 
-it('scopeOwnedByPlaylist() excludes NULL playlist_id rows', function () {
-    CachedContentFile::factory()->completed()->create([
-        'content_type' => 'movie',
-        'tmdb_id' => '888',
-        'playlist_id' => null,
-    ]);
-    $playlist = Playlist::factory()->create();
+it('findServableFor() ignores rows that are not Completed', function () {
+    [, , $channelA] = seedSiblingPlaylistsWithSameMovie(false);
+    CachedContentFile::factory()->downloading()->forItem($channelA)->create();
 
-    $count = CachedContentFile::query()->ownedByPlaylist($playlist->id)->count();
-
-    expect($count)->toBe(0);
+    expect(CachedContentFile::findServableFor($channelA))->toBeNull();
 });
 
-// --- scopeServableForPlaylist() - PR #1524 review items 1 + 2 ---
-//
-// The scope is the single source of truth for "is this row servable
-// for that playlist" used by the dispatcher's existing-row short-circuit,
-// the cache-hit gate, the stream controller's auth check, and
-// describeExisting(). Its two branches are: the playlist's own row, and
-// any sibling row owned by the same user with sharing enabled.
+it('findServableFor() uses a sibling playlist copy when that playlist shares its cache', function () {
+    [, , $channelA, $channelB] = seedSiblingPlaylistsWithSameMovie(true);
+    $file = CachedContentFile::factory()->completed()->forItem($channelA)->create();
 
-it('scopeServableForPlaylist() returns the playlist own row', function () {
-    [, , $playlistA, $playlistB, $fileA, $fileB] = seedTwoUsersWithCacheFiles();
-
-    $ids = CachedContentFile::query()->servableForPlaylist($playlistA)->pluck('id')->all();
-
-    expect($ids)->toContain($fileA->id)
-        ->and($ids)->not->toContain($fileB->id);
+    expect(CachedContentFile::findServableFor($channelB)?->id)->toBe($file->id);
 });
 
-it('scopeServableForPlaylist() includes sharing rows from sibling playlists owned by the same user', function () {
-    // Two playlists owned by user A; playlistA has sharing ON, playlistB
-    // is the requester. The scope must include the file owned by
-    // playlistA (sharing) AND any file owned by playlistB itself.
-    $userA = User::factory()->create();
-    $playlistA = Playlist::factory()->for($userA)->create(['share_cache_across_playlists' => true]);
-    $playlistB = Playlist::factory()->for($userA)->create();
-    $shared = CachedContentFile::factory()->completed()->create([
-        'content_type' => 'movie',
-        'tmdb_id' => '777',
-        'user_id' => $userA->id,
-        'playlist_id' => $playlistA->id,
-    ]);
-    $own = CachedContentFile::factory()->completed()->create([
-        'content_type' => 'movie',
-        'tmdb_id' => '888',
-        'user_id' => $userA->id,
-        'playlist_id' => $playlistB->id,
-    ]);
+it('findServableFor() does not use a sibling playlist copy when sharing is off', function () {
+    [, , $channelA, $channelB] = seedSiblingPlaylistsWithSameMovie(false);
+    CachedContentFile::factory()->completed()->forItem($channelA)->create();
 
-    $ids = CachedContentFile::query()->servableForPlaylist($playlistB)->pluck('id')->all();
-
-    expect($ids)->toContain($shared->id)
-        ->and($ids)->toContain($own->id);
+    expect(CachedContentFile::findServableFor($channelB))->toBeNull();
 });
 
-it('scopeServableForPlaylist() does NOT include sibling playlists with sharing OFF', function () {
-    // Sharing OFF breaks the cross-playlist branch - only the
-    // requester's own row remains servable.
-    $userA = User::factory()->create();
-    $playlistA = Playlist::factory()->for($userA)->create(['share_cache_across_playlists' => false]);
-    $playlistB = Playlist::factory()->for($userA)->create();
-    $shared = CachedContentFile::factory()->completed()->create([
-        'content_type' => 'movie',
-        'tmdb_id' => '777',
-        'user_id' => $userA->id,
-        'playlist_id' => $playlistA->id,
-    ]);
+it('findServableFor() never uses another user copy, even with sharing on', function () {
+    $owner = Playlist::factory()->create(['share_cache_across_playlists' => true]);
+    $other = Playlist::factory()->create();
+    $ownerChannel = Channel::factory()->create(['user_id' => $owner->user_id, 'playlist_id' => $owner->id, 'is_vod' => true, 'tmdb_id' => 550]);
+    $otherChannel = Channel::factory()->create(['user_id' => $other->user_id, 'playlist_id' => $other->id, 'is_vod' => true, 'tmdb_id' => 550]);
+    CachedContentFile::factory()->completed()->forItem($ownerChannel)->create();
 
-    $ids = CachedContentFile::query()->servableForPlaylist($playlistB)->pluck('id')->all();
-
-    expect($ids)->not->toContain($shared->id);
+    expect(CachedContentFile::findServableFor($otherChannel))->toBeNull();
 });
 
-it('scopeServableForPlaylist() never includes rows from a different user', function () {
-    // Cross-USER sharing is forbidden. playlistB is owned by userB;
-    // the row belongs to userA - it must NOT leak through.
-    [, $userB, $playlistA, , $fileA] = seedTwoUsersWithCacheFiles();
-    $playlistB = Playlist::factory()->for($userB)->create();
+it('findServableFor() does not serve a same-TMDB channel in the same playlist', function () {
+    // Two releases of one film in one playlist must not share a file.
+    $playlist = Playlist::factory()->create(['share_cache_across_playlists' => true]);
+    $german = Channel::factory()->create(['playlist_id' => $playlist->id, 'user_id' => $playlist->user_id, 'is_vod' => true, 'tmdb_id' => 550]);
+    $english = Channel::factory()->create(['playlist_id' => $playlist->id, 'user_id' => $playlist->user_id, 'is_vod' => true, 'tmdb_id' => 550]);
+    CachedContentFile::factory()->completed()->forItem($german)->create();
 
-    $ids = CachedContentFile::query()->servableForPlaylist($playlistB)->pluck('id')->all();
-
-    expect($ids)->not->toContain($fileA->id);
+    expect(CachedContentFile::findServableFor($english))->toBeNull();
 });
 
-it('scopeServableForPlaylist() accepts an int and resolves the owner via a nested subquery', function () {
-    // The int overload is the hot path: `Channel::isCached()` /
-    // `Episode::isCached()` pass `(int) $this->playlist_id` so they do
-    // NOT lazy-load the Playlist model. The scope resolves
-    // `playlists.user_id` server-side via a nested scalar subquery.
-    [, , $playlistA, $playlistB, $fileA] = seedTwoUsersWithCacheFiles();
+it('findServableFor() prefers the item own row over a shared copy', function () {
+    [, , $channelA, $channelB] = seedSiblingPlaylistsWithSameMovie(true);
+    CachedContentFile::factory()->completed()->forItem($channelA)->create();
+    $own = CachedContentFile::factory()->completed()->forItem($channelB)->create();
 
-    // No playlist model loaded - the scope must work from the int alone.
-    $ids = CachedContentFile::query()->servableForPlaylist((int) $playlistA->id)->pluck('id')->all();
+    expect(CachedContentFile::findServableFor($channelB)?->id)->toBe($own->id);
+});
 
-    expect($ids)->toContain($fileA->id);
+// --- isPlayable() / storage helpers ---
 
-    // Sanity: an unknown int id returns no rows but does not throw.
-    $ids = CachedContentFile::query()->servableForPlaylist(999999)->pluck('id')->all();
-    expect($ids)->toBe([]);
+it('isPlayable() is true only when the Completed file exists on disk', function () {
+    Storage::fake(CachedContentFile::DISK);
+    $file = CachedContentFile::factory()->completed()->create(['disk' => CachedContentFile::DISK]);
 
-    // Cross-user is still blocked when called via the int path.
-    $ids = CachedContentFile::query()->servableForPlaylist((int) $playlistB->id)->pluck('id')->all();
-    expect($ids)->not->toContain($fileA->id);
+    expect($file->isPlayable())->toBeFalse();
+
+    Storage::disk(CachedContentFile::DISK)->put($file->file_path, 'bytes');
+
+    expect($file->isPlayable())->toBeTrue();
+});
+
+it('storagePathFor() gives every row its own path, grouped by playlist', function () {
+    $a = CachedContentFile::factory()->create();
+    $b = CachedContentFile::factory()->create(['playlist_id' => $a->playlist_id, 'user_id' => $a->user_id]);
+
+    expect($a->storagePathFor('mkv'))->toBe($a->playlist_id.'/'.$a->uuid.'.mkv')
+        ->and($a->storagePathFor('.mp4'))->not->toBe($b->storagePathFor('.mp4'));
+});
+
+it('deleteStoredFile() removes the file from the disk', function () {
+    Storage::fake(CachedContentFile::DISK);
+    $file = CachedContentFile::factory()->completed()->create();
+    Storage::disk(CachedContentFile::DISK)->put($file->file_path, 'bytes');
+
+    $file->deleteStoredFile();
+
+    Storage::disk(CachedContentFile::DISK)->assertMissing($file->file_path);
 });
 
 // --- playlist() relation ---
@@ -524,13 +505,7 @@ it('playlist() returns null when playlist_id is null', function () {
     expect($file->playlist)->toBeNull();
 });
 
-// --- $fillable regression: last_error_message persists mass-assigned writes ---
-//
-// PR #1500 shipped this column in schema but NOT in $fillable, so
-// DownloadCachedContentFile::markFailed() silently dropped the write and
-// the "View error" modal always showed "No error message recorded." The
-// fix in PR A adds it to $fillable; this test would have caught the
-// original bug.
+// --- $fillable: error message and ownership columns are mass assignable ---
 
 it('last_error_message survives mass-assigned update()', function () {
     $file = CachedContentFile::factory()->create();
@@ -552,7 +527,7 @@ it('user_id and playlist_id survive mass-assigned update()', function () {
         ->and($fresh->playlist_id)->toBe($playlist->id);
 });
 
-// --- factory default-stamps user_id + playlist_id (PR B dispatcher relies on this) ---
+// --- factory default-stamps user_id + playlist_id ---
 
 it('factory definition() defaults user_id and playlist_id', function () {
     $file = CachedContentFile::factory()->create();

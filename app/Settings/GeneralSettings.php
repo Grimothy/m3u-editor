@@ -87,27 +87,14 @@ class GeneralSettings extends Settings
     // Logo cache and placeholders
     public ?bool $logo_cache_permanent = false;
 
-    // Standalone per-Channel / per-Episode content cache (PR C). Gates both
-    // the lazy-dispatch path AND the cache-hit serve path so operators can
-    // fully disable the feature from the settings page - PR #1500 only gated
-    // dispatch, which let stale cache serve after the operator turned the
-    // feature off.
+    // Cached content downloads. `enable_cache` gates both new downloads and
+    // serving already-cached files.
     public ?bool $enable_cache = false;
 
-    /**
-     * Retention mode for cached files (PR D scaffolding). Values: never-expire,
-     * time-based, manual. Phase 2's retention job will read this; for now the
-     * value persists so operators can pre-configure their preference. The
-     * existing per-row `never_expire` column still wins when set, regardless
-     * of this global setting.
-     */
-    public ?string $cache_retention_mode = 'time-based';
+    // automatic | never-expire | manual (playlists can override).
+    public ?string $cache_retention_mode = 'automatic';
 
-    /**
-     * Default value for the per-playlist "Share cache across playlists" toggle.
-     * When on, a cached file owned by this playlist is reused by other
-     * playlists pointing at the same content (subject to per-playlist overrides).
-     */
+    // Default for the per-playlist "Share cache across playlists" toggle.
     public ?bool $default_share_cache_across_playlists = false;
 
     public ?string $logo_placeholder_url = null;

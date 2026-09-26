@@ -3,185 +3,36 @@
 namespace App\Services;
 
 use App\Enums\CachedContentFileStatus;
+use App\Enums\CacheDispatchResult;
 use App\Jobs\DownloadCachedContentFile;
 use App\Models\CachedContentFile;
 use App\Models\Channel;
-use App\Models\DynamicGroup;
 use App\Models\Episode;
 use App\Models\Playlist;
 use App\Models\Series;
 use App\Settings\GeneralSettings;
 use Filament\Notifications\Notification;
-use Illuminate\Database\QueryException;
-use Illuminate\Support\Collection;
-use Illuminate\Support\Facades\Auth;
-use Illuminate\Support\Facades\DB;
+use Illuminate\Database\UniqueConstraintViolationException;
 
 /**
- * Standalone per-Channel / per-Episode cache dispatcher.
+ * Queues cache downloads for VOD channels and series episodes.
  *
- * Invariants:
- *  1. Single-row dispatch (one Channel or Episode per call). N calls with
- *     the same fingerprint AND the same playlist produce exactly ONE INSERT
- *     total because the 2nd..Nth calls hit the existing-row short-circuit.
- *  2. Ownership: every new `CachedContentFile` row stamps BOTH `user_id`
- *     (auth()->id() with a fallback to the source playlist's owner for
- *     the scheduled-orchestrator path where no user is logged in) AND
- *     `playlist_id` (from the source row's playlist).
- *  3. Cross-playlist sharing (within a single user only): another
- *     playlist that the same user owns may SERVE a Completed row that
- *     belongs to a sibling playlist when that sibling has
- *     `share_cache_across_playlists = true`. Cross-USER sharing is never
- *     allowed. A playlist's own row is always preferred over a shared row.
- *     "Servable for playlist P" is implemented by
- *     `CachedContentFile::scopeServableForPlaylist()`.
- *  4. Fingerprint identity: `Channel::cacheFingerprint()` and
- *     `Episode::cacheFingerprint()` are the single source of truth - both
- *     the live dispatch path and the cached fingerprint row derive from
- *     them. No per-call string-building that could drift from the model's
- *     contract.
+ * Every entry point (Cache Now actions, the series "Cache all episodes"
+ * action, `cache:content`, and the downloads widget's Retry) goes through
+ * `dispatch()` / `requeue()` so the rules live in one place:
+ *  - Nothing happens while `enable_cache` is off.
+ *  - Only plain Playlist VOD channels and episodes with a non-HLS source
+ *    URL can be cached.
+ *  - An item has at most one cached file (unique on cacheable). A
+ *    Completed file whose bytes are missing on disk, or a Failed one, is
+ *    re-queued rather than reported as done.
+ *  - A playable copy shared by another of the same user's playlists
+ *    (`share_cache_across_playlists`) counts as already cached.
  */
 class CachedContentDispatchService
 {
     /**
-     * Dispatch a single Channel.
-     *
-     * Returns a Collection of the DownloadCachedContentFile job(s) actually
-     * queued. Empty Collection when:
-     *  - The global `enable_cache` setting is off (kill switch)
-     *  - The fingerprint already has any row for THIS playlist (idempotent
-     *    re-dispatch is a no-op - PR #1524 review item 1)
-     *  - A Completed row from another of the same user's playlists with
-     *    `share_cache_across_playlists = true` is servable for this
-     *    playlist (cross-playlist sharing - PR #1524 review item 2)
-     *  - The Channel has no URL (no work to do)
-     *
-     * @return Collection<int, DownloadCachedContentFile>
-     */
-    public function dispatchForChannel(Channel $channel): Collection
-    {
-        if (! $this->isEnabled()) {
-            return collect();
-        }
-
-        $playlist = $channel->playlist;
-        if (! $playlist) {
-            return collect();
-        }
-
-        $fingerprint = $channel->cacheFingerprint();
-
-        if ($this->findServableCacheHit($fingerprint, $playlist) !== null) {
-            return collect();
-        }
-
-        return $this->dispatchNew($channel, $playlist, $fingerprint);
-    }
-
-    /**
-     * Dispatch a single Episode. Identity inputs (tmdb_id/tvdb_id) come
-     * from the parent Series via Episode::cacheFingerprint() so the cached
-     * row's fingerprint matches the live fingerprint exactly.
-     *
-     * Returns an empty Collection when:
-     *  - The global `enable_cache` setting is off (kill switch)
-     *  - The fingerprint already has any row for THIS playlist (idempotent
-     *    re-dispatch is a no-op - PR #1524 review item 1)
-     *  - A Completed row from another of the same user's playlists with
-     *    `share_cache_across_playlists = true` is servable for this
-     *    playlist (cross-playlist sharing)
-     *  - The Episode has no playlist or URL
-     *
-     * @return Collection<int, DownloadCachedContentFile>
-     */
-    public function dispatchForEpisode(Episode $episode): Collection
-    {
-        if (! $this->isEnabled()) {
-            return collect();
-        }
-
-        $playlist = $episode->playlist;
-        if (! $playlist) {
-            return collect();
-        }
-
-        $fingerprint = $episode->cacheFingerprint();
-
-        if ($this->findServableCacheHit($fingerprint, $playlist) !== null) {
-            return collect();
-        }
-
-        return $this->dispatchNew($episode, $playlist, $fingerprint);
-    }
-
-    /**
-     * Dispatch every eligible Channel/Episode in a DynamicGroup's current
-     * membership.
-     *
-     * Behavior:
-     *  - type='vod': iterates $group->channels, dispatches each via
-     *    dispatchForChannel().
-     *  - type='series': iterates $group->series (eager-loaded with
-     *    episodes to avoid the N+1) and dispatches each episode via
-     *    dispatchForEpisode().
-     *  - For each successfully dispatched file, writes a fresh pivot row
-     *    in `cached_content_file_dynamic_groups` with `dropped_at = NULL`.
-     *    The pivot insert is BATCHED (chunks of 100) and uses
-     *    `insertOrIgnore` so concurrent dispatchers racing on the same
-     *    (file, group) pair no-op the second insert instead of crashing
-     *    on the unique key.
-     *
-     * Short-circuits before any work when the global `enable_cache`
-     * setting is off (kill switch).
-     *
-     * @return Collection<int, DownloadCachedContentFile>
-     */
-    public function dispatchForGroup(DynamicGroup $group): Collection
-    {
-        if (! $this->isEnabled()) {
-            return collect();
-        }
-
-        $group->loadMissing(['channels', 'series.episodes']);
-
-        $jobs = collect();
-        $newFileIds = [];
-
-        if ($group->type === 'vod') {
-            foreach ($group->channels as $channel) {
-                $dispatched = $this->dispatchForChannel($channel);
-                $jobs = $jobs->merge($dispatched);
-                foreach ($dispatched as $job) {
-                    $newFileIds[] = $job->cachedContentFileId;
-                }
-            }
-        } elseif ($group->type === 'series') {
-            foreach ($group->series as $series) {
-                /** @var Series $series */
-                foreach ($series->episodes as $episode) {
-                    $dispatched = $this->dispatchForEpisode($episode);
-                    $jobs = $jobs->merge($dispatched);
-                    foreach ($dispatched as $job) {
-                        $newFileIds[] = $job->cachedContentFileId;
-                    }
-                }
-            }
-        }
-
-        if ($newFileIds !== []) {
-            $this->insertPivotRows($group->id, $newFileIds);
-        }
-
-        return $jobs;
-    }
-
-    /**
-     * Whether the global `enable_cache` toggle in GeneralSettings is on.
-     *
-     * Centralized here so every public entrypoint (`dispatchForChannel`,
-     * `dispatchForEpisode`, `dispatchForGroup`) reads the same way -
-     * mirroring the read pattern used in the serve controllers and
-     * Filament action visibility guards.
+     * Whether the global `enable_cache` toggle is on.
      */
     public function isEnabled(): bool
     {
@@ -189,247 +40,259 @@ class CachedContentDispatchService
     }
 
     /**
-     * Look up an existing CachedContentFile row for an item's content
-     * fingerprint, regardless of status. Used by the "Cache Now" UI
-     * handlers to disambiguate "dispatcher returned empty because the
-     * row is already cached / queued" from a genuine empty result.
-     *
-     * Visibility follows the same "servable for playlist" rule as
-     * playback (see `CachedContentFile::scopeServableForPlaylist()`):
-     * the item's source playlist row is preferred; a row shared by
-     * another of the same user's playlists with
-     * `share_cache_across_playlists = true` is the fallback. Rows owned
-     * by other users are NEVER surfaced - reporting another user's cache
-     * as "Already cached" for our row would be both wrong and a privacy
-     * leak.
+     * Whether `$item` can be cached at all (ignores the global toggle).
      */
-    public function describeExisting(Channel|Episode $item): ?CachedContentFile
+    public function canCache(Channel|Episode $item): bool
     {
-        $playlist = $item->playlist;
-        if (! $playlist) {
-            return null;
+        if ($item instanceof Channel && ! $item->is_vod) {
+            return false;
         }
 
-        $fingerprint = $item->cacheFingerprint();
+        if (! $item->playlist_id || ! $item->playlist instanceof Playlist) {
+            return false;
+        }
 
-        return CachedContentFile::query()
-            ->servableForPlaylist($playlist)
-            ->where('content_fingerprint', $fingerprint)
-            ->orderByRaw('CASE WHEN playlist_id = ? THEN 0 ELSE 1 END', [$playlist->id])
-            ->first();
+        $url = $item->cacheSourceUrl();
+        if ($url === '') {
+            return false;
+        }
+
+        // HLS manifests can't be cached as a single file.
+        $path = strtolower((string) parse_url($url, PHP_URL_PATH));
+
+        return ! str_ends_with($path, '.m3u8');
     }
 
     /**
-     * Resolve the human-readable title to persist on a newly-dispatched
-     * `CachedContentFile` row. Mirrors the same precedence the activity
-     * widget's `movie_source_title` / `episode_source_title`
-     * projections use (Channel::getDisplayTitleAttribute /
-     * Episode::getDisplayTitleAttribute), so the stored `title` column
-     * produces a byte-identical label when the widget reads it back.
-     *
-     * Returns null when the source row's display title is empty -
-     * matches the projection's `nullif(trim(...), '')` behaviour so the
-     * widget falls through to its subquery path on legacy rows without
-     * re-fetching what was already null at dispatch time.
+     * Queue a download for one channel or episode.
      */
-    private static function resolveInitialTitle(Channel|Episode $item): ?string
+    public function dispatch(Channel|Episode $item): CacheDispatchResult
+    {
+        if (! $this->isEnabled()) {
+            return CacheDispatchResult::Disabled;
+        }
+
+        if (! $this->canCache($item)) {
+            return CacheDispatchResult::Unavailable;
+        }
+
+        $existing = $item->cachedContentFile()->first();
+
+        if ($existing) {
+            if (in_array($existing->status, [CachedContentFileStatus::Pending, CachedContentFileStatus::Downloading], true)) {
+                return CacheDispatchResult::AlreadyQueued;
+            }
+
+            if ($existing->isPlayable()) {
+                return CacheDispatchResult::AlreadyCached;
+            }
+
+            // Failed, or Completed with the file missing on disk.
+            return $this->requeue($existing) ? CacheDispatchResult::Queued : CacheDispatchResult::Unavailable;
+        }
+
+        $shared = CachedContentFile::findServableFor($item);
+        if ($shared?->isPlayable()) {
+            return CacheDispatchResult::AlreadyCached;
+        }
+
+        /** @var Playlist $playlist */
+        $playlist = $item->playlist;
+
+        try {
+            $file = CachedContentFile::create([
+                'user_id' => $playlist->user_id,
+                'playlist_id' => $playlist->id,
+                'cacheable_type' => $item->getMorphClass(),
+                'cacheable_id' => $item->getKey(),
+                'content_type' => $item instanceof Channel ? 'movie' : 'episode',
+                'tmdb_id' => $this->identityValue($item, 'tmdb_id'),
+                'tvdb_id' => $this->identityValue($item, 'tvdb_id'),
+                'season_number' => $item instanceof Episode ? $item->season : null,
+                'episode_number' => $item instanceof Episode ? $item->episode_num : null,
+                'content_fingerprint' => $item->cacheFingerprint(),
+                'title' => $this->resolveTitle($item),
+                'status' => CachedContentFileStatus::Pending,
+            ]);
+        } catch (UniqueConstraintViolationException) {
+            // A concurrent dispatch created the row first.
+            return CacheDispatchResult::AlreadyQueued;
+        }
+
+        dispatch(new DownloadCachedContentFile($file->id));
+
+        return CacheDispatchResult::Queued;
+    }
+
+    /**
+     * Queue every episode of a series. Returns how many items ended up in
+     * each result bucket.
+     *
+     * @return array<string, int> keyed by CacheDispatchResult value
+     */
+    public function dispatchSeries(Series $series): array
+    {
+        $counts = array_fill_keys(array_map(fn (CacheDispatchResult $r): string => $r->value, CacheDispatchResult::cases()), 0);
+
+        if (! $this->isEnabled()) {
+            $counts[CacheDispatchResult::Disabled->value] = 1;
+
+            return $counts;
+        }
+
+        $playlist = $series->playlist;
+
+        foreach ($series->episodes()->orderBy('season')->orderBy('episode_num')->cursor() as $episode) {
+            // cursor() can't eager load; the series and its playlist are the
+            // same for every episode, so hand them over directly.
+            $episode->setRelation('series', $series);
+            if ($playlist && (int) $episode->playlist_id === (int) $playlist->id) {
+                $episode->setRelation('playlist', $playlist);
+            }
+
+            $counts[$this->dispatch($episode)->value]++;
+        }
+
+        return $counts;
+    }
+
+    /**
+     * Reset a Failed (or missing-file Completed) row to Pending and queue it
+     * again. Returns false when the row's source item no longer exists or
+     * can't be cached.
+     */
+    public function requeue(CachedContentFile $file): bool
+    {
+        if (! $this->isEnabled()) {
+            return false;
+        }
+
+        $item = $file->cacheable;
+        if (! $item instanceof Channel && ! $item instanceof Episode) {
+            return false;
+        }
+
+        if (! $this->canCache($item)) {
+            return false;
+        }
+
+        $file->deleteStoredFile();
+
+        $file->forceFill([
+            'status' => CachedContentFileStatus::Pending,
+            'file_path' => null,
+            'file_size_bytes' => null,
+            'failure_count' => 0,
+            'last_failed_at' => null,
+            'last_error_message' => null,
+            'bytes_downloaded' => null,
+            'bytes_expected' => null,
+            'bytes_per_second' => null,
+            'last_progress_at' => null,
+        ])->save();
+
+        dispatch(new DownloadCachedContentFile($file->id));
+
+        return true;
+    }
+
+    /**
+     * Filament notification for a single-item Cache Now result.
+     */
+    public static function cacheNowNotification(Channel|Episode $item, CacheDispatchResult $result): Notification
+    {
+        $isEpisode = $item instanceof Episode;
+
+        return match ($result) {
+            CacheDispatchResult::Queued => Notification::make()
+                ->success()
+                ->title(__('Cache download queued'))
+                ->body(__('Track progress on the Cached Downloads page.')),
+            CacheDispatchResult::AlreadyCached => Notification::make()
+                ->info()
+                ->title(__('Already cached'))
+                ->body($isEpisode
+                    ? __('This episode already has a completed cached file.')
+                    : __('This VOD already has a completed cached file.')),
+            CacheDispatchResult::AlreadyQueued => Notification::make()
+                ->info()
+                ->title(__('Already queued for caching'))
+                ->body($isEpisode
+                    ? __('A pending or downloading cached file already exists for this episode.')
+                    : __('A pending or downloading cached file already exists for this VOD.')),
+            CacheDispatchResult::Disabled => Notification::make()
+                ->warning()
+                ->title(__('Could not queue cache'))
+                ->body(__('Caching is disabled in Settings.')),
+            CacheDispatchResult::Unavailable => Notification::make()
+                ->danger()
+                ->title(__('Could not queue cache'))
+                ->body($isEpisode
+                    ? __('This episode has no cacheable source URL.')
+                    : __('This VOD has no cacheable source URL.')),
+        };
+    }
+
+    /**
+     * Filament notification summarizing a series "Cache all episodes" run.
+     *
+     * @param  array<string, int>  $counts
+     */
+    public static function seriesNotification(array $counts): Notification
+    {
+        if (($counts[CacheDispatchResult::Disabled->value] ?? 0) > 0) {
+            return Notification::make()
+                ->warning()
+                ->title(__('Could not queue cache'))
+                ->body(__('Caching is disabled in Settings.'));
+        }
+
+        $queued = $counts[CacheDispatchResult::Queued->value] ?? 0;
+        $skipped = ($counts[CacheDispatchResult::AlreadyCached->value] ?? 0)
+            + ($counts[CacheDispatchResult::AlreadyQueued->value] ?? 0);
+        $unavailable = $counts[CacheDispatchResult::Unavailable->value] ?? 0;
+
+        $notification = Notification::make();
+        $queued > 0 ? $notification->success() : $notification->info();
+
+        return $notification
+            ->title(match (true) {
+                $queued === 0 => __('No episodes queued'),
+                $queued === 1 => __('Queued 1 episode for caching'),
+                default => __('Queued :count episodes for caching', ['count' => $queued]),
+            })
+            ->body(__(':skipped already cached or queued, :unavailable without a cacheable source.', [
+                'skipped' => $skipped,
+                'unavailable' => $unavailable,
+            ]));
+    }
+
+    /**
+     * TMDB/TVDB id stored on the row. Episodes carry their series' ids.
+     */
+    private function identityValue(Channel|Episode $item, string $column): ?string
+    {
+        $value = $item instanceof Episode
+            ? ($item->series?->{$column} ?? ($column === 'tmdb_id' ? $item->tmdb_id : null))
+            : $item->{$column};
+
+        return $value !== null && $value !== '' ? (string) $value : null;
+    }
+
+    /**
+     * Display title persisted on the row so the downloads table never has to
+     * look it up again.
+     */
+    private function resolveTitle(Channel|Episode $item): ?string
     {
         $title = trim((string) $item->display_title);
 
-        return $title === '' ? null : $title;
-    }
-
-    /**
-     * Build the Filament notification for a "Cache Now" dispatch result.
-     *
-     * Centralizes the result-to-notification mapping for both the VOD
-     * (Channel) and Episode Cache Now action handlers so the wording,
-     * severity, and key copies stay in lockstep. The body text is keyed
-     * off whether `$item` is a Channel or an Episode; callers must pass
-     * the same item they passed to `dispatchCacheNowFor*()`.
-     *
-     * Severity choices:
-     *  - New dispatch queued (success): success toast
-     *  - Already cached / already queued (no-op): info toast
-     *  - Failure (no URL, kill switch, no row found): danger toast
-     *
-     * @param  array{queued: bool, already?: 'cached'|'queued', error?: string}  $result
-     */
-    public static function cacheNowNotification(Channel|Episode $item, array $result): Notification
-    {
-        if ($result['queued']) {
-            $already = $result['already'] ?? null;
-
-            if ($already === 'cached') {
-                return Notification::make()
-                    ->info()
-                    ->title(__('Already cached'))
-                    ->body($item instanceof Episode
-                        ? __('This episode already has a completed cached file.')
-                        : __('This VOD already has a completed cached file.'));
-            }
-
-            if ($already === 'queued') {
-                return Notification::make()
-                    ->info()
-                    ->title(__('Already queued for caching'))
-                    ->body($item instanceof Episode
-                        ? __('A pending or downloading cached file already exists for this episode.')
-                        : __('A pending or downloading cached file already exists for this VOD.'));
-            }
-
-            return Notification::make()
-                ->success()
-                ->title(__('Cache download queued'))
-                ->body(__('Track progress on the Cached Downloads page.'));
+        if ($item instanceof Episode) {
+            $seriesName = trim((string) $item->series?->name);
+            $code = sprintf('S%02dE%02d', (int) $item->season, (int) $item->episode_num);
+            $title = trim(implode(' - ', array_filter([$seriesName, $code, $title])));
         }
 
-        return Notification::make()
-            ->danger()
-            ->title(__('Could not queue cache'))
-            ->body($result['error'] ?? __('Unknown error.'));
-    }
-
-    /**
-     * Batch-insert pivot rows linking freshly-dispatched CachedContentFile
-     * rows to the source DynamicGroup. Chunks of 100 to keep the SQL
-     * payload bounded; uses `insertOrIgnore` so concurrent dispatches for
-     * the same (file, group) pair survive the unique index without
-     * crashing.
-     *
-     * @param  array<int, int>  $cachedContentFileIds
-     */
-    protected function insertPivotRows(int $dynamicGroupId, array $cachedContentFileIds): void
-    {
-        $now = now();
-        $rows = array_map(
-            fn (int $fileId): array => [
-                'cached_content_file_id' => $fileId,
-                'dynamic_group_id' => $dynamicGroupId,
-                'dropped_at' => null,
-                'created_at' => $now,
-                'updated_at' => $now,
-            ],
-            $cachedContentFileIds,
-        );
-
-        foreach (array_chunk($rows, 100) as $chunk) {
-            DB::table('cached_content_file_dynamic_groups')->insertOrIgnore($chunk);
-        }
-    }
-
-    /**
-     * Resolve a Completed `CachedContentFile` for `$fingerprint` that is
-     * SERVABLE for `$playlist` - i.e. either belongs to `$playlist` itself
-     * OR to another of the same user's playlists that has
-     * `share_cache_across_playlists = true`.
-     *
-     * The `scopeServableForPlaylist()` predicate implements the OR. The
-     * Completed-status filter is applied on top. This is the single source
-     * of truth for "is there a cache hit for this playlist" used by
-     * `dispatchForChannel()`, `dispatchForEpisode()`, and
-     * `XtreamStreamController::resolveCacheHit()`.
-     *
-     * The result prefers `$playlist`'s own row over a shared row via
-     * `orderByRaw('CASE WHEN playlist_id = ? THEN 0 ELSE 1 END', ...)`.
-     */
-    public function findServableCacheHit(string $fingerprint, Playlist $playlist): ?CachedContentFile
-    {
-        return CachedContentFile::query()
-            ->servableForPlaylist($playlist)
-            ->where('content_fingerprint', $fingerprint)
-            ->where('status', CachedContentFileStatus::Completed)
-            ->orderByRaw('CASE WHEN playlist_id = ? THEN 0 ELSE 1 END', [$playlist->id])
-            ->first();
-    }
-
-    /**
-     * Build the dispatch from the per-item fingerprint + ownership check
-     * through to the actual row insert + job dispatch.
-     *
-     * Existing-row short-circuit (PR #1524 review item 1): a row with the
-     * same fingerprint AND the same playlist id (any status) prevents the
-     * INSERT. This is what makes the
-     * "N calls, same playlist + same fingerprint, 1 INSERT" test invariant
-     * hold. Note the second key (playlist_id) - uniqueness is per-playlist,
-     * not global, so a different playlist can legitimately insert its own
-     * copy of the same fingerprint.
-     *
-     * The INSERT is wrapped in a savepoint (DB::transaction) + a
-     * QueryException fallback so a concurrent dispatch racing on the same
-     * `(fingerprint, playlist_id)` survives: the composite unique on
-     * `(content_fingerprint, playlist_id)` from migration
-     * `2026_09_16_120100_add_playlist_id_...` rejects the second INSERT,
-     * we swallow that specific exception, and re-query the now-existing
-     * row. Postgres aborts the surrounding transaction on a failed
-     * statement (SQLSTATE 25P02), so the savepoint matters specifically for
-     * RefreshDatabase's per-test wrapper.
-     *
-     * @return Collection<int, DownloadCachedContentFile>
-     */
-    protected function dispatchNew(Channel|Episode $item, Playlist $playlist, string $fingerprint): Collection
-    {
-        $url = (string) ($item->url ?? '');
-        if ($url === '') {
-            return collect();
-        }
-
-        $existing = CachedContentFile::query()
-            ->where('content_fingerprint', $fingerprint)
-            ->where('playlist_id', $playlist->id)
-            ->first();
-        if ($existing) {
-            return collect();
-        }
-
-        $userId = Auth::id() ?? $playlist->user_id;
-        $series = $item instanceof Episode ? $item->series : null;
-        $tmdbId = $series?->tmdb_id ?? $item->tmdb_id;
-        $tvdbId = $series?->tvdb_id ?? $item->tvdb_id;
-
-        try {
-            $row = DB::transaction(function () use ($item, $fingerprint, $playlist, $userId, $tmdbId, $tvdbId): CachedContentFile {
-                return CachedContentFile::create([
-                    'content_type' => $item instanceof Channel ? 'movie' : 'episode',
-                    'tmdb_id' => $tmdbId !== null ? (string) $tmdbId : null,
-                    'tvdb_id' => $tvdbId !== null ? (string) $tvdbId : null,
-                    'season_number' => $item instanceof Episode ? $item->season : null,
-                    'episode_number' => $item instanceof Episode ? $item->episode_num : null,
-                    'quality' => null,
-                    'content_fingerprint' => $fingerprint,
-                    // Persist the source display title at dispatch time so the
-                    // CachedContentActivityWidget can render the title cell
-                    // straight from the row's own column on every poll. The
-                    // widget's Channel/Episode projection subqueries remain
-                    // as the fallback for legacy rows that pre-date this fill
-                    // (PR #1524 reuse/efficiency item: avoid re-running the
-                    // title subquery on every poll cycle).
-                    'title' => self::resolveInitialTitle($item),
-                    'user_id' => $userId,
-                    'playlist_id' => $playlist->id,
-                    'status' => CachedContentFileStatus::Pending,
-                ]);
-            });
-        } catch (QueryException) {
-            // Lost an INSERT race against a concurrent dispatch for the
-            // same (fingerprint, playlist_id). The other writer's row
-            // satisfies the idempotent re-dispatch contract; bail without
-            // dispatching.
-            return collect();
-        }
-
-        // Construct the job once and dispatch that same instance. The
-        // previous implementation built a `new` instance here AND called
-        // `DownloadCachedContentFile::dispatch(...)` with a fresh
-        // instance, producing two unrelated objects. We use the global
-        // `dispatch()` helper (NOT `DownloadCachedContentFile::dispatch()`)
-        // because the latter comes from the Dispatchable trait and would
-        // try to re-instantiate the job from its arguments. The job's
-        // constructor sets `onQueue('cache')` so the queue assignment
-        // is preserved.
-        $job = new DownloadCachedContentFile($item, $row->id);
-        dispatch($job);
-
-        return collect([$job]);
+        return $title === '' ? null : mb_substr($title, 0, 500);
     }
 }

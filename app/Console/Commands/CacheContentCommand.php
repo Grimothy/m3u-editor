@@ -2,134 +2,85 @@
 
 namespace App\Console\Commands;
 
+use App\Enums\CacheDispatchResult;
 use App\Models\Channel;
 use App\Models\Episode;
 use App\Models\Playlist;
 use App\Services\CachedContentDispatchService;
-use App\Settings\GeneralSettings;
 use Illuminate\Console\Command;
-use Illuminate\Support\Facades\Log;
 
 /**
- * Orchestrator for the standalone per-Channel / per-Episode cache.
- *
- * Walks every Playlist (or the one specified by `--playlist=`) and
- * dispatches `DownloadCachedContentFile` jobs for every enabled Channel
- * and Episode in scope. The actual dedup / sharing / fingerprint logic
- * lives in `CachedContentDispatchService` - this command is just the
- * scheduled-orchestration loop + dry-run reporting.
- *
- * Schedule: `cache:content --dry-run` hourly (see routes/console.php).
- * The hourly dry-run produces a log summary without actually dispatching,
- * so operators get visibility into "what would have been queued" without
- * burning dispatch slots every hour. The non-dry-run path is for ad-hoc
- * `php artisan cache:content --playlist=42` kicks.
+ * Manually queue cache downloads for every enabled VOD channel and episode
+ * in a playlist (or every playlist). Not scheduled: on a large catalog this
+ * can queue thousands of multi-GB downloads, so it's an explicit operator
+ * action. Use `--dry-run` first to see how many items would be queued.
  */
 class CacheContentCommand extends Command
 {
     protected $signature = 'cache:content
                                 {--playlist= : Limit to a single playlist ID}
-                                {--dry-run : Report what would be dispatched without queuing jobs}';
+                                {--dry-run : Report what would be queued without queuing anything}';
 
-    protected $description = 'Walk every playlist\'s enabled channels/episodes and dispatch DownloadCachedContentFile jobs';
+    protected $description = 'Queue cache downloads for every enabled VOD channel and episode';
 
-    public function __construct(protected CachedContentDispatchService $dispatchService)
+    public function handle(CachedContentDispatchService $dispatchService): int
     {
-        parent::__construct();
-    }
-
-    public function handle(): int
-    {
-        $isDryRun = (bool) $this->option('dry-run');
-        $playlistId = $this->option('playlist');
-
-        // Kill switch: respect the global `enable_cache` setting so the
-        // hourly scheduled `--dry-run` is harmless when the operator has
-        // turned the feature off. An ad-hoc `cache:content --playlist=42`
-        // is also a no-op so a stale cron entry can't dispatch against a
-        // disabled feature.
-        if (! (bool) (app(GeneralSettings::class)->enable_cache ?? false)) {
-            $this->warn('Caching is disabled in Settings; nothing dispatched.');
+        if (! $dispatchService->isEnabled()) {
+            $this->warn('Caching is disabled in Settings; nothing queued.');
 
             return self::SUCCESS;
         }
 
-        $totalDispatched = 0;
-        $totalSkipped = 0;
-        $totalPlaylists = 0;
+        $isDryRun = (bool) $this->option('dry-run');
+        $playlistId = $this->option('playlist');
+        $totals = ['queued' => 0, 'skipped' => 0];
 
-        // Playlist::query()->cursor() - never ->all()/->get() (playlist
-        // table grows with users, pr-review-standards §1).
-        $playlistQuery = Playlist::query()
+        $playlists = Playlist::query()
             ->when($playlistId !== null, fn ($q) => $q->where('id', (int) $playlistId));
 
-        foreach ($playlistQuery->cursor() as $playlist) {
-            $totalPlaylists++;
-            $playlistDispatched = 0;
-            $playlistSkipped = 0;
+        foreach ($playlists->cursor() as $playlist) {
+            $counts = ['queued' => 0, 'skipped' => 0];
 
-            // Channel/movie dispatch loop
-            foreach (Channel::query()
+            $channels = Channel::query()
+                ->where('playlist_id', $playlist->id)
+                ->where('is_vod', true)
+                ->where('enabled', true);
+            $episodes = Episode::query()
                 ->where('playlist_id', $playlist->id)
                 ->where('enabled', true)
-                ->cursor() as $channel) {
-                if ($isDryRun) {
-                    $playlistDispatched++;
+                ->with('series:id,name,tmdb_id,tvdb_id');
 
-                    continue;
-                }
+            foreach ([$channels, $episodes] as $query) {
+                foreach ($query->lazyById(500) as $item) {
+                    $item->setRelation('playlist', $playlist);
 
-                $jobs = $this->dispatchService->dispatchForChannel($channel);
-                if ($jobs->isEmpty()) {
-                    $playlistSkipped++;
-                } else {
-                    $playlistDispatched++;
+                    $wouldQueue = $isDryRun
+                        ? $dispatchService->canCache($item) && ! $item->cachedContentFile()->exists()
+                        : $dispatchService->dispatch($item) === CacheDispatchResult::Queued;
+
+                    $counts[$wouldQueue ? 'queued' : 'skipped']++;
                 }
             }
 
-            // Episode dispatch loop
-            foreach (Episode::query()
-                ->where('playlist_id', $playlist->id)
-                ->where('enabled', true)
-                ->cursor() as $episode) {
-                if ($isDryRun) {
-                    $playlistDispatched++;
-
-                    continue;
-                }
-
-                $jobs = $this->dispatchService->dispatchForEpisode($episode);
-                if ($jobs->isEmpty()) {
-                    $playlistSkipped++;
-                } else {
-                    $playlistDispatched++;
-                }
-            }
-
-            $totalDispatched += $playlistDispatched;
-            $totalSkipped += $playlistSkipped;
+            $totals['queued'] += $counts['queued'];
+            $totals['skipped'] += $counts['skipped'];
 
             $this->line(sprintf(
                 '  Playlist %d (%s): %s=%d, skipped=%d',
                 $playlist->id,
                 $playlist->name ?? '(no name)',
-                $isDryRun ? 'would-dispatch' : 'dispatched',
-                $playlistDispatched,
-                $playlistSkipped,
+                $isDryRun ? 'would-queue' : 'queued',
+                $counts['queued'],
+                $counts['skipped'],
             ));
-
-            if ($isDryRun) {
-                Log::info("cache:content --dry-run playlist={$playlist->id}: would-dispatch={$playlistDispatched}");
-            }
         }
 
         $this->info(sprintf(
-            '%s %d playlists: %s=%d, skipped=%d',
-            $isDryRun ? '[DRY RUN]' : 'Walked',
-            $totalPlaylists,
-            $isDryRun ? 'would-dispatch' : 'dispatched',
-            $totalDispatched,
-            $totalSkipped,
+            '%s %s=%d, skipped=%d',
+            $isDryRun ? '[DRY RUN]' : 'Done.',
+            $isDryRun ? 'would-queue' : 'queued',
+            $totals['queued'],
+            $totals['skipped'],
         ));
 
         return self::SUCCESS;

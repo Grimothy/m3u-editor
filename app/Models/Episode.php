@@ -2,7 +2,6 @@
 
 namespace App\Models;
 
-use App\Enums\CachedContentFileStatus;
 use App\Models\Scopes\ExcludeAioFailoverClonesScope;
 use App\Services\PlaylistService;
 use App\Settings\GeneralSettings;
@@ -16,6 +15,7 @@ use Illuminate\Database\Eloquent\Relations\BelongsTo;
 use Illuminate\Database\Eloquent\Relations\HasMany;
 use Illuminate\Database\Eloquent\Relations\HasManyThrough;
 use Illuminate\Database\Eloquent\Relations\MorphMany;
+use Illuminate\Database\Eloquent\Relations\MorphOne;
 use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Facades\Log;
 use Illuminate\Support\Facades\URL;
@@ -25,26 +25,6 @@ use Symfony\Component\Process\Process as SymfonyProcess;
 class Episode extends Model
 {
     use HasFactory;
-
-    /**
-     * Request-scoped memoization of `isCached()`.
-     *
-     * NOT an attribute/cast and NOT persisted to the DB - a plain
-     * in-memory cache so the Episodes table's `getStateUsing` + `tooltip`
-     * closures can both call `isCached()` per row without issuing the
-     * underlying query twice. Cleared on `__clone` because clones
-     * shouldn't share the parent's answer.
-     */
-    private ?bool $isCachedMemoized = null;
-
-    /**
-     * Clear request-scoped memoization so a cloned Episode instance
-     * does not inherit the parent's `isCached()` answer.
-     */
-    public function __clone()
-    {
-        $this->isCachedMemoized = null;
-    }
 
     /**
      * The attributes that should be cast to native types.
@@ -120,23 +100,10 @@ class Episode extends Model
     }
 
     /**
-     * Deterministic content fingerprint for this episode. Identity inputs
-     * come from the parent Series (tmdb_id/tvdb_id) plus the episode's own
-     * season/episode numbers. This is the single source of truth - the
-     * dispatcher, the retention sweep, the cache-hit gate, and
-     * Episode::isCached() all derive their `content_fingerprint` from this
-     * method so a row written by the dispatcher matches every read.
-     *
-     * Episode rows don't have their own `tvdb_id` column - the parent's
-     * `tvdb_id` (via `series.tvdb_id`) is folded in so the cached row
-     * matches the live fingerprint (PR #1500 missed this, causing
-     * cache-delete-redownload loops for series with a tvdb_id set).
-     *
-     * When neither the parent series nor the episode itself carries an
-     * external id, the fingerprint falls back to a `local_key` derived
-     * from the episode id so two unmatched episodes on the same playlist
-     * do not collapse into a single cache row (PR #1524 review item 6).
-     * Matched fingerprints stay byte-identical to the prior contract.
+     * TMDB/TVDB identity of this episode (the parent series' ids plus season
+     * and episode number), used to find a cached copy shared by another of
+     * the same user's playlists. Episodes without an external id get a
+     * per-episode key so they never match anything else.
      */
     public function cacheFingerprint(): string
     {
@@ -160,38 +127,32 @@ class Episode extends Model
     }
 
     /**
-     * Whether this episode has a Completed CachedContentFile that is servable
-     * for its source playlist and matches its content fingerprint.
-     *
-     * Servability covers both the playlist's own row and any row shared by
-     * another of the same user's playlists with
-     * `share_cache_across_playlists = true` (see
-     * `CachedContentFile::scopeServableForPlaylist()`). Single indexed query
-     * against cached_content_files.
-     *
-     * Hot path: this is invoked twice per row on the Episodes table
-     * (`getStateUsing` + `tooltip` in `EpisodesRelationManager`). The
-     * result is memoized on the instance (private property, not an
-     * attribute/cast) so the second call is free, and the scope is called
-     * with an `int` (not the Playlist model) so it does NOT trigger a
-     * playlist relation load - the nested subquery resolves
-     * `playlists.user_id` server-side.
+     * The cached file downloaded for this episode, if any (any status).
+     */
+    public function cachedContentFile(): MorphOne
+    {
+        return $this->morphOne(CachedContentFile::class, 'cacheable');
+    }
+
+    /**
+     * Provider URL a cache download fetches (honors a custom URL override).
+     */
+    public function cacheSourceUrl(): string
+    {
+        return (string) $this->url;
+    }
+
+    /**
+     * Whether a Completed cached file can serve this episode: its own, or
+     * one shared by another of the same user's playlists.
      */
     public function isCached(): bool
     {
-        if ($this->isCachedMemoized !== null) {
-            return $this->isCachedMemoized;
-        }
-
         if (! $this->playlist_id) {
-            return $this->isCachedMemoized = false;
+            return false;
         }
 
-        return $this->isCachedMemoized = CachedContentFile::query()
-            ->servableForPlaylist((int) $this->playlist_id)
-            ->where('content_fingerprint', $this->cacheFingerprint())
-            ->where('status', CachedContentFileStatus::Completed->value)
-            ->exists();
+        return CachedContentFile::query()->servableFor($this)->exists();
     }
 
     /**

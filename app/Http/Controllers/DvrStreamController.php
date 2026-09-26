@@ -257,8 +257,8 @@ class DvrStreamController extends Controller
      * because the DVR query then needs to additionally filter by the
      * resolved PlaylistAuth (Method 1) so one guest credential cannot
      * reach another guest's recordings just because they share an
-     * owning user — mirrors the playlist_auth_id scoping
-     * XtreamApiController applies to every other DVR query.
+     * owning user (mirrors the playlist_auth_id scoping
+     * XtreamApiController applies to every other DVR query).
      *
      * @return array{0: ?User, 1: ?PlaylistAuth, 2: bool} The owning user, the resolved guest
      *                                                    credential (null for owner auth), and

@@ -7,7 +7,6 @@ use App\Filament\Clusters\PlaylistAliases\PlaylistAliasesCluster;
 use App\Filament\Clusters\Settings\SettingsCluster;
 use App\Filament\Pages\Backups;
 use App\Filament\Pages\BrowseShows;
-use App\Filament\Pages\CachedDownloadsPage;
 use App\Filament\Pages\CreatePlugin;
 use App\Filament\Pages\CustomDashboard;
 use App\Filament\Pages\LogViewer;
@@ -17,6 +16,7 @@ use App\Filament\Pages\ReleaseLogs;
 use App\Filament\Pages\RequestContent;
 use App\Filament\Resources\AedProfiles\AedProfileResource;
 use App\Filament\Resources\Assets\AssetResource;
+use App\Filament\Resources\CachedContentFiles\CachedContentFileResource;
 use App\Filament\Resources\Categories\CategoryResource;
 use App\Filament\Resources\Channels\ChannelResource;
 use App\Filament\Resources\ChannelScrubbers\ChannelScrubberResource;
@@ -118,10 +118,9 @@ final class AdminNavigationSchema
                     'stream_file_settings' => ['resolve' => fn () => StreamFileSettingResource::getNavigationItems()],
                     'channel_scrubbers' => ['resolve' => fn () => ChannelScrubberResource::getNavigationItems()],
                     'cached_downloads' => [
-                        // Hide the entry when the feature is off so the
-                        // sidebar matches the page's own canAccess() gate.
+                        // Hidden while caching is off, matching the resource's canAccess().
                         'available' => fn () => (bool) (app(GeneralSettings::class)->enable_cache ?? false),
-                        'resolve' => fn () => CachedDownloadsPage::getNavigationItems(),
+                        'resolve' => fn () => CachedContentFileResource::getNavigationItems(),
                     ],
                 ],
             ],
