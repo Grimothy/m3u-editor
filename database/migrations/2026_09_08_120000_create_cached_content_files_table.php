@@ -27,8 +27,8 @@ return new class extends Migration
             $table->string('content_type'); // 'movie' | 'episode'
             $table->string('tmdb_id')->nullable();
             $table->string('tvdb_id')->nullable();
-            $table->unsignedSmallInteger('season_number')->nullable();
-            $table->unsignedSmallInteger('episode_number')->nullable();
+            $table->unsignedInteger('season_number')->nullable();
+            $table->unsignedInteger('episode_number')->nullable();
             $table->string('quality')->nullable();
             $table->string('content_fingerprint');
             $table->string('title', 500)->nullable();
