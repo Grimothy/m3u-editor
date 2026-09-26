@@ -535,3 +535,11 @@ it('factory definition() defaults user_id and playlist_id', function () {
     expect($file->user_id)->not->toBeNull()
         ->and($file->playlist_id)->not->toBeNull();
 });
+
+it('stores season and episode numbers wider than a smallint', function () {
+    $file = CachedContentFile::factory()->forEpisode('1399', 2024, 20240101)->create();
+
+    expect($file->fresh())
+        ->season_number->toBe(2024)
+        ->episode_number->toBe(20240101);
+});

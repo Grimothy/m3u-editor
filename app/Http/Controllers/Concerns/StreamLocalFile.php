@@ -7,7 +7,8 @@ use Symfony\Component\HttpFoundation\StreamedResponse;
 /**
  * Shared HTTP Range + full-stream serving loop for controllers that
  * hand a local file back to the browser. Used by CachedContentStreamController
- * (cached content) and DvrStreamController (DVR recordings).
+ * (cached content), DvrStreamController (DVR recordings) and
+ * MediaServerProxyController (local media integrations).
  *
  * Returned responses are streamed (`StreamedResponse`), not buffered -
  * multi-MB DVR recordings and GB-class cached movies never sit in PHP
@@ -63,6 +64,9 @@ class StreamLocalFile
      *                              -> serve the whole file (200). Malformed
      *                              -> also serve the whole file (200).
      *                              Out-of-bounds -> 416.
+     * @param  array<string, string>  $extraHeaders  Additional headers merged into
+     *                                               the 200/206 response.
+     * @param  int  $chunkSize  Bytes read and flushed per iteration.
      */
     public static function serve(
         string $fullPath,
@@ -70,60 +74,63 @@ class StreamLocalFile
         string $mimeType,
         string $filename,
         ?string $range,
+        array $extraHeaders = [],
+        int $chunkSize = self::CHUNK_SIZE,
     ): StreamedResponse {
+        $headers = [
+            'Content-Type' => $mimeType,
+            'Accept-Ranges' => 'bytes',
+            'Content-Disposition' => 'inline; filename="'.$filename.'"',
+            ...$extraHeaders,
+        ];
+
         if ($range !== null && $range !== '' && preg_match(self::RANGE_PATTERN, $range) === 1) {
             try {
                 [$start, $end, $length] = static::parseRangeOrThrow($range, $fileSize);
-
-                $headers = [
-                    'Content-Type' => $mimeType,
-                    'Content-Length' => $length,
-                    'Content-Range' => "bytes {$start}-{$end}/{$fileSize}",
-                    'Accept-Ranges' => 'bytes',
-                    'Content-Disposition' => 'inline; filename="'.$filename.'"',
-                ];
-
-                return response()->stream(static function () use ($fullPath, $start, $length): void {
-                    $handle = fopen($fullPath, 'rb');
-                    if ($handle === false) {
-                        return;
-                    }
-                    fseek($handle, $start);
-                    $remaining = $length;
-
-                    while (! feof($handle) && $remaining > 0) {
-                        $chunkSize = min(self::CHUNK_SIZE, $remaining);
-                        echo fread($handle, $chunkSize);
-                        $remaining -= $chunkSize;
-                    }
-
-                    fclose($handle);
-                }, 206, $headers);
             } catch (InvalidRangeException) {
                 return static::rangeNotSatisfiableResponse($fileSize, $mimeType, $filename);
             }
+
+            return response()->stream(
+                static fn () => static::streamBytes($fullPath, $start, $length, $chunkSize),
+                206,
+                [...$headers, 'Content-Length' => $length, 'Content-Range' => "bytes {$start}-{$end}/{$fileSize}"],
+            );
         }
 
-        $headers = [
-            'Content-Type' => $mimeType,
-            'Content-Length' => $fileSize,
-            'Accept-Ranges' => 'bytes',
-            'Content-Disposition' => 'inline; filename="'.$filename.'"',
-        ];
+        return response()->stream(
+            static fn () => static::streamBytes($fullPath, 0, $fileSize, $chunkSize),
+            200,
+            [...$headers, 'Content-Length' => $fileSize],
+        );
+    }
 
-        return response()->stream(static function () use ($fullPath): void {
-            $handle = fopen($fullPath, 'rb');
-            if ($handle === false) {
-                return;
+    /**
+     * Echo $length bytes of the file starting at $start, flushing each chunk
+     * and stopping early once the client disconnects.
+     */
+    private static function streamBytes(string $fullPath, int $start, int $length, int $chunkSize): void
+    {
+        $handle = fopen($fullPath, 'rb');
+        if ($handle === false) {
+            return;
+        }
+
+        fseek($handle, $start);
+        $remaining = $length;
+
+        while ($remaining > 0 && ! feof($handle) && connection_status() === CONNECTION_NORMAL) {
+            $data = fread($handle, min($chunkSize, $remaining));
+            if ($data === false || $data === '') {
+                break;
             }
 
-            while (! feof($handle)) {
-                echo fread($handle, self::CHUNK_SIZE);
-                flush();
-            }
+            echo $data;
+            flush();
+            $remaining -= strlen($data);
+        }
 
-            fclose($handle);
-        }, 200, $headers);
+        fclose($handle);
     }
 
     /**
