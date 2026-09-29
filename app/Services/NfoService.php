@@ -58,6 +58,9 @@ class NfoService
                 $xml .= $this->xmlElement('status', $metadata['status']);
             }
 
+            // TMDB's US rating first, then the rating a media server sync stored
+            $this->appendXml($xml, 'mpaa', $metadata['content_rating'] ?? $metadata['official_rating'] ?? null);
+
             $this->appendGenres($xml, $metadata['genres'] ?? null);
             $this->appendNamedList($xml, 'studio', $metadata['networks'] ?? null);
 
@@ -239,6 +242,8 @@ class NfoService
                 }
                 $xml .= $this->xmlElement('runtime', $runtime);
             }
+
+            $this->appendXml($xml, 'mpaa', ($info['mpaa_rating'] ?? null) ?: ($info['tmdb_certification'] ?? null));
 
             $this->appendGenres($xml, $info['genres'] ?? $movieData['genre'] ?? null);
             $this->appendXml($xml, 'director', $info['director'] ?? $movieData['director'] ?? null);

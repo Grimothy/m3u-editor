@@ -77,6 +77,11 @@ it('fetches cast, director, and trailer for VOD movies', function () {
                     ],
                 ],
             ],
+            'release_dates' => [
+                'results' => [
+                    ['iso_3166_1' => 'US', 'release_dates' => [['certification' => 'R', 'type' => 3]]],
+                ],
+            ],
         ], 200),
     ]);
 
@@ -103,6 +108,7 @@ it('fetches cast, director, and trailer for VOD movies', function () {
     expect($channel->info['cast'])->toBe('Keanu Reeves, Laurence Fishburne, Carrie-Anne Moss')
         ->and($channel->info['director'])->toBe('Lana Wachowski, Lilly Wachowski')
         ->and($channel->info['youtube_trailer'])->toBe('https://www.youtube.com/watch?v=vKQi3bBA1wc')
+        ->and($channel->info['mpaa_rating'])->toBe('R')
         // info is a Postgres jsonb column, which does not preserve object key
         // order - toEqual (loose ==) checks values while ignoring key order.
         ->and($channel->info['cast_list'])->toEqual([
@@ -163,6 +169,15 @@ it('fetches cast, director, and trailer for TV series', function () {
             ],
             'number_of_seasons' => 5,
             'number_of_episodes' => 62,
+            'networks' => [
+                ['id' => 174, 'name' => 'AMC', 'logo_path' => '/amc.png', 'origin_country' => 'US'],
+            ],
+            'content_ratings' => [
+                'results' => [
+                    ['iso_3166_1' => 'DE', 'rating' => '16'],
+                    ['iso_3166_1' => 'US', 'rating' => 'TV-MA'],
+                ],
+            ],
         ], 200),
         'https://api.themoviedb.org/3/tv/1396/season/*' => Http::response([
             'episodes' => [],
@@ -191,6 +206,10 @@ it('fetches cast, director, and trailer for TV series', function () {
     expect($series->cast)->toBe('Bryan Cranston, Aaron Paul, Anna Gunn')
         ->and($series->director)->toBe('Vince Gilligan, Michelle MacLaren')
         ->and($series->youtube_trailer)->toBe('https://www.youtube.com/watch?v=HhesaQXLuRY')
+        ->and($series->metadata['content_rating'])->toBe('TV-MA')
+        ->and($series->metadata['networks'])->toEqual([
+            ['id' => 174, 'name' => 'AMC', 'logo' => 'https://image.tmdb.org/t/p/w300/amc.png'],
+        ])
         // metadata is a Postgres jsonb column, which does not preserve object key
         // order - toEqual (loose ==) checks values while ignoring key order.
         ->and($series->metadata['cast_list'])->toEqual([

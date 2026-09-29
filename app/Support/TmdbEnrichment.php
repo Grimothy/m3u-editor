@@ -13,16 +13,18 @@ class TmdbEnrichment
      * Keys only TMDB enrichment writes - Xtream providers never send them, so a
      * refresh would silently drop them and FetchTmdbIds' "already enriched" gate
      * (tmdb_id + plot + cover) would never put them back. Their presence also
-     * marks a row as TMDB-enriched.
+     * marks a row as TMDB-enriched. Xtream VOD providers do send mpaa_rating, so it
+     * can't live here without mis-marking provider-only rows - TMDB's VOD value is
+     * mirrored to tmdb_certification instead, and series use content_rating.
      */
-    public const PROVIDER_ABSENT_KEYS = ['cast_list', 'clearlogo', 'related_tmdb'];
+    public const PROVIDER_ABSENT_KEYS = ['cast_list', 'clearlogo', 'related_tmdb', 'content_rating', 'networks', 'tmdb_certification'];
 
     /**
      * VOD `info` keys TMDB enrichment overwrites with its own value (as opposed to
      * only filling when empty, like plot/cover_big), so on an enriched row the
      * persisted value is TMDB's. Kept over the provider's value when TMDB is preferred.
      */
-    public const PREFERRED_VOD_INFO_KEYS = ['backdrop_path', 'cast', 'director', 'youtube_trailer', 'rating', 'vote_count'];
+    public const PREFERRED_VOD_INFO_KEYS = ['backdrop_path', 'cast', 'director', 'youtube_trailer', 'rating', 'vote_count', 'mpaa_rating'];
 
     /** Series `metadata` keys kept over the provider's value when TMDB is preferred. */
     public const PREFERRED_SERIES_METADATA_KEYS = ['vote_count'];
