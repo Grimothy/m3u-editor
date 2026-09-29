@@ -21,7 +21,7 @@ it('persists tmdb vote_count when manually applying a movie match to a VOD', fun
     $vod = Channel::factory()->create([
         'user_id' => $this->user->id,
         'is_vod' => true,
-        'info' => ['mpaa_rating' => 'PG'],
+        'info' => ['mpaa_rating' => 'PG', 'age' => '16+'],
     ]);
 
     $tmdbService = Mockery::mock(TmdbService::class);
@@ -55,6 +55,8 @@ it('persists tmdb vote_count when manually applying a movie match to a VOD', fun
     // values, not the byte order jsonb chose to store the keys in.
     expect($vod->fresh()->info['vote_count'])->toBe(3)
         ->and($vod->fresh()->info['mpaa_rating'])->toBe('R')
+        // The generic age field is provider-owned: only filled when blank.
+        ->and($vod->fresh()->info['age'])->toBe('16+')
         ->and($vod->fresh()->info['clearlogo'])->toBe('https://image.tmdb.org/t/p/w500/matrix-logo.png')
         ->and($vod->fresh()->info['tmdb_keywords'])->toBe(['saving the world', 'dystopia'])
         ->and($vod->fresh()->info['cast_list'])->toEqual([
