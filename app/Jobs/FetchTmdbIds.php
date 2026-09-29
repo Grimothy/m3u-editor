@@ -772,6 +772,11 @@ class FetchTmdbIds implements ShouldQueue
                     $info['mpaa_rating'] = $details['certification'];
                 }
 
+                // Mirror it into the generic age field only when the provider left that blank
+                if (! empty($details['certification']) && empty($info['age'])) {
+                    $info['age'] = $details['certification'];
+                }
+
                 // Always set, even to null: TMDB's own certification doubles as the
                 // "certification checked" sentinel for the on-demand backfill gate.
                 $info['tmdb_certification'] = $details['certification'] ?? null;

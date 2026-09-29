@@ -109,6 +109,7 @@ it('fetches cast, director, and trailer for VOD movies', function () {
         ->and($channel->info['director'])->toBe('Lana Wachowski, Lilly Wachowski')
         ->and($channel->info['youtube_trailer'])->toBe('https://www.youtube.com/watch?v=vKQi3bBA1wc')
         ->and($channel->info['mpaa_rating'])->toBe('R')
+        ->and($channel->info['age'])->toBe('R')
         // info is a Postgres jsonb column, which does not preserve object key
         // order - toEqual (loose ==) checks values while ignoring key order.
         ->and($channel->info['cast_list'])->toEqual([

@@ -357,10 +357,26 @@ it('falls back to the TMDB certification in get_vod_info when the provider ratin
         'is_vod' => true,
         'title' => 'The Matrix',
         'last_metadata_fetch' => now(),
-        'info' => ['plot' => 'Plot', 'mpaa_rating' => '', 'tmdb_certification' => 'R'],
+        'info' => ['plot' => 'Plot', 'mpaa_rating' => '', 'age' => '', 'tmdb_certification' => 'R'],
     ]);
 
     $this->getJson(xtreamCastUrl($this->username, $this->password, 'get_vod_info', ['vod_id' => $channel->id]))
         ->assertOk()
-        ->assertJsonPath('info.mpaa_rating', 'R');
+        ->assertJsonPath('info.mpaa_rating', 'R')
+        ->assertJsonPath('info.age', 'R');
+});
+
+it('keeps a provider-sent age in get_vod_info over the TMDB certification', function () {
+    $group = Group::factory()->for($this->user)->create();
+    $channel = Channel::factory()->for($this->playlist)->for($group)->create([
+        'enabled' => true,
+        'is_vod' => true,
+        'title' => 'The Matrix',
+        'last_metadata_fetch' => now(),
+        'info' => ['plot' => 'Plot', 'age' => '16+', 'tmdb_certification' => 'R'],
+    ]);
+
+    $this->getJson(xtreamCastUrl($this->username, $this->password, 'get_vod_info', ['vod_id' => $channel->id]))
+        ->assertOk()
+        ->assertJsonPath('info.age', '16+');
 });

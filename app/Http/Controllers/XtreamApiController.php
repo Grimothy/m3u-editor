@@ -1907,7 +1907,8 @@ class XtreamApiController extends Controller
                 'cast' => $info['cast'] ?? '',
                 'description' => $info['description'] ?? '',
                 'plot' => $info['plot'] ?? '',
-                'age' => $info['age'] ?? '',
+                // Same blank-provider fallback as mpaa_rating, for clients that only read `age`.
+                'age' => ($info['age'] ?? '') ?: ($info['tmdb_certification'] ?? ''),
                 // A blank provider value falls back to TMDB's persisted certification.
                 'mpaa_rating' => ($info['mpaa_rating'] ?? '') ?: ($info['tmdb_certification'] ?? ''),
                 'rating_count_kinopoisk' => $info['rating_count_kinopoisk'] ?? 0,
