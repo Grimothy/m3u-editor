@@ -1175,7 +1175,8 @@ class SeriesResource extends Resource implements CopilotResource
                         ->collapsed()
                         ->visible(fn (?Series $record): bool => filled($record?->metadata['content_rating'] ?? null)
                             || filled($record?->metadata['official_rating'] ?? null)
-                            || filled($record?->metadata['networks'] ?? null))
+                            || filled($record?->metadata['networks'] ?? null)
+                            || filled($record?->metadata['tmdb_keywords'] ?? null))
                         ->schema([
                             Grid::make(2)
                                 ->schema([
@@ -1196,6 +1197,13 @@ class SeriesResource extends Resource implements CopilotResource
                                             ->filter()
                                             ->values()
                                             ->all()),
+                                    TextEntry::make('tmdb_keywords')
+                                        ->label(__('TMDB Keywords'))
+                                        ->helperText(__('Themes from TMDB, used to match holiday / theme dynamic groups.'))
+                                        ->badge()
+                                        ->placeholder('-')
+                                        ->state(fn (?Series $record): array => $record?->metadata['tmdb_keywords'] ?? [])
+                                        ->columnSpanFull(),
                                 ]),
                         ]),
                     Section::make(__('Stream file settings'))
