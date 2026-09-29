@@ -212,6 +212,12 @@ trait AppliesTmdbSelection
             // Always set, even to null: the on-demand backfill sentinel.
             $info['tmdb_certification'] = $details['certification'] ?? null;
 
+            // Always set, even to []: TMDB's own themes (christmas, heist, ...)
+            // double as the "keywords checked" sentinel FetchTmdbIds' on-demand
+            // backfill gate relies on - otherwise a title with genuinely none
+            // would never satisfy the gate and would be re-enriched on every view.
+            $info['tmdb_keywords'] = $details['keywords'] ?? [];
+
             if (! empty($details['runtime']) && (empty($info['duration_secs']) || ($info['duration_secs'] ?? 0) === 0)) {
                 $runtimeMinutes = (int) $details['runtime'];
                 $runtimeSeconds = $runtimeMinutes * 60;
@@ -371,6 +377,12 @@ trait AppliesTmdbSelection
             // Always set, even to null/[]: together they're the on-demand backfill sentinel.
             $seriesMetadata['content_rating'] = $details['certification'] ?? null;
             $seriesMetadata['networks'] = $details['networks'] ?? [];
+
+            // Always set, even to []: TMDB's own themes (christmas, heist, ...)
+            // double as the "keywords checked" sentinel FetchTmdbIds' on-demand
+            // backfill gate relies on - otherwise a series with genuinely none
+            // would never satisfy the gate and would be re-enriched on every view.
+            $seriesMetadata['tmdb_keywords'] = $details['keywords'] ?? [];
 
             // Always set, even to an empty array: it doubles as the "TMDB has been
             // checked" sentinel FetchTmdbIds' on-demand backfill gate relies on.

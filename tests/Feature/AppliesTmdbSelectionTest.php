@@ -43,6 +43,7 @@ it('persists tmdb vote_count when manually applying a movie match to a VOD', fun
             'cast_list' => [
                 ['id' => 6384, 'name' => 'Keanu Reeves', 'character' => 'Neo', 'photo' => null],
             ],
+            'keywords' => ['saving the world', 'dystopia'],
         ]);
     app()->instance(TmdbService::class, $tmdbService);
 
@@ -55,6 +56,7 @@ it('persists tmdb vote_count when manually applying a movie match to a VOD', fun
     expect($vod->fresh()->info['vote_count'])->toBe(3)
         ->and($vod->fresh()->info['mpaa_rating'])->toBe('R')
         ->and($vod->fresh()->info['clearlogo'])->toBe('https://image.tmdb.org/t/p/w500/matrix-logo.png')
+        ->and($vod->fresh()->info['tmdb_keywords'])->toBe(['saving the world', 'dystopia'])
         ->and($vod->fresh()->info['cast_list'])->toEqual([
             ['id' => 6384, 'name' => 'Keanu Reeves', 'character' => 'Neo', 'photo' => null],
         ]);
@@ -86,6 +88,7 @@ it('persists tmdb vote_count when manually applying a series match', function ()
             'cast_list' => [
                 ['id' => 22970, 'name' => 'Peter Dinklage', 'character' => 'Tyrion Lannister', 'photo' => null],
             ],
+            'keywords' => ['dragon', 'fantasy'],
         ]);
     app()->instance(TmdbService::class, $tmdbService);
 
@@ -98,6 +101,7 @@ it('persists tmdb vote_count when manually applying a series match', function ()
         ->and($series->fresh()->metadata['content_rating'])->toBe('TV-MA')
         ->and($series->fresh()->metadata['networks'])->toEqual([['id' => 49, 'name' => 'HBO', 'logo' => null]])
         ->and($series->fresh()->metadata['clearlogo'])->toBe('https://image.tmdb.org/t/p/w500/got-logo.png')
+        ->and($series->fresh()->metadata['tmdb_keywords'])->toBe(['dragon', 'fantasy'])
         ->and($series->fresh()->metadata['cast_list'])->toEqual([
             ['id' => 22970, 'name' => 'Peter Dinklage', 'character' => 'Tyrion Lannister', 'photo' => null],
         ]);

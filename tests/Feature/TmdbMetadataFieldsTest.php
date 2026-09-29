@@ -82,6 +82,12 @@ it('fetches cast, director, and trailer for VOD movies', function () {
                     ['iso_3166_1' => 'US', 'release_dates' => [['certification' => 'R', 'type' => 3]]],
                 ],
             ],
+            'keywords' => [
+                'keywords' => [
+                    ['id' => 825, 'name' => 'saving the world'],
+                    ['id' => 1701, 'name' => 'dystopia'],
+                ],
+            ],
         ], 200),
     ]);
 
@@ -109,6 +115,7 @@ it('fetches cast, director, and trailer for VOD movies', function () {
         ->and($channel->info['director'])->toBe('Lana Wachowski, Lilly Wachowski')
         ->and($channel->info['youtube_trailer'])->toBe('https://www.youtube.com/watch?v=vKQi3bBA1wc')
         ->and($channel->info['mpaa_rating'])->toBe('R')
+        ->and($channel->info['tmdb_keywords'])->toBe(['saving the world', 'dystopia'])
         // info is a Postgres jsonb column, which does not preserve object key
         // order - toEqual (loose ==) checks values while ignoring key order.
         ->and($channel->info['cast_list'])->toEqual([
@@ -178,6 +185,13 @@ it('fetches cast, director, and trailer for TV series', function () {
                     ['iso_3166_1' => 'US', 'rating' => 'TV-MA'],
                 ],
             ],
+            'keywords' => [
+                // TV uses `results`, not `keywords`.
+                'results' => [
+                    ['id' => 1701, 'name' => 'Drug Dealer'],
+                    ['id' => 825, 'name' => 'saving the world'],
+                ],
+            ],
         ], 200),
         'https://api.themoviedb.org/3/tv/1396/season/*' => Http::response([
             'episodes' => [],
@@ -210,6 +224,7 @@ it('fetches cast, director, and trailer for TV series', function () {
         ->and($series->metadata['networks'])->toEqual([
             ['id' => 174, 'name' => 'AMC', 'logo' => 'https://image.tmdb.org/t/p/w300/amc.png'],
         ])
+        ->and($series->metadata['tmdb_keywords'])->toBe(['drug dealer', 'saving the world'])
         // metadata is a Postgres jsonb column, which does not preserve object key
         // order - toEqual (loose ==) checks values while ignoring key order.
         ->and($series->metadata['cast_list'])->toEqual([

@@ -515,10 +515,11 @@ class FetchTmdbIds implements ShouldQueue
      * the first time it's viewed. Self-gating on existing tmdb_id/metadata,
      * so repeat calls after the first successful enrichment are cheap no-ops.
      *
-     * $backfillEnrichment (on-demand Xtream path) also requires the related_tmdb
-     * and tmdb_certification sentinels, so a title whose provider already supplied
-     * tmdb_id/plot/cover - or one enriched before cast_list/clearlogo/related_tmdb/
-     * mpaa_rating existed - still gets those fields filled once.
+     * $backfillEnrichment (on-demand Xtream path) also requires the related_tmdb,
+     * tmdb_certification and tmdb_keywords sentinels, so a title whose provider
+     * already supplied tmdb_id/plot/cover - or one enriched before cast_list/
+     * clearlogo/related_tmdb/mpaa_rating/keywords existed - still gets those
+     * fields filled once.
      */
     public function processVodChannel(TmdbService $tmdb, Channel $channel, bool $backfillEnrichment = false): void
     {
@@ -535,11 +536,12 @@ class FetchTmdbIds implements ShouldQueue
             $hasMetadata = array_key_exists('related_tmdb', $info);
         }
 
-        // The on-demand path also backfills the US certification once on titles
-        // enriched before it existed. mpaa_rating can't be the sentinel (providers
-        // send it, often blank), so the TMDB-only tmdb_certification key is.
+        // The on-demand path also backfills the US certification and keywords once on
+        // titles enriched before they existed. mpaa_rating can't be the sentinel
+        // (providers send it, often blank), so the TMDB-only tmdb_certification key is.
         if ($hasMetadata && $backfillEnrichment) {
-            $hasMetadata = array_key_exists('tmdb_certification', $info);
+            $hasMetadata = array_key_exists('tmdb_certification', $info)
+                && array_key_exists('tmdb_keywords', $info);
         }
 
         // Determine the best existing TMDB ID we have
@@ -776,6 +778,12 @@ class FetchTmdbIds implements ShouldQueue
                 // "certification checked" sentinel for the on-demand backfill gate.
                 $info['tmdb_certification'] = $details['certification'] ?? null;
 
+                // Always set, even to []: TMDB's own themes (christmas, heist, ...)
+                // double as the "keywords checked" sentinel for the on-demand
+                // backfill gate - otherwise a title with genuinely none would never
+                // satisfy the gate and would be re-enriched on every view.
+                $info['tmdb_keywords'] = $details['keywords'] ?? [];
+
                 // Populate duration from TMDB runtime (in minutes)
                 if (! empty($details['runtime']) && (empty($info['duration_secs']) || ($info['duration_secs'] ?? 0) === 0)) {
                     $runtimeMinutes = (int) $details['runtime'];
@@ -891,12 +899,13 @@ class FetchTmdbIds implements ShouldQueue
             $hasMetadata = array_key_exists('related_tmdb', $seriesMetadataArr);
         }
 
-        // The on-demand path also backfills the US rating and networks once on series
-        // enriched before they existed - both keys are always written, so their presence
-        // marks the series as checked even when TMDB has neither.
+        // The on-demand path also backfills the US rating, networks and keywords once on
+        // series enriched before they existed - all three keys are always written, so
+        // their presence marks the series as checked even when TMDB has none.
         if ($hasMetadata && $backfillEnrichment) {
             $hasMetadata = array_key_exists('content_rating', $seriesMetadataArr)
-                && array_key_exists('networks', $seriesMetadataArr);
+                && array_key_exists('networks', $seriesMetadataArr)
+                && array_key_exists('tmdb_keywords', $seriesMetadataArr);
         }
 
         if (($existingTvdbId || $existingTmdbId) && $hasMetadata && ! $this->overwriteExisting) {
@@ -1149,6 +1158,12 @@ class FetchTmdbIds implements ShouldQueue
 
                 // Populate networks (id/name/logo) - written to tvshow.nfo as <studio>
                 $metadata['networks'] = $details['networks'] ?? [];
+
+                // Always set, even to []: TMDB's own themes (christmas, heist, ...)
+                // double as the "keywords checked" sentinel for the on-demand
+                // backfill gate - otherwise a series with genuinely none would never
+                // satisfy the gate and would be re-enriched on every view.
+                $metadata['tmdb_keywords'] = $details['keywords'] ?? [];
 
                 // Populate "more like this" candidates (Xtream get_series_info resolves
                 // these against the playlist's own library at request time). Always
