@@ -22,6 +22,7 @@ use App\Models\PlaylistAuth;
 use App\Models\Scopes\ExcludeAioFailoverClonesScope;
 use App\Models\StreamProfile;
 use App\Settings\GeneralSettings;
+use Carbon\Carbon;
 use Exception;
 use Illuminate\Http\Client\ConnectionException;
 use Illuminate\Http\Request;
@@ -33,6 +34,12 @@ use Illuminate\Support\Facades\Redis;
 
 class M3uProxyService
 {
+    /**
+     * How long (seconds) an idle timeshift stream stays reusable for a seeking player. Kept below
+     * the proxy's idle stream cleanup timeout (15s by default).
+     */
+    private const TIMESHIFT_IDLE_REUSE_SECONDS = 10;
+
     protected string $apiBaseUrl;
 
     protected ?string $apiPublicUrl;
@@ -1160,6 +1167,32 @@ class M3uProxyService
         // all pool reuse paths when timeshift parameters are present on the request.
         $isTimeshiftRequest = $request && ($request->filled('timeshift_duration') || $request->filled('timeshift_date') || $request->filled('utc'));
 
+        // Players re-request the catchup URL for every Range/seek, and each one asks for the
+        // same programme window - i.e. the same upstream timeshift URL and proxy stream. Hand
+        // back that stream rather than re-running capacity checks and reserving another
+        // provider profile slot on every seek.
+        $timeshiftKey = $isTimeshiftRequest ? self::buildTimeshiftKey($request) : null;
+        if ($timeshiftKey !== null) {
+            $existingStreamId = $this->findExistingPooledStream($originalChannelId, $originalPlaylistUuid, $profile?->id, null, timeshiftKey: $timeshiftKey);
+
+            if ($existingStreamId) {
+                Log::debug('Reusing existing timeshift stream for the same programme window', [
+                    'stream_id' => $existingStreamId,
+                    'original_channel_id' => $originalChannelId,
+                    'original_playlist_uuid' => $originalPlaylistUuid,
+                    'profile_id' => $profile?->id,
+                ]);
+
+                if ($profile) {
+                    return $this->buildTranscodeStreamUrl($existingStreamId, $profile->format ?? 'ts', $username);
+                }
+
+                $timeshiftUrl = PlaylistService::generateTimeshiftUrl($request, PlaylistUrlService::getChannelUrl($channel, $playlist), $playlist, $channel);
+
+                return $this->buildProxyUrl($existingStreamId, $this->getFormatFromUrl($timeshiftUrl), $username);
+            }
+        }
+
         // Before creating a new stream, check if there's an active DVR recording for this channel.
         // If so, route through the editor's DVR HLS proxy so we piggyback off the existing
         // broadcast instead of creating a duplicate upstream connection to the provider.
@@ -1626,6 +1659,12 @@ class M3uProxyService
                 $metadata['playlist_auth_id'] = (string) $playlistAuthId;
             }
 
+            // Tag catchup streams with their programme window so seeks can reuse them,
+            // and so live pool reuse never picks one up for the same channel.
+            if ($timeshiftKey !== null) {
+                $metadata['timeshift_key'] = $timeshiftKey;
+            }
+
             Log::debug('Creating transcoded stream with provider profile', [
                 'channel_id' => $actualChannel->id,
                 'original_channel_id' => $originalChannelId,
@@ -1699,6 +1738,12 @@ class M3uProxyService
             // Track PlaylistAuth ID for per-auth stream limit enforcement
             if ($playlistAuthId) {
                 $metadata['playlist_auth_id'] = (string) $playlistAuthId;
+            }
+
+            // Tag catchup streams with their programme window so seeks can reuse them,
+            // and so live pool reuse never picks one up for the same channel.
+            if ($timeshiftKey !== null) {
+                $metadata['timeshift_key'] = $timeshiftKey;
             }
 
             try {
@@ -3174,9 +3219,13 @@ class M3uProxyService
      * @param  int|null  $profileId  StreamProfile ID (transcoding profile)
      * @param  int|null  $providerProfileId  PlaylistProfile ID (provider profile)
      * @param  string  $type  The type of model ('channel' or 'episode') for metadata keys
+     * @param  string|null  $timeshiftKey  Catchup programme window (see buildTimeshiftKey()). When set, only a
+     *                                     timeshift stream for that exact window matches, including one whose
+     *                                     client is momentarily between Range requests. When null, timeshift
+     *                                     streams never match.
      * @return string|null Stream ID if found, null otherwise
      */
-    protected function findExistingPooledStream(int $modelId, string $playlistUuid, ?int $profileId = null, ?int $providerProfileId = null, string $type = 'channel'): ?string
+    protected function findExistingPooledStream(int $modelId, string $playlistUuid, ?int $profileId = null, ?int $providerProfileId = null, string $type = 'channel', ?string $timeshiftKey = null): ?string
     {
         try {
             // Query m3u-proxy for streams by ORIGINAL channel ID metadata
@@ -3189,7 +3238,9 @@ class M3uProxyService
                 ->get($endpoint, [
                     'field' => 'original_'.$type.'_id',  // Search by original, not actual model ID to enable cross-provider failover pooling
                     'value' => (string) $modelId,
-                    'active_only' => true,  // Only return active streams
+                    // Only return active streams. A seeking catchup player has no connected client
+                    // between its Range requests, so timeshift lookups also need idle streams.
+                    'active_only' => $timeshiftKey === null,
                 ]);
 
             if (! $response->successful()) {
@@ -3209,6 +3260,7 @@ class M3uProxyService
                 // 3. If profileId specified: must be a transcoded stream with matching StreamProfile ID
                 //    If profileId is null: must be a direct (non-transcoded) stream
                 // 4. Same PlaylistProfile ID (provider profile, if specified)
+                // 5. Same catchup programme window (or, for live lookups, not a catchup stream at all)
                 $isTranscoded = ($metadata['transcoding'] ?? null) === 'true';
                 $transcodingMatch = $profileId !== null
                     ? ($isTranscoded && ($metadata['profile_id'] ?? null) == $profileId)
@@ -3218,7 +3270,9 @@ class M3uProxyService
                     ($metadata['original_'.$type.'_id'] ?? null) == $modelId &&
                     ($metadata['original_playlist_uuid'] ?? null) === $playlistUuid &&
                     $transcodingMatch &&
-                    ($providerProfileId === null || ($metadata['provider_profile_id'] ?? null) == $providerProfileId)
+                    ($providerProfileId === null || ($metadata['provider_profile_id'] ?? null) == $providerProfileId) &&
+                    ($metadata['timeshift_key'] ?? null) === $timeshiftKey &&
+                    ($timeshiftKey === null || $this->isTimeshiftStreamReusable($stream))
                 ) {
                     Log::debug('Found existing pooled stream (cross-provider failover support)', [
                         'stream_id' => $stream['stream_id'],
@@ -3250,6 +3304,41 @@ class M3uProxyService
 
             return null;
         }
+    }
+
+    /**
+     * Identify the catchup programme window a timeshift request asks for, from its raw
+     * parameters. Requests with the same key resolve to the same upstream timeshift URL.
+     */
+    private static function buildTimeshiftKey(Request $request): string
+    {
+        return implode('|', [
+            $request->input('timeshift_duration', ''),
+            $request->input('timeshift_date', ''),
+            $request->input('utc', ''),
+            $request->input('lutc', ''),
+        ]);
+    }
+
+    /**
+     * Whether a timeshift stream returned by the proxy is safe to hand back to a client.
+     *
+     * A stream with no connected client is only reused while it was touched recently, so it
+     * can't be swept by the proxy's idle cleanup before the client reaches it.
+     *
+     * @param  array{client_count?: int, last_access?: string}  $stream
+     */
+    private function isTimeshiftStreamReusable(array $stream): bool
+    {
+        if (($stream['client_count'] ?? 0) > 0) {
+            return true;
+        }
+
+        if (empty($stream['last_access'])) {
+            return false;
+        }
+
+        return Carbon::parse($stream['last_access'])->greaterThan(now()->subSeconds(self::TIMESHIFT_IDLE_REUSE_SECONDS));
     }
 
     /**
