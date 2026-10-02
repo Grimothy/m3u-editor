@@ -276,6 +276,8 @@ class PlexService implements MediaServer
             'IndexNumber' => $item['index'] ?? null,
             'ParentIndexNumber' => $item['parentIndex'] ?? null,
             'Genres' => array_map(fn ($g) => $g['tag'], $item['Genre'] ?? []),
+            // Plex has a single studio string (the network for shows); Emby/Jellyfin shape.
+            'Studios' => ! empty($item['studio']) ? [['Name' => $item['studio']]] : [],
             'People' => array_map(fn ($p) => [
                 'Name' => $p['tag'] ?? $p['name'] ?? null,
                 'Type' => 'Actor',
@@ -827,11 +829,24 @@ class PlexService implements MediaServer
         );
     }
 
-    public function getDirectImageUrl(string $itemId, string $imageType = 'Primary'): string
+    public function getDirectImageUrl(string $itemId, string $imageType = 'Primary', ?int $maxWidth = null): string
     {
         $thumb = $imageType === 'Primary' ? 'thumb' : 'art';
+        $path = "/library/metadata/{$itemId}/{$thumb}";
 
-        return "{$this->baseUrl}/library/metadata/{$itemId}/{$thumb}?X-Plex-Token={$this->apiKey}";
+        if (! $maxWidth) {
+            return "{$this->baseUrl}{$path}?X-Plex-Token={$this->apiKey}";
+        }
+
+        // Plex's photo transcoder fits the image inside width x height; a tall
+        // box makes the width the only real limit.
+        return "{$this->baseUrl}/photo/:/transcode?".http_build_query([
+            'width' => $maxWidth,
+            'height' => $maxWidth * 4,
+            'upscale' => 0,
+            'url' => $path,
+            'X-Plex-Token' => $this->apiKey,
+        ]);
     }
 
     public function extractGenres(array $item): array

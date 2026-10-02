@@ -88,6 +88,9 @@ it('fetches cast, director, and trailer for VOD movies', function () {
                     ['id' => 1701, 'name' => 'dystopia'],
                 ],
             ],
+            'production_companies' => [
+                ['id' => 79, 'name' => 'Village Roadshow Pictures', 'logo_path' => '/vr.png', 'origin_country' => 'US'],
+            ],
         ], 200),
     ]);
 
@@ -115,8 +118,13 @@ it('fetches cast, director, and trailer for VOD movies', function () {
         ->and($channel->info['director'])->toBe('Lana Wachowski, Lilly Wachowski')
         ->and($channel->info['youtube_trailer'])->toBe('https://www.youtube.com/watch?v=vKQi3bBA1wc')
         ->and($channel->info['mpaa_rating'])->toBe('R')
+        ->and($channel->info['tmdb_certification'])->toBe('R')
+        ->and($channel->info['studios'])->toEqual([
+            ['id' => 79, 'name' => 'Village Roadshow Pictures', 'logo' => 'https://image.tmdb.org/t/p/w300/vr.png'],
+        ])
+        // The generic age field is provider-owned: get_vod_info falls back at read time instead.
+        ->and($channel->info)->not->toHaveKey('age')
         ->and($channel->info['tmdb_keywords'])->toBe(['saving the world', 'dystopia'])
-        ->and($channel->info['age'])->toBe('R')
         // info is a Postgres jsonb column, which does not preserve object key
         // order - toEqual (loose ==) checks values while ignoring key order.
         ->and($channel->info['cast_list'])->toEqual([
@@ -204,7 +212,8 @@ it('fetches cast, director, and trailer for TV series', function () {
         'user_id' => $this->user->id,
         'name' => 'Breaking Bad',
         'release_date' => '2008-01-20',
-        'metadata' => [],
+        // A stale rating from an earlier fetch - only TMDB writes it, so it's refreshed.
+        'metadata' => ['content_rating' => 'TV-14'],
     ]);
 
     $job = new FetchTmdbIds(
@@ -233,4 +242,70 @@ it('fetches cast, director, and trailer for TV series', function () {
             ['id' => 84433, 'name' => 'Aaron Paul', 'character' => 'Jesse Pinkman', 'photo' => null],
             ['id' => 134531, 'name' => 'Anna Gunn', 'character' => 'Skyler White', 'photo' => 'https://image.tmdb.org/t/p/w185/ag.jpg'],
         ]);
+});
+
+it('keeps media server studios on a VOD when TMDB has no production companies', function () {
+    Http::fake([
+        'https://api.themoviedb.org/3/search/movie*' => Http::response([
+            'results' => [['id' => 603, 'title' => 'The Matrix', 'release_date' => '1999-03-30', 'popularity' => 85.5]],
+        ], 200),
+        'https://api.themoviedb.org/3/movie/603/external_ids*' => Http::response(['imdb_id' => 'tt0133093'], 200),
+        'https://api.themoviedb.org/3/movie/603*' => Http::response([
+            'id' => 603,
+            'title' => 'The Matrix',
+            'release_date' => '1999-03-30',
+            'production_companies' => [],
+        ], 200),
+    ]);
+
+    $serverStudios = [['id' => null, 'name' => 'Warner Bros. Pictures', 'logo' => null]];
+    $channel = Channel::factory()->create([
+        'playlist_id' => $this->playlist->id,
+        'user_id' => $this->user->id,
+        'is_vod' => true,
+        'title' => 'The Matrix',
+        'year' => 1999,
+        'info' => ['studios' => $serverStudios],
+    ]);
+
+    (new FetchTmdbIds(vodChannelIds: [$channel->id], seriesIds: null, overwriteExisting: false, user: $this->user))
+        ->handle(app(TmdbService::class));
+
+    $info = $channel->refresh()->info;
+
+    expect($info['studios'])->toEqual($serverStudios)
+        ->and($info)->toHaveKey('tmdb_certification');
+});
+
+it('keeps media server networks on a series when TMDB has none', function () {
+    Http::fake([
+        'https://api.themoviedb.org/3/search/tv*' => Http::response([
+            'results' => [['id' => 1396, 'name' => 'Breaking Bad', 'first_air_date' => '2008-01-20', 'popularity' => 90.0]],
+        ], 200),
+        'https://api.themoviedb.org/3/tv/1396/external_ids*' => Http::response(['tvdb_id' => 81189], 200),
+        'https://api.themoviedb.org/3/tv/1396/season/*' => Http::response(['episodes' => []], 200),
+        'https://api.themoviedb.org/3/tv/1396*' => Http::response([
+            'id' => 1396,
+            'name' => 'Breaking Bad',
+            'first_air_date' => '2008-01-20',
+            'networks' => [],
+        ], 200),
+    ]);
+
+    $serverNetworks = [['id' => null, 'name' => 'AMC', 'logo' => null]];
+    $series = Series::factory()->create([
+        'playlist_id' => $this->playlist->id,
+        'user_id' => $this->user->id,
+        'name' => 'Breaking Bad',
+        'release_date' => '2008-01-20',
+        'metadata' => ['networks' => $serverNetworks],
+    ]);
+
+    (new FetchTmdbIds(vodChannelIds: null, seriesIds: [$series->id], overwriteExisting: false, user: $this->user))
+        ->handle(app(TmdbService::class));
+
+    $metadata = $series->refresh()->metadata;
+
+    expect($metadata['networks'])->toEqual($serverNetworks)
+        ->and($metadata)->toHaveKey('content_rating');
 });

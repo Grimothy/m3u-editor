@@ -147,7 +147,6 @@ return [
             'phpstan/phpstan',
             'phpunit/phpunit',
             'pragmarx/google2fa',
-            'prism-php/prism',
             'psy/psysh',
             'ralouphie/getallheaders',
             'react/promise',
@@ -190,6 +189,11 @@ return [
         // GenerateTranslations: "{PH{$index}}" is a placeholder token template,
         // not a secret.
         '2a3eaf0a6403',
+
+        // DocumentXtreamApiResponses: 'password' => 'test_pass' is example data
+        // in the API docs, mirroring the Xtream panel `user_info` shape. Not a
+        // credential.
+        '81cff0596bab',
 
         // public/js/saade/filament-laravel-log — published vendor assets that
         // embed tiny base64 PNG sprites inline in CSS. Not credentials.

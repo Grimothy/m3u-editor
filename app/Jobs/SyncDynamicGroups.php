@@ -229,12 +229,24 @@ class SyncDynamicGroups implements ShouldQueue
             ],
         );
 
-        $itemIds = DynamicGroup::itemsMatchingTmdbIds($type, $playlist->id, $tmdbIds)
-            ->pluck('id')
-            ->map(fn ($id): int => (int) $id)
-            ->all();
+        // TMDB returns ids best-first; keep each id's first rank so members
+        // list in TMDB order (trending rank, popularity, ...).
+        $rankByTmdbId = [];
+        foreach ($tmdbIds as $rank => $tmdbId) {
+            $rankByTmdbId[$tmdbId] ??= $rank;
+        }
 
-        $this->syncMembership($group, $type, $itemIds, $this->syncRunId);
+        $tmdbIdByItemId = DynamicGroup::itemsMatchingTmdbIds($type, $playlist->id, $tmdbIds)
+            ->pluck('tmdb_id', 'id')
+            ->all();
+        $itemIds = array_map('intval', array_keys($tmdbIdByItemId));
+
+        $positionByItemId = [];
+        foreach ($itemIds as $itemId) {
+            $positionByItemId[$itemId] = $rankByTmdbId[(string) $tmdbIdByItemId[$itemId]] ?? 0;
+        }
+
+        $this->syncMembership($group, $type, $itemIds, $this->syncRunId, $positionByItemId);
 
         return $group;
     }
@@ -325,8 +337,10 @@ class SyncDynamicGroups implements ShouldQueue
      * would dominate storage with low signal.
      *
      * @param  array<int, int>  $itemIds
+     * @param  array<int, int>  $positionByItemId  TMDB-rank position per item id; items
+     *                                             without a rank (theme rules) default to 0.
      */
-    private function syncMembership(DynamicGroup $group, string $type, array $itemIds, ?int $syncRunId = null): void
+    private function syncMembership(DynamicGroup $group, string $type, array $itemIds, ?int $syncRunId = null, array $positionByItemId = []): void
     {
         $morphClass = $type === 'vod' ? Channel::class : Series::class;
 
@@ -353,13 +367,17 @@ class SyncDynamicGroups implements ShouldQueue
             return;
         }
 
+        // Upsert (not insertOrIgnore) so surviving members pick up their new rank.
         foreach (array_chunk($itemIds, self::MEMBERSHIP_CHUNK_SIZE) as $chunk) {
-            DB::table('dynamic_group_items')->insertOrIgnore(
+            DB::table('dynamic_group_items')->upsert(
                 array_map(fn (int $id): array => [
                     'dynamic_group_id' => $group->id,
                     'item_type' => $morphClass,
                     'item_id' => $id,
+                    'position' => $positionByItemId[$id] ?? 0,
                 ], $chunk),
+                ['dynamic_group_id', 'item_type', 'item_id'],
+                ['position'],
             );
         }
 

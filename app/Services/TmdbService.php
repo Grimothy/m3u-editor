@@ -51,7 +51,7 @@ class TmdbService
      * collection. Each page is cached individually so this is mostly a
      * safety bound on TMDB API calls, not on member rows.
      */
-    public const MAX_DYNAMIC_GROUP_PAGES = 5;
+    public const MAX_DYNAMIC_GROUP_PAGES = 10;
 
     /**
      * TMDB keywords that are production / format meta-tags rather than themes
@@ -1008,7 +1008,7 @@ class TmdbService
                 'director' => $director,
                 'youtube_trailer' => $youtubeTrailer,
                 'certification' => $this->pickUsContentRating($data['content_ratings']['results'] ?? []),
-                'networks' => $this->reshapeNetworks($data['networks'] ?? []),
+                'networks' => $this->reshapeCompanies($data['networks'] ?? []),
                 // TV uses `results` (movies use `keywords`) - TMDB's API shape differs.
                 'keywords' => $this->normalizeKeywords($data['keywords']['results'] ?? []),
                 'recommendations' => $this->reshapeRecommendations($data['recommendations']['results'] ?? [], 'tv'),
@@ -1130,6 +1130,7 @@ class TmdbService
                 'director' => $directors,
                 'youtube_trailer' => $youtubeTrailer,
                 'certification' => $this->pickUsCertification($data['release_dates']['results'] ?? []),
+                'studios' => $this->reshapeCompanies($data['production_companies'] ?? []),
                 'recommendations' => $this->reshapeRecommendations($data['recommendations']['results'] ?? [], 'movie'),
                 'keywords' => $this->normalizeKeywords($data['keywords']['keywords'] ?? []),
             ];
@@ -1181,20 +1182,21 @@ class TmdbService
     }
 
     /**
-     * Reshape a TMDB series `networks` array to id/name/logo - the id matches
-     * TV_NETWORKS / `with_networks`, and `name` is what NfoService writes as <studio>.
+     * Reshape a TMDB series `networks` or movie `production_companies` array to
+     * id/name/logo - both share the same shape. Network ids match TV_NETWORKS /
+     * `with_networks`, and `name` is what NfoService writes as <studio>.
      *
-     * @param  array<int, array{id?: int, name?: string, logo_path?: string|null}>  $networks
+     * @param  array<int, array{id?: int, name?: string, logo_path?: string|null}>  $companies
      * @return list<array{id: int, name: string, logo: string|null}>
      */
-    private function reshapeNetworks(array $networks): array
+    private function reshapeCompanies(array $companies): array
     {
-        return collect($networks)
-            ->filter(fn (array $network): bool => ! empty($network['id']) && ! empty($network['name']))
-            ->map(fn (array $network): array => [
-                'id' => (int) $network['id'],
-                'name' => $network['name'],
-                'logo' => ! empty($network['logo_path']) ? 'https://image.tmdb.org/t/p/w300'.$network['logo_path'] : null,
+        return collect($companies)
+            ->filter(fn (array $company): bool => ! empty($company['id']) && ! empty($company['name']))
+            ->map(fn (array $company): array => [
+                'id' => (int) $company['id'],
+                'name' => $company['name'],
+                'logo' => ! empty($company['logo_path']) ? 'https://image.tmdb.org/t/p/w300'.$company['logo_path'] : null,
             ])
             ->values()
             ->all();
@@ -2998,20 +3000,29 @@ class TmdbService
     /**
      * Get all seasons for a TV series.
      *
+     * Pass $withEpisodesFor to also attach each listed season's `episodes`
+     * (runtime, vote_average, ...) in the same request via TMDB's
+     * `append_to_response=season/N` - TMDB caps appends at 20 per request, so
+     * anything past that is ignored rather than costing extra calls.
+     *
      * @param  int  $tmdbId  The TMDB ID of the TV series
+     * @param  array<int, int>  $withEpisodesFor  Season numbers to attach episodes for
      * @return array Array of season data
      */
-    public function getAllSeasons(int $tmdbId): array
+    public function getAllSeasons(int $tmdbId, array $withEpisodesFor = []): array
     {
         $this->waitForRateLimit();
+
+        $appendSeasons = array_slice(array_values(array_unique($withEpisodesFor)), 0, 20);
 
         try {
             $response = Http::timeout(15)->get(
                 self::BASE_URL."/tv/{$tmdbId}",
-                [
+                array_filter([
                     'api_key' => $this->apiKey,
                     'language' => $this->language,
-                ]
+                    'append_to_response' => implode(',', array_map(fn ($number) => "season/{$number}", $appendSeasons)),
+                ], fn ($value) => $value !== '')
             );
 
             if (! $response->successful()) {
@@ -3025,7 +3036,14 @@ class TmdbService
 
             $data = $response->json();
 
-            return $data['seasons'] ?? [];
+            return array_map(function ($season) use ($data) {
+                $appended = $data['season/'.($season['season_number'] ?? '')] ?? null;
+                if (is_array($appended['episodes'] ?? null)) {
+                    $season['episodes'] = $appended['episodes'];
+                }
+
+                return $season;
+            }, $data['seasons'] ?? []);
         } catch (\Exception $e) {
             Log::error('TMDB get all seasons error', [
                 'tmdb_id' => $tmdbId,

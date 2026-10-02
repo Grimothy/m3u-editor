@@ -15,6 +15,7 @@ use App\Models\PlaylistSyncStatusLog;
 use App\Models\Series;
 use App\Models\SyncRun;
 use App\Models\User;
+use App\Services\AlertService;
 use App\Services\EpgCacheService;
 use App\Services\SyncPipelineService;
 use App\Settings\GeneralSettings;
@@ -25,6 +26,7 @@ use Illuminate\Foundation\Queue\Queueable;
 use Illuminate\Support\Facades\Http;
 use Illuminate\Support\Facades\Log;
 use Illuminate\Support\Str;
+use Throwable;
 
 class ProcessM3uImportComplete implements ShouldQueue
 {
@@ -199,7 +201,7 @@ class ProcessM3uImportComplete implements ShouldQueue
 
                     if ($newCount < ($currentCount - $this->invalidateImportThreshold)) {
                         $this->cancelImport(
-                            "Playlist Sync Invalidated: The channel count would have been {$newCount} after import, which is less than the current count of {$currentCount} minus the threshold of {$this->invalidateImportThreshold}.",
+                            "The channel count would have been {$newCount} after import, which is less than the current count of {$currentCount} minus the threshold of {$this->invalidateImportThreshold}.",
                             $user, $playlist, $syncLogsDisabled, $syncStats,
                             $newChannels, $removedChannels, $newGroups, $removedGroups,
                         );
@@ -211,7 +213,7 @@ class ProcessM3uImportComplete implements ShouldQueue
                 // Group/category threshold.
                 if ($removedGroupCount > $this->invalidateImportGroupThreshold) {
                     $this->cancelImport(
-                        "Playlist Sync Invalidated: {$removedGroupCount} groups/categories would have been removed, which exceeds the threshold of {$this->invalidateImportGroupThreshold}.",
+                        "{$removedGroupCount} groups/categories would have been removed, which exceeds the threshold of {$this->invalidateImportGroupThreshold}.",
                         $user, $playlist, $syncLogsDisabled, $syncStats,
                         $newChannels, $removedChannels, $newGroups, $removedGroups,
                     );
@@ -227,7 +229,7 @@ class ProcessM3uImportComplete implements ShouldQueue
 
                 if ($removedSeriesCount > $this->invalidateImportSeriesThreshold) {
                     $this->cancelImport(
-                        "Playlist Sync Invalidated: {$removedSeriesCount} series would have been removed, which exceeds the threshold of {$this->invalidateImportSeriesThreshold}.",
+                        "{$removedSeriesCount} series would have been removed, which exceeds the threshold of {$this->invalidateImportSeriesThreshold}.",
                         $user, $playlist, $syncLogsDisabled, $syncStats,
                         $newChannels, $removedChannels, $newGroups, $removedGroups,
                     );
@@ -340,7 +342,7 @@ class ProcessM3uImportComplete implements ShouldQueue
                         ->broadcast($playlist->user)
                         ->sendToDatabase($playlist->user);
                 }
-            } catch (\Throwable $e) {
+            } catch (Throwable $e) {
                 // EPG creation is a best-effort post-import step: surface it
                 // to the user via the Filament notification center and let
                 // the import complete. We intentionally do not rethrow.
@@ -362,6 +364,7 @@ class ProcessM3uImportComplete implements ShouldQueue
             'sync_time' => $completedIn,
             'auto_retry_503_count' => 0,
             'auto_retry_503_last_at' => null,
+            'resync_attempt' => 0,
             'processing' => [
                 ...$playlist->processing ?? [],
                 'live_processing' => false,
@@ -465,7 +468,7 @@ class ProcessM3uImportComplete implements ShouldQueue
      * @param  array<string, mixed>  $syncStats  Base stats array (without message/status).
      */
     private function cancelImport(
-        string $message,
+        string $reason,
         User $user,
         Playlist $playlist,
         bool $syncLogsDisabled,
@@ -475,6 +478,8 @@ class ProcessM3uImportComplete implements ShouldQueue
         $newGroups,
         $removedGroups,
     ): void {
+        $message = "Playlist Sync Invalidated: {$reason}";
+
         if (! $syncLogsDisabled) {
             $sync = PlaylistSyncStatus::create([
                 'name' => $playlist->name,
@@ -497,9 +502,12 @@ class ProcessM3uImportComplete implements ShouldQueue
             );
         }
 
+        // Invalidated syncs skip the auto resync loop: an immediate retry would most likely be
+        // invalidated too, so use up the attempts and wait for the next scheduled sync instead.
         $playlist->update([
             'status' => Status::Failed,
             'errors' => $message,
+            'resync_attempt' => $playlist->auto_resync_retries,
             'processing' => [
                 ...$playlist->processing ?? [],
                 'live_processing' => false,
@@ -517,6 +525,33 @@ class ProcessM3uImportComplete implements ShouldQueue
             ->body($message)
             ->broadcast($user)
             ->sendToDatabase($user);
+
+        $this->sendInvalidatedAlert($playlist, $reason);
+    }
+
+    /**
+     * Forward an invalidated sync to the enabled alert channels (Discord, Slack and/or Telegram).
+     */
+    private function sendInvalidatedAlert(Playlist $playlist, string $reason): void
+    {
+        try {
+            if (! app(GeneralSettings::class)->alerts_on_sync_invalidated) {
+                return;
+            }
+
+            $alertService = app(AlertService::class);
+
+            if (! $alertService->isEnabled()) {
+                return;
+            }
+
+            $context = ['playlist' => $playlist->name, 'playlist_id' => $playlist->id];
+            $encoded = json_encode($context, JSON_PRETTY_PRINT | JSON_UNESCAPED_SLASHES | JSON_UNESCAPED_UNICODE);
+
+            $alertService->send("[SYNC INVALIDATED] Playlist \"{$playlist->name}\" sync was canceled: {$reason}\n```\n{$encoded}\n```");
+        } catch (Throwable) {
+            // Silently ignore.
+        }
     }
 
     /**

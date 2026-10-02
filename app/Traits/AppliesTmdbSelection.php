@@ -209,13 +209,10 @@ trait AppliesTmdbSelection
                 $info['mpaa_rating'] = $details['certification'];
             }
 
-            // The generic age field is provider-owned; only fill it when blank.
-            if (! empty($details['certification']) && empty($info['age'])) {
-                $info['age'] = $details['certification'];
-            }
-
-            // Always set, even to null: the on-demand backfill sentinel.
+            // Always set, even to null: the on-demand backfill sentinel. The generic
+            // age field is provider-owned; get_vod_info falls back to it at read time.
             $info['tmdb_certification'] = $details['certification'] ?? null;
+            $info['studios'] = ($details['studios'] ?? []) ?: ($info['studios'] ?? []);
 
             // Always set, even to []: TMDB's own themes (christmas, heist, ...)
             // double as the "keywords checked" sentinel FetchTmdbIds' on-demand
@@ -381,7 +378,7 @@ trait AppliesTmdbSelection
 
             // Always set, even to null/[]: together they're the on-demand backfill sentinel.
             $seriesMetadata['content_rating'] = $details['certification'] ?? null;
-            $seriesMetadata['networks'] = $details['networks'] ?? [];
+            $seriesMetadata['networks'] = ($details['networks'] ?? []) ?: ($seriesMetadata['networks'] ?? []);
 
             // Always set, even to []: TMDB's own themes (christmas, heist, ...)
             // double as the "keywords checked" sentinel FetchTmdbIds' on-demand

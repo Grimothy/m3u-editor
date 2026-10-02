@@ -2,15 +2,15 @@
 
 return [
     'author' => 'Shaun Parkison',
-    'version' => '0.12.59',
-    'dev_version' => '0.12.59-dev',
-    'experimental_version' => '0.12.59-exp',
+    'version' => '0.13.1',
+    'dev_version' => '0.13.1-dev',
+    'experimental_version' => '0.13.1-exp',
     'repo' => 'm3ue/m3u-editor',
     'docs_url' => 'https://m3ue.sparkison.dev',
     'donate' => 'https://buymeacoffee.com/shparkison',
     'discord_url' => 'https://discord.gg/rS3abJ5dz7',
     'tv_repo' => 'm3ue/m3u-tv',
-    'tv_releases_url' => 'https://github.com/m3ue/m3u-tv#m3u-tv', // 'https://github.com/m3ue/m3u-tv/releases',
+    'tv_releases_url' => 'https://m3ue.sparkison.dev/tv', // 'https://github.com/m3ue/m3u-tv/releases',
     'paypal' => 'https://www.paypal.com/donate/?hosted_button_id=ULJRPVWJNBSSG',
     'kofi' => 'https://ko-fi.com/sparkison',
     'admin_emails' => ['admin@test.com'],
@@ -28,7 +28,7 @@ return [
     'default_epg_catchup_days' => env('DEFAULT_EPG_CATCHUP_DAYS', 7), // Fallback tv_archive_duration (days) reported when catchup is enabled but no duration is known; 0 disables the fallback (reports no retention)
     'show_wan_details' => env('SHOW_WAN_DETAILS', null), // Show WAN details in admin panel
     'stuck_processing_minutes' => env('STUCK_PROCESSING_MINUTES', 240),
-    'failed_retry_cooldown_minutes' => env('FAILED_RETRY_COOLDOWN_MINUTES', 15),
+    'failed_retry_cooldown_minutes' => env('FAILED_RETRY_COOLDOWN_MINUTES', null), // Minutes before a failed playlist/EPG sync is retried; overrides the Sync Options setting (default 15)
     'sync_run_stale_minutes' => env('SYNC_RUN_STALE_MINUTES', 20), // Minutes without a phase transition or playlist progress heartbeat before a post-Import SyncRun is considered dead
     'auto_retry_503_enabled' => env('AUTO_RETRY_503_ENABLED', true),
     'auto_retry_503_max' => env('AUTO_RETRY_503_MAX', 3),

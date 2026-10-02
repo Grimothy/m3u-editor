@@ -7,7 +7,7 @@ use App\Enums\SyncRunStatus;
 use App\Jobs\ProcessM3uImport;
 use App\Models\Playlist;
 use App\Services\SyncPipelineService;
-use Cron\CronExpression;
+use App\Settings\GeneralSettings;
 use Illuminate\Console\Command;
 
 class RefreshPlaylist extends Command
@@ -89,11 +89,10 @@ class RefreshPlaylist extends Command
             }
 
             $count = 0;
-            $failedRetryCooldown = (int) config('dev.failed_retry_cooldown_minutes', 30);
+            $failedRetryCooldown = app(GeneralSettings::class)->failedRetryCooldownMinutes();
             $pipeline = app(SyncPipelineService::class);
             $playlists->get()->each(function (Playlist $playlist) use (&$count, $failedRetryCooldown, $pipeline) {
-                $interval = $playlist->sync_interval === '24hr' ? '0 0 * * *' : $playlist->sync_interval;
-                $cronExpression = new CronExpression($interval);
+                $cronExpression = $playlist->syncCronExpression();
 
                 // Gate failed retries behind a cooldown to prevent CPU runaway
                 $isFailed = $playlist->status === Status::Failed;
@@ -103,14 +102,30 @@ class RefreshPlaylist extends Command
                     return;
                 }
 
-                $force = $isFailed;
-                $lastRun = $force ? now()->subYears(1) : ($playlist->synced ?? now()->subYears(1));
+                // Retry a failed sync right away while it has auto resync attempts left
+                if ($isFailed && $playlist->auto_resync_on_failure && $playlist->resync_attempt < $playlist->auto_resync_retries) {
+                    $playlist->update(['resync_attempt' => $playlist->resync_attempt + 1]);
+
+                    $count++;
+                    $syncRun = $pipeline->startImport($playlist, trigger: 'scheduled_refresh');
+                    dispatch(new ProcessM3uImport($playlist, true, syncRunId: $syncRun->id));
+
+                    return;
+                }
+
+                // Otherwise wait for the next scheduled sync (for a failed playlist, counted from its last attempt)
+                $lastRun = $playlist->synced ?? now()->subYears(1);
                 $nextDue = $cronExpression->getNextRunDate($lastRun->toDateTimeImmutable());
 
                 if (now() >= $nextDue) {
+                    // Each scheduled sync gets a fresh set of retry attempts
+                    if ($playlist->resync_attempt > 0) {
+                        $playlist->update(['resync_attempt' => 0]);
+                    }
+
                     $count++;
                     $syncRun = $pipeline->startImport($playlist, trigger: 'scheduled_refresh');
-                    dispatch(new ProcessM3uImport($playlist, $force, syncRunId: $syncRun->id));
+                    dispatch(new ProcessM3uImport($playlist, $isFailed, syncRunId: $syncRun->id));
                 }
             });
             $this->info('Dispatched '.$count.' playlists for refresh');

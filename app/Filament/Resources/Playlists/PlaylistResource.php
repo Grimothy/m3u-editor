@@ -63,7 +63,6 @@ use App\Tables\Columns\ProgressColumn;
 use App\Traits\HasUserFiltering;
 use Carbon\Carbon;
 use Closure;
-use Cron\CronExpression;
 use EslamRedaDiv\FilamentCopilot\Contracts\CopilotResource;
 use Exception;
 use Filament\Actions\Action;
@@ -370,11 +369,9 @@ class PlaylistResource extends Resource implements CopilotResource
                     ->label(__('Next Sync'))
                     ->toggleable()
                     ->formatStateUsing(function ($state, $record) {
-                        if ($record->auto_sync && $record->sync_interval && CronExpression::isValidExpression($record->sync_interval)) {
-                            return (new CronExpression($record->sync_interval))->getNextRunDate()->format(app(DateFormatService::class)->getFormat());
-                        }
+                        $nextSync = $record->auto_sync ? $record->nextScheduledSyncAfter(now()) : null;
 
-                        return 'N/A';
+                        return $nextSync ? app(DateFormatService::class)->format($nextSync) : 'N/A';
                     })
                     ->sortable(),
                 TextColumn::make('sync_time')
@@ -447,6 +444,7 @@ class PlaylistResource extends Resource implements CopilotResource
                                 $record->update([
                                     'status' => Status::Processing,
                                     'progress' => 0,
+                                    'resync_attempt' => 0,
                                 ]);
                                 $syncRun = app(SyncPipelineService::class)->startImport($record, trigger: 'filament_refresh');
                                 app('Illuminate\Contracts\Bus\Dispatcher')
@@ -550,6 +548,7 @@ class PlaylistResource extends Resource implements CopilotResource
                         $record->update([
                             'status' => Status::Processing,
                             'progress' => 0,
+                            'resync_attempt' => 0,
                         ]);
                         $syncRun = app(SyncPipelineService::class)->startImport($record, trigger: 'filament_refresh');
                         app('Illuminate\Contracts\Bus\Dispatcher')
@@ -1604,10 +1603,32 @@ class PlaylistResource extends Resource implements CopilotResource
                         ->hintAction(
                             CronHelperAction::make(name: 'playlist-sync-cron', cronField: 'sync_interval')
                         )
-                        ->helperText(fn ($get) => $get('sync_interval') && CronExpression::isValidExpression($get('sync_interval'))
-                            ? 'Next scheduled sync: '.(new CronExpression($get('sync_interval')))->getNextRunDate()->format(app(DateFormatService::class)->getFormat())
+                        ->helperText(fn ($get) => ($nextSync = Playlist::nextSyncForInterval($get('sync_interval')))
+                            ? 'Next scheduled sync: '.app(DateFormatService::class)->format($nextSync)
                             : 'Specify the CRON schedule for automatic sync, e.g. "0 3 * * *".')
                         ->hidden(fn (Get $get): bool => ! $get('auto_sync')),
+
+                    Grid::make()
+                        ->columns(2)
+                        ->columnSpanFull()
+                        ->schema([
+                            Toggle::make('auto_resync_on_failure')
+                                ->label(__('Auto resync on failure'))
+                                ->helperText(__('When enabled, a failed sync is retried automatically before waiting for the next scheduled sync. Invalidated syncs always wait for the next scheduled sync.'))
+                                ->live()
+                                ->inline(false)
+                                ->default(true),
+                            TextInput::make('auto_resync_retries')
+                                ->label(__('Max retry attempts'))
+                                ->numeric()
+                                ->default(3)
+                                ->minValue(1)
+                                ->maxValue(10)
+                                ->helperText(fn () => __('Number of retry attempts before waiting for the next scheduled sync. Each retry waits :minutes minutes (Settings > Sync Options).', [
+                                    'minutes' => app(GeneralSettings::class)->failedRetryCooldownMinutes(),
+                                ]))
+                                ->hidden(fn (Get $get): bool => ! $get('auto_resync_on_failure')),
+                        ])->hidden(fn (Get $get): bool => ! $get('auto_sync')),
 
                     Callout::make(__('Last Synced'))
                         ->columnSpan(2)
@@ -3164,6 +3185,16 @@ class PlaylistResource extends Resource implements CopilotResource
                         ->type('number')
                         ->hidden(fn (Get $get): bool => ! $get('auto_channel_increment'))
                         ->required(),
+                    Toggle::make('sort_by_channel_number')
+                        ->label(__('Sort by channel number'))
+                        ->columnSpan(1)
+                        ->inline(false)
+                        ->default(false)
+                        ->hintIcon(
+                            'heroicon-m-question-mark-circle',
+                            tooltip: __('Channels without a number are output last, in the standard group order.')
+                        )
+                        ->helperText(__('Output channels ordered by channel number instead of by group.')),
                 ]),
             Section::make(__('Streaming Output'))
                 ->description(__('Output processing options'))
@@ -3709,13 +3740,9 @@ class PlaylistResource extends Resource implements CopilotResource
                     'heroicon-m-question-mark-circle',
                     tooltip: __('TMDB paginates results ~20 per page. Increase this if items you expect (e.g. a recent theatrical release) aren\'t showing up - they may simply be on a later page than the default covers. Applies to all paginated sources (Trending, Popular, Now Playing, Upcoming, Top Genre).')
                 )
-                ->options([
-                    1 => '1 (~20 items)',
-                    2 => '2 (~40 items)',
-                    3 => '3 (~60 items, default)',
-                    4 => '4 (~80 items)',
-                    5 => '5 (~100 items, max)',
-                ])
+                ->options(collect(range(1, TmdbService::MAX_DYNAMIC_GROUP_PAGES))->mapWithKeys(fn (int $pages): array => [
+                    $pages => __(':pages (~:items items)', ['pages' => $pages, 'items' => $pages * 20]),
+                ])->all())
                 ->default(3)
                 ->native(false)
                 ->visible(fn (Get $get): bool => $get('source') !== 'theme')
@@ -4052,6 +4079,7 @@ class PlaylistResource extends Resource implements CopilotResource
                             'status' => Status::Processing,
                             'progress' => 0,
                             'vod_progress' => 0,
+                            'resync_attempt' => 0,
                         ]);
                         $syncRun = app(SyncPipelineService::class)->startImport($record, trigger: 'filament_refresh');
                         app('Illuminate\Contracts\Bus\Dispatcher')

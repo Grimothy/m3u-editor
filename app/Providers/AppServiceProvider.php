@@ -47,6 +47,10 @@ use App\Services\ProxyService;
 use App\Services\SortService;
 use App\Services\TagRenamePropagationService;
 use App\Settings\GeneralSettings;
+use App\Support\ApiDocs\DocumentDvrAuthenticationErrors;
+use App\Support\ApiDocs\DocumentXtreamApiResponses;
+use App\Support\ApiDocs\MergeSameStatusResponses;
+use App\Support\ApiDocs\PruneUnreferencedSchemas;
 use App\Support\CopilotProvider;
 use CraftForge\FilamentLanguageSwitcher\Events\LocaleChanged;
 use Dedoc\Scramble\Scramble;
@@ -101,17 +105,17 @@ class AppServiceProvider extends ServiceProvider
     {
         $this->app->bind(FilamentNotification::class, AppNotification::class);
 
-        // Override the Laravel AI manager to fix a strict-mode tool schema bug
-        // where tools with no parameters are missing the required `parameters`
-        // object, causing OpenAI to return a 400 invalid_function_parameters error.
+        // Override the Laravel AI manager so Gemini tools with no required
+        // parameters omit `required` instead of sending an empty array, which
+        // Gemini rejects with a 400 INVALID_ARGUMENT error.
         $this->app->scoped(AiManager::class, fn ($app) => new PatchedAiManager($app));
 
         $this->app->singleton(GitInfoService::class);
 
         // Detect HTTPS before any provider boot() runs, so package providers
-        // calling asset() during their boot() (e.g. filament-copilot) get the
-        // correct scheme. We can't rely on TrustProxies middleware here — it
-        // runs after all providers have booted.
+        // calling asset() during their boot() get the correct scheme. We can't
+        // rely on TrustProxies middleware here, since it runs after all
+        // providers have booted.
         $this->app->booting(function () {
             if (! $this->app->runningInConsole()) {
                 $this->configureDynamicHttpsDetection();
@@ -504,6 +508,7 @@ class AppServiceProvider extends ServiceProvider
                 if ($playlist->isDirty($fields)) {
                     EpgCacheService::clearPlaylistEpgCacheFile($playlist);
                 }
+                EpgCacheService::clearIfTvgIdsRenumbered($playlist);
 
                 // Keep auto-generated EPG map names in sync when the playlist is renamed
                 if ($playlist->wasChanged('name')) {
@@ -672,6 +677,7 @@ class AppServiceProvider extends ServiceProvider
 
                 return $mergedPlaylist;
             });
+            MergedPlaylist::updated(fn (MergedPlaylist $mergedPlaylist) => EpgCacheService::clearIfTvgIdsRenumbered($mergedPlaylist));
             MergedPlaylist::deleting(function (MergedPlaylist $mergedPlaylist) {
                 // Remove short URLs
                 $mergedPlaylist->removeShortUrls();
@@ -722,6 +728,7 @@ class AppServiceProvider extends ServiceProvider
 
                 return $customPlaylist;
             });
+            CustomPlaylist::updated(fn (CustomPlaylist $customPlaylist) => EpgCacheService::clearIfTvgIdsRenumbered($customPlaylist));
             CustomPlaylist::deleting(function (CustomPlaylist $customPlaylist) {
                 // Remove short URLs
                 $customPlaylist->removeShortUrls();
@@ -1051,7 +1058,15 @@ class AppServiceProvider extends ServiceProvider
                 $openApi->secure(
                     SecurityScheme::http('bearer')
                 );
-            });
+
+                if (blank(config('scramble.info.version'))) {
+                    $openApi->info->setVersion((string) config('dev.version'));
+                }
+            })
+            ->withDocumentTransformers(DocumentXtreamApiResponses::class)
+            ->withDocumentTransformers(PruneUnreferencedSchemas::class)
+            ->withOperationTransformers(DocumentDvrAuthenticationErrors::class)
+            ->withOperationTransformers(MergeSameStatusResponses::class);
     }
 
     /**
