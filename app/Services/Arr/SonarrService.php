@@ -114,6 +114,7 @@ class SonarrService extends BaseArrService
 
                 return [
                     'tvdbId' => $item['tvdbId'] ?? null,
+                    'tmdbId' => $item['tmdbId'] ?? null,
                     'title' => $item['title'] ?? 'Unknown',
                     'titleSlug' => $item['titleSlug'] ?? null,
                     'year' => $item['year'] ?? null,
@@ -135,6 +136,25 @@ class SonarrService extends BaseArrService
                 ];
             })
             ->all();
+    }
+
+    /**
+     * Resolve a series' TVDB id from its TMDB id via Sonarr's `tmdb:` lookup (Sonarr v4+).
+     * Strictly ID-matched: a result only counts when Sonarr echoes the same tmdbId
+     * (Sonarr >= 4.0.8). Older v4, v3, or no match returns null, and the caller uses the provider.
+     */
+    public function resolveTvdbIdFromTmdb(int $tmdbId): ?int
+    {
+        try {
+            $match = collect($this->search('tmdb:'.$tmdbId))
+                ->first(fn (array $item): bool => (int) ($item['tmdbId'] ?? 0) === $tmdbId);
+        } catch (\Throwable) {
+            return null;
+        }
+
+        $tvdbId = (int) ($match['tvdbId'] ?? 0);
+
+        return $tvdbId > 0 ? $tvdbId : null;
     }
 
     /**
@@ -178,6 +198,37 @@ class SonarrService extends BaseArrService
         );
     }
 
+    public function remove(int $libraryId): array
+    {
+        return $this->safeCall(function () use ($libraryId) {
+            $this->removeQueuedDownloads('seriesId', $libraryId);
+            $this->client()->delete('/series/'.$libraryId.'?deleteFiles=true&addImportListExclusion=false')->throw();
+
+            return true;
+        }, 'remove series');
+    }
+
+    /**
+     * Monitor one season of a series already in Sonarr and start a search for it.
+     *
+     * @return array{ok: bool, error?: string}
+     */
+    public function monitorSeasonAndSearch(int $seriesId, int $seasonNumber): array
+    {
+        return $this->safeCall(function () use ($seriesId, $seasonNumber) {
+            $series = $this->client()->get('/series/'.$seriesId)->throw()->json();
+            $series['seasons'] = collect($series['seasons'] ?? [])
+                ->map(fn (array $season): array => (int) $season['seasonNumber'] === $seasonNumber
+                    ? array_merge($season, ['monitored' => true])
+                    : $season)
+                ->all();
+            $this->client()->put('/series/'.$seriesId, $series)->throw();
+            $this->client()->post('/command', ['name' => 'SeasonSearch', 'seriesId' => $seriesId, 'seasonNumber' => $seasonNumber])->throw();
+
+            return true;
+        }, 'monitor season');
+    }
+
     /**
      * @return array{exists: bool, id?: int}
      */
@@ -210,7 +261,36 @@ class SonarrService extends BaseArrService
             return [];
         }
 
-        return collect($response->json() ?? [])
+        return $this->mapReleases($response->json() ?? []);
+    }
+
+    /**
+     * Interactive release search for one season of a library series (Sonarr needs seriesId AND seasonNumber;
+     * seriesId alone returns the general RSS feed).
+     *
+     * @return array<int, array<string, mixed>>
+     */
+    public function fetchSeasonReleases(int $seriesId, int $seasonNumber): array
+    {
+        $response = $this->client()->get('/release', [
+            'seriesId' => $seriesId,
+            'seasonNumber' => $seasonNumber,
+        ]);
+
+        if (! $response->successful()) {
+            return [];
+        }
+
+        return $this->mapReleases($response->json() ?? []);
+    }
+
+    /**
+     * @param  array<int, array<string, mixed>>  $releases
+     * @return array<int, array<string, mixed>>
+     */
+    private function mapReleases(array $releases): array
+    {
+        return collect($releases)
             ->map(fn ($release) => [
                 'guid' => $release['guid'] ?? null,
                 'title' => $release['title'] ?? 'Unknown',

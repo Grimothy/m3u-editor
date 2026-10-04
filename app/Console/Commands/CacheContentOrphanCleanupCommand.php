@@ -42,6 +42,7 @@ class CacheContentOrphanCleanupCommand extends Command
         $cutoff = now()->subDays($days);
 
         $query = CachedContentFile::query()
+            ->provider()
             ->whereNull('file_path')
             ->where('status', '!=', CachedContentFileStatus::Downloading->value)
             ->where('updated_at', '<', $cutoff);

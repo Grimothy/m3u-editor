@@ -51,6 +51,7 @@ use App\Rules\UrlIsAllowed;
 use App\Rules\UrlSafeCredential;
 use App\Rules\ValidRegexPattern;
 use App\Services\CachedContentDispatchService;
+use App\Services\ContentRequestService;
 use App\Services\DateFormatService;
 use App\Services\EpgCacheService;
 use App\Services\M3uProxyService;
@@ -3771,6 +3772,31 @@ class PlaylistResource extends Resource implements CopilotResource
                         ->suffix('GB')
                         ->visible(fn (Get $get): bool => (bool) $get(DynamicGroup::CACHE_ENABLED_KEY))
                         ->columnSpan(2),
+                    Select::make(DynamicGroup::CACHE_METHOD_KEY)
+                        ->label(__('Cache method'))
+                        ->options(['global' => __('Use global setting'), 'provider' => __('Provider download'), 'arr' => __('Arr stack (fall back to provider)')])
+                        ->default('global')
+                        // Rules saved before the arr stack existed have no
+                        // method; they keep the provider (see cacheSettings()).
+                        ->afterStateHydrated(function (Select $component, ?string $state): void {
+                            if ($state === null) {
+                                $component->state('provider');
+                            }
+                        })
+                        ->live()
+                        ->helperText(fn (Get $get): ?string => $get('../../prefer_media_server_sources')
+                            ? null
+                            : __('The arr stack is only used when "Prefer media server sources" is on for this playlist.'))
+                        ->visible(fn (Get $get): bool => (bool) $get(DynamicGroup::CACHE_ENABLED_KEY))
+                        ->columnSpan(4),
+                    Select::make(DynamicGroup::CACHE_ARR_INTEGRATION_KEY)
+                        ->label(fn (Get $get): string => $get('type') === 'series' ? __('Sonarr') : __('Radarr'))
+                        ->placeholder(__('Use global setting'))
+                        ->options(fn (Get $get): array => app(ContentRequestService::class)
+                            ->cacheIntegrations((int) auth()->id(), $get('type') === 'series' ? 'sonarr' : 'radarr')
+                            ->pluck('name', 'id')->all())
+                        ->visible(fn (Get $get): bool => (bool) $get(DynamicGroup::CACHE_ENABLED_KEY) && $get(DynamicGroup::CACHE_METHOD_KEY) === 'arr')
+                        ->columnSpan(4),
                 ]),
         ];
     }

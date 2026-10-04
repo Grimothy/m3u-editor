@@ -173,8 +173,18 @@ class RadarrService extends BaseArrService
         );
     }
 
+    public function remove(int $libraryId): array
+    {
+        return $this->safeCall(function () use ($libraryId) {
+            $this->removeQueuedDownloads('movieId', $libraryId);
+            $this->client()->delete('/movie/'.$libraryId.'?deleteFiles=true&addImportExclusion=false')->throw();
+
+            return true;
+        }, 'remove movie');
+    }
+
     /**
-     * @return array{exists: bool, id?: int}
+     * @return array{exists: bool, id?: int, has_file?: bool}
      */
     public function checkExists(int $externalId): array
     {
@@ -191,7 +201,7 @@ class RadarrService extends BaseArrService
             return ['exists' => false];
         }
 
-        return ['exists' => true, 'id' => (int) $first['id']];
+        return ['exists' => true, 'id' => (int) $first['id'], 'has_file' => (bool) ($first['hasFile'] ?? false)];
     }
 
     /**
@@ -274,6 +284,30 @@ class RadarrService extends BaseArrService
         return collect($response->json() ?? [])
             ->filter(fn ($m) => ! empty($m['tmdbId']))
             ->mapWithKeys(fn ($m) => [(int) $m['tmdbId'] => ($m['hasFile'] ?? false) === true])
+            ->all();
+    }
+
+    /**
+     * Per-movie file and availability state for the whole library, in one call.
+     * `available` is Radarr's own isAvailable: false while the movie hasn't
+     * reached its minimum availability, so Radarr won't search for it yet.
+     *
+     * @return array<int, array{has_file: bool, available: bool}> tmdbId => state
+     */
+    public function fetchLibraryStatus(): array
+    {
+        $response = $this->client()->get('/movie');
+
+        if (! $response->successful()) {
+            return [];
+        }
+
+        return collect($response->json() ?? [])
+            ->filter(fn ($m) => ! empty($m['tmdbId']))
+            ->mapWithKeys(fn ($m) => [(int) $m['tmdbId'] => [
+                'has_file' => ($m['hasFile'] ?? false) === true,
+                'available' => ($m['isAvailable'] ?? true) === true,
+            ]])
             ->all();
     }
 

@@ -50,6 +50,16 @@ class DynamicGroup extends Model
 
     public const CACHE_MAX_GB_KEY = 'cache_max_gb';
 
+    public const CACHE_METHOD_KEY = 'cache_method';
+
+    public const CACHE_ARR_INTEGRATION_KEY = 'cache_arr_integration_id';
+
+    /**
+     * Valid `cache_method` values. `global` defers to the playlist's global
+     * `cache_primary_method` setting.
+     */
+    public const CACHE_METHODS = ['global', 'provider', 'arr'];
+
     /**
      * Valid `cache_retention` values.
      */
@@ -237,6 +247,36 @@ class DynamicGroup extends Model
     }
 
     /**
+     * Enabled, cache-enabled dynamic group rules on the user's playlists
+     * that explicitly follow the global cache method ('global'), as
+     * "Playlist: rule" labels. Shown on the global setting so switching it
+     * to the arr stack never surprises anyone.
+     *
+     * @return array<int, string>
+     */
+    public static function rulesFollowingGlobalCacheMethod(int $userId): array
+    {
+        $labels = [];
+
+        $playlists = Playlist::query()
+            ->where('user_id', $userId)
+            ->whereNotNull('dynamic_groups_config')
+            ->select(['id', 'name', 'dynamic_groups_config'])
+            ->cursor();
+
+        foreach ($playlists as $playlist) {
+            foreach ((array) $playlist->dynamic_groups_config as $rule) {
+                $settings = self::cacheSettings(is_array($rule) ? $rule : null);
+                if ($settings !== null && $settings['method'] === 'global') {
+                    $labels[] = $playlist->name.': '.($rule['name'] ?? __('Unnamed rule'));
+                }
+            }
+        }
+
+        return $labels;
+    }
+
+    /**
      * Normalized cache settings for a `dynamic_groups_config` rule, or null
      * when the rule (or its caching) is not enabled — existing behavior is
      * unchanged in that case.
@@ -246,9 +286,15 @@ class DynamicGroup extends Model
      *  - retention_days: int (>= 1)
      *  - max_items: ?int — cache only the first N members by position
      *  - max_bytes: ?int — soft byte budget for the group's tracked files
+     *  - method: 'global' | 'provider' | 'arr' — the rule's cache-method
+     *    override; 'global' defers to the global cache_primary_method.
+     *    A rule saved without a method (created before the arr stack
+     *    existed) is 'provider', so switching the global setting never
+     *    silently turns an existing rule into bulk Radarr/Sonarr requests
+     *  - arr_integration_id: ?int — the rule's preferred arr integration
      *
      * @param  array<string, mixed>|null  $rule
-     * @return array{retention: string, retention_days: int, max_items: int|null, max_bytes: int|null}|null
+     * @return array{retention: string, retention_days: int, max_items: int|null, max_bytes: int|null, method: string, arr_integration_id: int|null}|null
      */
     public static function cacheSettings(?array $rule): ?array
     {
@@ -271,6 +317,8 @@ class DynamicGroup extends Model
             'retention_days' => $retentionDays,
             'max_items' => $maxItems > 0 ? $maxItems : null,
             'max_bytes' => $maxGb > 0 ? (int) round($maxGb * 1024 ** 3) : null,
+            'method' => in_array($rule[self::CACHE_METHOD_KEY] ?? null, self::CACHE_METHODS, true) ? $rule[self::CACHE_METHOD_KEY] : 'provider',
+            'arr_integration_id' => ((int) ($rule[self::CACHE_ARR_INTEGRATION_KEY] ?? 0)) ?: null,
         ];
     }
 

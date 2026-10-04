@@ -1,6 +1,9 @@
 <?php
 
+use App\Enums\CachedContentFileStatus;
 use App\Jobs\DvrRetentionCleanup;
+use App\Jobs\SyncArrCachedDownloads;
+use App\Models\CachedContentFile;
 use Illuminate\Support\Facades\Schedule;
 
 /*
@@ -75,6 +78,16 @@ Schedule::command('cache:cleanup')
 Schedule::command('cache:cleanup-orphans')
     ->dailyAt('03:30')
     ->withoutOverlapping();
+
+// Arr-backed cached downloads: mirror Radarr/Sonarr progress into Cached Downloads (webhook fallback).
+Schedule::call(function (): void {
+    CachedContentFile::query()->arr()
+        ->whereIn('status', [CachedContentFileStatus::Requested->value, CachedContentFileStatus::Pending->value, CachedContentFileStatus::Downloading->value, CachedContentFileStatus::Imported->value])
+        ->whereNotNull('arr_integration_id')
+        ->distinct()
+        ->pluck('arr_integration_id')
+        ->each(fn (int $id) => SyncArrCachedDownloads::dispatch($id));
+})->everyMinute()->name('sync-arr-cached-downloads')->withoutOverlapping();
 
 // Prune old notifications
 Schedule::command('app:prune-old-notifications --days=7')

@@ -6,6 +6,7 @@ use App\Filament\Resources\ArrIntegrations\Pages\CreateArrIntegration;
 use App\Filament\Resources\ArrIntegrations\Pages\EditArrIntegration;
 use App\Filament\Resources\ArrIntegrations\Pages\ListArrIntegrations;
 use App\Models\ArrIntegration;
+use App\Models\MediaServerIntegration;
 use App\Services\Arr\ArrService;
 use App\Traits\HasUserFiltering;
 use Carbon\Carbon;
@@ -188,6 +189,16 @@ class ArrIntegrationResource extends Resource
                             ->label(__('Allow Guest Requests'))
                             ->helperText(__('Allow guests to request content via this integration on any playlist that has content requests enabled.'))
                             ->default(false),
+
+                        Select::make('media_server_integration_id')
+                            ->label(__('Imports appear in'))
+                            ->placeholder(__('Not linked'))
+                            ->options(fn (): array => MediaServerIntegration::query()
+                                ->where('user_id', auth()->id())
+                                ->where('enabled', true)
+                                ->whereIn('type', ['emby', 'jellyfin', 'plex'])
+                                ->pluck('name', 'id')->all())
+                            ->helperText(__('The media server whose library contains this integration\'s root folder. When set, cached downloads become playable sooner because that server is refreshed right after an import.')),
                     ]),
 
                 Section::make(__('Webhook'))

@@ -2,9 +2,12 @@
 
 namespace App\Http\Controllers;
 
+use App\Enums\CachedContentFileStatus;
 use App\Events\ArrQueueUpdated;
+use App\Jobs\SyncArrCachedDownloads;
 use App\Models\ArrIntegration;
 use App\Models\ArrQueueEvent;
+use App\Models\CachedContentFile;
 use Illuminate\Http\Request;
 use Illuminate\Http\Response;
 use Illuminate\Support\Facades\Log;
@@ -29,6 +32,12 @@ class ArrWebhookController extends Controller
                 'event_type' => $eventType,
                 'error' => $e->getMessage(),
             ]);
+        }
+
+        // Arr state changed: mirror its queue into any in-flight cached
+        // downloads right away instead of waiting for the next sweep.
+        if (CachedContentFile::query()->arr()->where('arr_integration_id', $integration->id)->whereIn('status', [CachedContentFileStatus::Requested->value, CachedContentFileStatus::Pending->value, CachedContentFileStatus::Downloading->value, CachedContentFileStatus::Imported->value])->exists()) {
+            SyncArrCachedDownloads::dispatch($integration->id);
         }
 
         ArrQueueUpdated::dispatch($integration->user_id);

@@ -98,6 +98,14 @@ class GeneralSettings extends Settings
     // Default for the per-playlist "Share cache across playlists" toggle.
     public ?bool $default_share_cache_across_playlists = false;
 
+    // Primary cache method: 'provider' | 'arr' (arr falls back to provider).
+    public ?string $cache_primary_method = 'provider';
+
+    // Which Radarr / Sonarr integration the arr method uses (null = auto-pick when only one exists).
+    public ?int $cache_radarr_integration_id = null;
+
+    public ?int $cache_sonarr_integration_id = null;
+
     public ?string $logo_placeholder_url = null;
 
     public ?string $episode_placeholder_url = null;

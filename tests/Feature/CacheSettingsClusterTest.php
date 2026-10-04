@@ -5,6 +5,7 @@ use App\Filament\Clusters\Settings\Pages\ManageCacheSettings;
 use App\Filament\Clusters\Settings\Pages\ManageIntegrationSettings;
 use App\Filament\Clusters\Settings\SettingsCluster;
 use App\Filament\Resources\Playlists\Pages\CreatePlaylist;
+use App\Models\ArrIntegration;
 use App\Models\User;
 use App\Settings\GeneralSettings;
 use Illuminate\Foundation\Testing\RefreshDatabase;
@@ -100,3 +101,53 @@ it('pre-fills the per-playlist share toggle from the global default on create', 
     Livewire::test(CreatePlaylist::class)
         ->assertFormSet(['share_cache_across_playlists' => $globalDefault]);
 })->with([true, false]);
+
+// Arr cache settings (Step 8b)
+
+it('hides the primary cache method select when the user has no enabled arr integrations', function () {
+    Livewire::test(ManageCacheSettings::class)
+        ->assertDontSee('Primary cache method');
+});
+
+it('shows the Radarr select only when more than one Radarr integration exists', function () {
+    $admin = User::factory()->admin()->create();
+    $this->actingAs($admin);
+
+    ArrIntegration::factory()->radarr()->create(['user_id' => $admin->id, 'enabled' => true]);
+
+    Livewire::test(ManageCacheSettings::class)
+        ->assertSee('Primary cache method')
+        ->fillForm(['cache_primary_method' => 'arr'])
+        ->assertDontSee('Radarr to use');
+
+    ArrIntegration::factory()->radarr()->create(['user_id' => $admin->id, 'enabled' => true]);
+
+    Livewire::test(ManageCacheSettings::class)
+        ->fillForm(['cache_primary_method' => 'arr'])
+        ->assertSee('Radarr to use');
+});
+
+it('saves the three arr cache settings', function () {
+    $admin = User::factory()->admin()->create();
+    $this->actingAs($admin);
+
+    $radarr = ArrIntegration::factory()->radarr()->create(['user_id' => $admin->id, 'enabled' => true]);
+    ArrIntegration::factory()->radarr()->create(['user_id' => $admin->id, 'enabled' => true]);
+    $sonarr = ArrIntegration::factory()->sonarr()->create(['user_id' => $admin->id, 'enabled' => true]);
+    ArrIntegration::factory()->sonarr()->create(['user_id' => $admin->id, 'enabled' => true]);
+
+    Livewire::test(ManageCacheSettings::class)
+        ->fillForm([
+            'cache_primary_method' => 'arr',
+            'cache_radarr_integration_id' => $radarr->id,
+            'cache_sonarr_integration_id' => $sonarr->id,
+        ])
+        ->call('save')
+        ->assertHasNoFormErrors();
+
+    $settings = app(GeneralSettings::class)->refresh();
+
+    expect($settings->cache_primary_method)->toBe('arr')
+        ->and($settings->cache_radarr_integration_id)->toBe($radarr->id)
+        ->and($settings->cache_sonarr_integration_id)->toBe($sonarr->id);
+});

@@ -5,6 +5,7 @@ use App\Filament\Resources\ArrIntegrations\Pages\CreateArrIntegration;
 use App\Filament\Resources\ArrIntegrations\Pages\EditArrIntegration;
 use App\Filament\Resources\ArrIntegrations\Pages\ListArrIntegrations;
 use App\Models\ArrIntegration;
+use App\Models\MediaServerIntegration;
 use App\Models\User;
 use Illuminate\Foundation\Testing\RefreshDatabase;
 use Illuminate\Support\Facades\Bus;
@@ -129,4 +130,22 @@ it('lists the page without error', function () {
 
     Livewire::test(ListArrIntegrations::class)
         ->assertOk();
+});
+
+it('saves media_server_integration_id on edit', function () {
+    $mediaServer = MediaServerIntegration::factory()->create([
+        'user_id' => $this->user->id,
+        'type' => 'plex',
+        'enabled' => true,
+    ]);
+    $integration = ArrIntegration::factory()->create(['user_id' => $this->user->id]);
+
+    Livewire::test(EditArrIntegration::class, ['record' => $integration->id])
+        ->fillForm(['media_server_integration_id' => $mediaServer->id])
+        ->call('save')
+        ->assertHasNoFormErrors()
+        ->assertNotified();
+
+    $integration->refresh();
+    expect($integration->media_server_integration_id)->toBe($mediaServer->id);
 });

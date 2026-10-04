@@ -41,6 +41,7 @@ class CachedContentStreamController extends Controller
 
         $file = CachedContentFile::query()
             ->where('uuid', $uuid)
+            ->provider()
             ->where('status', CachedContentFileStatus::Completed->value)
             ->where(function (Builder $q) use ($playlist): void {
                 $q->where('playlist_id', $playlist->id)

@@ -59,6 +59,30 @@ abstract class BaseArrService implements ArrIntegrationInterface
      * @param  callable(): T  $callback
      * @return array{ok: bool, data?: T, error?: string}
      */
+    /**
+     * Stop every queued/active download for a library title and remove it
+     * from the download client too, so deleting the title doesn't leave a
+     * transfer running behind it. Throws on API failure (call inside safeCall).
+     *
+     * @param  'movieId'|'seriesId'  $libraryParam
+     */
+    protected function removeQueuedDownloads(string $libraryParam, int $libraryId): void
+    {
+        $queueIds = collect($this->client()->get('/queue/details', [$libraryParam => $libraryId])->throw()->json() ?? [])
+            ->pluck('id')
+            ->filter()
+            ->values()
+            ->all();
+
+        if ($queueIds === []) {
+            return;
+        }
+
+        $this->client()
+            ->delete('/queue/bulk?removeFromClient=true&blocklist=false', ['ids' => $queueIds])
+            ->throw();
+    }
+
     protected function safeCall(callable $callback, string $op): array
     {
         try {

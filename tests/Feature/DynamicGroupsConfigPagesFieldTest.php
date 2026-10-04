@@ -1,6 +1,7 @@
 <?php
 
 use App\Filament\Resources\Playlists\Pages\EditPlaylist;
+use App\Models\ArrIntegration;
 use App\Models\Playlist;
 use App\Models\User;
 use App\Services\TmdbService;
@@ -59,6 +60,78 @@ it('persists the per-rule cache keys in dynamic_groups_config on round-trip', fu
     $this->playlist->update(['dynamic_groups_config' => [$rule]]);
 
     expect($this->playlist->fresh()->dynamic_groups_config)->toEqual([$rule]);
+});
+
+it('persists cache_method and cache_arr_integration_id in dynamic_groups_config on round-trip', function () {
+    $rule = [
+        'enabled' => true,
+        'type' => 'vod',
+        'source' => 'now_playing',
+        'name' => 'In Theatres',
+        'tmdb_params' => [],
+        'cache_enabled' => true,
+        'cache_method' => 'arr',
+        'cache_arr_integration_id' => 7,
+    ];
+
+    $this->playlist->update(['dynamic_groups_config' => [$rule]]);
+
+    expect($this->playlist->fresh()->dynamic_groups_config)->toEqual([$rule]);
+});
+
+it('resolves prefer_media_server_sources from inside the repeater item and saves the cache rule keys', function () {
+    $radarr = ArrIntegration::factory()->radarr()->create(['user_id' => $this->user->id, 'enabled' => true]);
+
+    $rule = [
+        'enabled' => true,
+        'type' => 'vod',
+        'source' => 'now_playing',
+        'name' => 'Cache via arr',
+        'tmdb_params' => [],
+        'cache_enabled' => true,
+        'cache_retention' => 'in_group',
+        'cache_method' => 'arr',
+        'cache_arr_integration_id' => $radarr->id,
+    ];
+
+    Livewire::test(EditPlaylist::class, ['record' => $this->playlist->id])
+        ->assertOk()
+        // The arr-stack helper must render while the playlist-level toggle
+        // is off — this only passes if $get('../../prefer_media_server_sources')
+        // actually resolves from inside the repeater item.
+        ->fillForm(['user_agent' => 'test-agent'])
+        ->fillForm(['dynamic_groups_config' => [$rule]])
+        ->assertSee('The arr stack is only used when')
+        ->fillForm(['prefer_media_server_sources' => true])
+        ->assertDontSee('The arr stack is only used when')
+        ->call('save')
+        ->assertHasNoFormErrors();
+
+    $persisted = $this->playlist->fresh()->dynamic_groups_config[0];
+
+    expect($persisted['cache_method'])->toBe('arr')
+        ->and($persisted['cache_arr_integration_id'])->toBe($radarr->id)
+        ->and((bool) $this->playlist->fresh()->prefer_media_server_sources)->toBeTrue();
+});
+
+it('saves a rule created before the arr stack as provider, not global', function () {
+    $this->playlist->update(['dynamic_groups_config' => [[
+        'enabled' => true,
+        'type' => 'vod',
+        'source' => 'now_playing',
+        'name' => 'Legacy cache rule',
+        'tmdb_params' => [],
+        'cache_enabled' => true,
+        'cache_retention' => 'in_group',
+    ]]]);
+
+    Livewire::test(EditPlaylist::class, ['record' => $this->playlist->id])
+        ->assertOk()
+        ->fillForm(['user_agent' => 'test-agent'])
+        ->call('save')
+        ->assertHasNoFormErrors();
+
+    expect($this->playlist->fresh()->dynamic_groups_config[0]['cache_method'])->toBe('provider');
 });
 
 it('preserves all other tmdb_params keys alongside pages', function () {

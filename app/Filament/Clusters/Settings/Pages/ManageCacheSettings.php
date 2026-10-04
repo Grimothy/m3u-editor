@@ -3,6 +3,9 @@
 namespace App\Filament\Clusters\Settings\Pages;
 
 use App\Filament\Clusters\Settings\Pages\Concerns\BaseSettingsPage;
+use App\Models\ArrIntegration;
+use App\Models\DynamicGroup;
+use App\Services\ContentRequestService;
 use BackedEnum;
 use Filament\Forms\Components\Select;
 use Filament\Forms\Components\Toggle;
@@ -60,6 +63,32 @@ class ManageCacheSettings extends BaseSettingsPage
                             ->options(self::cacheRetentionOptions())
                             ->default('automatic')
                             ->helperText(__('"Automatic" deletes a cached file once its movie or episode is removed from the playlist. "Never expire" and "Manual" keep files until you delete them from the Cached Downloads page. Playlists can override this.')),
+                        Select::make('cache_primary_method')
+                            ->label(__('Primary cache method'))
+                            ->options(['provider' => __('Provider download'), 'arr' => __('Arr stack (Radarr/Sonarr), falling back to the provider')])
+                            ->default('provider')
+                            ->live()
+                            ->helperText(__('With the arr stack, Cache Now asks Radarr (movies) or Sonarr (series) first. The provider is only used when arr can\'t deliver. Requires "Prefer media server sources" on the playlist.'))
+                            ->hint(function (): ?string {
+                                $rules = DynamicGroup::rulesFollowingGlobalCacheMethod((int) auth()->id());
+
+                                return $rules === []
+                                    ? null
+                                    : __('Dynamic group rules using this setting: :rules. With the arr stack they send their members to Radarr/Sonarr.', ['rules' => implode(', ', $rules)]);
+                            })
+                            ->hintColor('warning')
+                            ->hintIcon(fn (): ?string => DynamicGroup::rulesFollowingGlobalCacheMethod((int) auth()->id()) === [] ? null : 'heroicon-m-exclamation-triangle')
+                            ->visible(fn (): bool => ArrIntegration::query()->where('user_id', auth()->id())->enabled()->exists()),
+                        Select::make('cache_radarr_integration_id')
+                            ->label(__('Radarr to use'))
+                            ->options(fn (): array => app(ContentRequestService::class)->cacheIntegrations((int) auth()->id(), 'radarr')->pluck('name', 'id')->all())
+                            ->visible(fn (Get $get): bool => $get('cache_primary_method') === 'arr'
+                                && app(ContentRequestService::class)->cacheIntegrations((int) auth()->id(), 'radarr')->count() > 1),
+                        Select::make('cache_sonarr_integration_id')
+                            ->label(__('Sonarr to use'))
+                            ->options(fn (): array => app(ContentRequestService::class)->cacheIntegrations((int) auth()->id(), 'sonarr')->pluck('name', 'id')->all())
+                            ->visible(fn (Get $get): bool => $get('cache_primary_method') === 'arr'
+                                && app(ContentRequestService::class)->cacheIntegrations((int) auth()->id(), 'sonarr')->count() > 1),
                         Toggle::make('default_share_cache_across_playlists')
                             ->label(__('Share cache across playlists by default'))
                             ->inline(false)

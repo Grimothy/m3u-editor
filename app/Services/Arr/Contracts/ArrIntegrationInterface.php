@@ -58,6 +58,14 @@ interface ArrIntegrationInterface
     public function add(array $payload): array;
 
     /**
+     * Stop the title's active downloads (removing them from the download
+     * client), then delete the movie/series and its files from the arr library.
+     *
+     * @return array{ok: bool, error?: string}
+     */
+    public function remove(int $libraryId): array;
+
+    /**
      * Check whether an external ID already exists in the library.
      *
      * @return array{exists: bool, id?: int}

@@ -4,11 +4,14 @@ namespace App\Services;
 
 use App\Enums\CachedContentFileStatus;
 use App\Enums\CachedContentManagedBy;
+use App\Enums\CachedContentSource;
+use App\Models\ArrIntegration;
 use App\Models\CachedContentFile;
 use App\Models\Channel;
 use App\Models\DynamicGroup;
 use App\Models\Episode;
 use App\Models\Playlist;
+use App\Services\Arr\ArrService;
 use App\Settings\GeneralSettings;
 use Illuminate\Database\Eloquent\Builder;
 use Illuminate\Database\Query\Builder as QueryBuilder;
@@ -53,6 +56,7 @@ class CachedContentRetentionService
         $automaticPlaylists = $this->automaticPlaylistIdsQuery();
 
         return CachedContentFile::query()
+            ->provider()
             ->whereIn('status', [
                 CachedContentFileStatus::Completed->value,
                 CachedContentFileStatus::Failed->value,
@@ -149,10 +153,14 @@ class CachedContentRetentionService
     }
 
     /**
-     * Stamp `dropped_at` on this group's provenance rows whose file's
-     * cacheable is no longer in the group's cache scope: not a member of
-     * `dynamic_group_items`, or outside the top-N item ids. Set-based —
-     * one UPDATE per morph type, never per-row PHP loops over files.
+     * Stamp `dropped_at` on this group's provenance rows whose file is no
+     * longer in the group's cache scope. Provider rows are scoped by
+     * cacheable id (not a member of `dynamic_group_items`, or outside the
+     * top-N item ids); arr rows are shared across playlists, so they are
+     * scoped by identity — the row's tmdb/tvdb ids against the in-scope
+     * members' ids — never by cacheable_id, which belongs to whichever
+     * playlist's item created the shared row. Set-based — one UPDATE per
+     * source, never per-row PHP loops over files.
      *
      * When the rule's cache settings are null (caching turned off, or the
      * rule disabled/removed), every undropped row of the group is stamped.
@@ -179,11 +187,28 @@ class CachedContentRetentionService
         if ($settings['max_items'] !== null) {
             $members->limit((int) $settings['max_items']);
         }
-        $scopeItemIds = $members->pluck($members->getRelated()->getTable().'.id')->all() ?: [0];
+        $table = $members->getRelated()->getTable();
+        $scopeItemIds = $members->pluck($table.'.id')->all() ?: [0];
+
+        // The same in-scope members' identity ids. The DB columns are
+        // strings; nulls and blanks are not identities.
+        $scopeTmdbIds = (clone $members)->pluck($table.'.tmdb_id')
+            ->filter(fn ($tmdbId): bool => $tmdbId !== null && $tmdbId !== '')
+            ->map(fn ($tmdbId): string => (string) $tmdbId)
+            ->all();
+
+        $scopeTvdbIds = $group->type === 'series'
+            ? (clone $members)->pluck($table.'.tvdb_id')
+                ->filter(fn ($tvdbId): bool => $tvdbId !== null && $tvdbId !== '')
+                ->map(fn ($tvdbId): string => (string) $tvdbId)
+                ->all()
+            : [];
 
         $now = now();
 
-        // VOD files: dropped when their channel left the in-scope set.
+        // Provider VOD files: dropped when their channel left the in-scope
+        // set. The source filter keeps shared arr rows out of this
+        // cacheable-id check — they belong to another playlist's channel.
         DB::table('cached_content_file_dynamic_groups')
             ->where('dynamic_group_id', $group->id)
             ->whereNull('dropped_at')
@@ -192,13 +217,14 @@ class CachedContentRetentionService
                     ->from('cached_content_files')
                     ->whereColumn('cached_content_files.id', 'cached_content_file_dynamic_groups.cached_content_file_id')
                     ->where('cached_content_files.cacheable_type', (new Channel)->getMorphClass())
+                    ->where('cached_content_files.source', CachedContentSource::Provider->value)
                     ->whereNotIn('cached_content_files.cacheable_id', $scopeItemIds);
             })
             ->update(['dropped_at' => $now]);
 
-        // Episode files: dropped when their series left the in-scope set
-        // (episodes have no membership of their own; they belong through
-        // their series).
+        // Provider episode files: dropped when their series left the
+        // in-scope set (episodes have no membership of their own; they
+        // belong through their series).
         DB::table('cached_content_file_dynamic_groups')
             ->where('dynamic_group_id', $group->id)
             ->whereNull('dropped_at')
@@ -214,6 +240,40 @@ class CachedContentRetentionService
                     });
             })
             ->update(['dropped_at' => $now]);
+
+        // Radarr arr files (VOD groups): scoped by tmdb identity — dropped
+        // when no in-scope member channel carries the row's tmdb_id.
+        if ($group->type !== 'series') {
+            DB::table('cached_content_file_dynamic_groups')
+                ->where('dynamic_group_id', $group->id)
+                ->whereNull('dropped_at')
+                ->whereExists(function (QueryBuilder $sub) use ($scopeTmdbIds): void {
+                    $sub->selectRaw('1')
+                        ->from('cached_content_files')
+                        ->whereColumn('cached_content_files.id', 'cached_content_file_dynamic_groups.cached_content_file_id')
+                        ->where('cached_content_files.source', CachedContentSource::Radarr->value)
+                        ->whereNotIn('cached_content_files.tmdb_id', $scopeTmdbIds);
+                })
+                ->update(['dropped_at' => $now]);
+        } else {
+            // Sonarr arr files (series groups): dropped only when NEITHER the
+            // row's tvdb_id nor its tmdb_id matches an in-scope series. The
+            // tmdb half is written NULL-safely on purpose — as NOT (tvdb IN …
+            // OR tmdb IN …) a NULL tmdb would make the row never drop.
+            DB::table('cached_content_file_dynamic_groups')
+                ->where('dynamic_group_id', $group->id)
+                ->whereNull('dropped_at')
+                ->whereExists(function (QueryBuilder $sub) use ($scopeTvdbIds, $scopeTmdbIds): void {
+                    $sub->selectRaw('1')
+                        ->from('cached_content_files')
+                        ->whereColumn('cached_content_files.id', 'cached_content_file_dynamic_groups.cached_content_file_id')
+                        ->where('cached_content_files.source', CachedContentSource::Sonarr->value)
+                        ->whereNotIn('cached_content_files.tvdb_id', $scopeTvdbIds)
+                        ->where(fn (QueryBuilder $q) => $q->whereNull('cached_content_files.tmdb_id')
+                            ->orWhereNotIn('cached_content_files.tmdb_id', $scopeTmdbIds));
+                })
+                ->update(['dropped_at' => $now]);
+        }
 
         if ($group->playlist?->prefer_media_server_sources) {
             $this->markMediaMatchedDropped($group, $now);
@@ -245,6 +305,7 @@ class CachedContentRetentionService
                     ->from('cached_content_files')
                     ->whereColumn('cached_content_files.id', 'cached_content_file_dynamic_groups.cached_content_file_id')
                     ->where('cached_content_files.cacheable_type', (new Channel)->getMorphClass())
+                    ->where('cached_content_files.source', CachedContentSource::Provider->value)
                     ->whereExists(function (QueryBuilder $match): void {
                         $match->selectRaw('1')
                             ->from('media_source_matches as msm')
@@ -267,6 +328,7 @@ class CachedContentRetentionService
                     ->from('cached_content_files')
                     ->whereColumn('cached_content_files.id', 'cached_content_file_dynamic_groups.cached_content_file_id')
                     ->where('cached_content_files.cacheable_type', (new Episode)->getMorphClass())
+                    ->where('cached_content_files.source', CachedContentSource::Provider->value)
                     ->whereExists(function (QueryBuilder $match): void {
                         $match->selectRaw('1')
                             ->from('media_source_matches as msm')
@@ -297,10 +359,12 @@ class CachedContentRetentionService
      *     values, not the live rule) says release. NULL-group rows are
      *     never released while TMDB is unconfigured, and in_group NULL-group
      *     rows get a minimum 24h grace (see deleteReleasedPivotRows).
-     *  4. Delete managed files with no remaining provenance row (their
-     *     last group released them).
+     *  4. Delete managed provider files with no remaining provenance row
+     *     (their last group released them), then release group-managed
+     *     arr rows in releasable states the same way — but through
+     *     Radarr/Sonarr, via releaseArrIds().
      *
-     * @return int Number of cached files deleted.
+     * @return int Number of cached files deleted (or released through arr).
      */
     public function releaseDynamicGroupCaches(): int
     {
@@ -321,6 +385,7 @@ class CachedContentRetentionService
 
         $ids = CachedContentFile::query()
             ->where('managed_by', CachedContentManagedBy::DynamicGroup->value)
+            ->where('source', CachedContentSource::Provider->value)
             ->whereIn('status', [
                 CachedContentFileStatus::Completed->value,
                 CachedContentFileStatus::Failed->value,
@@ -340,7 +405,104 @@ class CachedContentRetentionService
             ->map(fn (object $row): int => (int) $row->id)
             ->collect();
 
-        return $this->deleteIds($ids);
+        $deleted = $this->deleteIds($ids);
+
+        // Group-managed arr rows: same "no remaining pivot" scoping, but
+        // the status gate includes the states an arr row passes through
+        // on its way to (or away from) the media server.
+        $arrIds = CachedContentFile::query()
+            ->where('managed_by', CachedContentManagedBy::DynamicGroup->value)
+            ->arr()
+            ->whereIn('status', [
+                CachedContentFileStatus::Completed->value,
+                CachedContentFileStatus::Imported->value,
+                CachedContentFileStatus::Failed->value,
+                CachedContentFileStatus::Requested->value,
+            ])
+            ->whereNotExists(function (QueryBuilder $sub): void {
+                $sub->selectRaw('1')
+                    ->from('cached_content_file_dynamic_groups')
+                    ->whereColumn('cached_content_file_dynamic_groups.cached_content_file_id', 'cached_content_files.id');
+            })
+            ->select('id')
+            ->toBase()
+            ->cursor()
+            ->map(fn (object $row): int => (int) $row->id)
+            ->collect();
+
+        return $deleted + $this->releaseArrIds($arrIds);
+    }
+
+    /**
+     * Release group-managed arr rows by deleting the title (and its files) through Radarr/Sonarr.
+     * A failed API call keeps the row (with the error) so the next sweep retries it.
+     *
+     * @param  Collection<int, int>  $ids
+     */
+    public function releaseArrIds(Collection $ids): int
+    {
+        if ($ids->isEmpty()) {
+            return 0;
+        }
+
+        $released = 0;
+        /** @var array<int, ArrIntegration> $refreshIntegrations */
+        $refreshIntegrations = [];
+
+        foreach ($ids->chunk(100) as $chunk) {
+            CachedContentFile::query()
+                ->whereIn('id', $chunk->all())
+                ->arr()
+                ->with('arrIntegration')
+                ->get()
+                ->each(function (CachedContentFile $row) use (&$released, &$refreshIntegrations): void {
+                    $integration = $row->arrIntegration;
+
+                    // Orphaned arr row (integration deleted, or never linked
+                    // to a library id): there is nothing to remove remotely,
+                    // so drop the local row to stop the sweep retrying it.
+                    if ($integration === null || (int) $row->arr_library_id <= 0) {
+                        Log::warning("CachedContentRetention: arr row {$row->id} has no arr integration or library id; deleting the row locally.");
+
+                        $row->delete();
+                        $released++;
+
+                        return;
+                    }
+
+                    $result = ArrService::make($integration)->remove((int) $row->arr_library_id);
+
+                    if (! ($result['ok'] ?? false)) {
+                        // Keep the row (with the error) so the next sweep retries it.
+                        $row->forceFill([
+                            'last_error_message' => __('Could not remove from :arr: :error', [
+                                'arr' => $row->source->getLabel(),
+                                'error' => $result['error'] ?? 'unknown error',
+                            ]),
+                        ])->save();
+
+                        return;
+                    }
+
+                    // Never deleteStoredFile() here: arr rows have no local
+                    // file — Radarr/Sonarr deleted the title's files itself
+                    // (deleteFiles=true).
+                    $row->delete();
+                    $refreshIntegrations[$integration->id] = $integration;
+                    $released++;
+                });
+        }
+
+        // One rescan per integration, not per released title.
+        foreach ($refreshIntegrations as $integration) {
+            $integration->requestMediaServerRefresh();
+        }
+
+        if ($released > 0) {
+            Log::info("CachedContentRetention: released {$released} arr downloads through Radarr/Sonarr.");
+        }
+
+        return $released;
     }
 
     /**

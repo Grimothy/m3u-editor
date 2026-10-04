@@ -2,6 +2,7 @@
 
 namespace App\Models;
 
+use App\Enums\CachedContentSource;
 use App\Models\Scopes\ExcludeAioFailoverClonesScope;
 use App\Services\PlaylistService;
 use App\Settings\GeneralSettings;
@@ -132,7 +133,8 @@ class Episode extends Model
      */
     public function cachedContentFile(): MorphOne
     {
-        return $this->morphOne(CachedContentFile::class, 'cacheable');
+        return $this->morphOne(CachedContentFile::class, 'cacheable')
+            ->where('source', CachedContentSource::Provider->value);
     }
 
     /**

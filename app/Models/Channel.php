@@ -2,6 +2,7 @@
 
 namespace App\Models;
 
+use App\Enums\CachedContentSource;
 use App\Enums\ChannelLogoType;
 use App\Enums\PlaylistChannelId;
 use App\Enums\PlaylistSourceType;
@@ -243,7 +244,17 @@ class Channel extends Model
      */
     public function cachedContentFile(): MorphOne
     {
-        return $this->morphOne(CachedContentFile::class, 'cacheable');
+        return $this->morphOne(CachedContentFile::class, 'cacheable')
+            ->where('source', CachedContentSource::Provider->value);
+    }
+
+    /**
+     * The Radarr request for this channel, if any.
+     */
+    public function arrCachedContentFile(): MorphOne
+    {
+        return $this->morphOne(CachedContentFile::class, 'cacheable')
+            ->where('source', CachedContentSource::Radarr->value);
     }
 
     /**

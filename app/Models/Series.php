@@ -2,6 +2,7 @@
 
 namespace App\Models;
 
+use App\Enums\CachedContentSource;
 use App\Enums\PlaylistSourceType;
 use App\Exceptions\XtreamRateLimitedException;
 use App\Jobs\FetchTmdbIds;
@@ -17,6 +18,7 @@ use Illuminate\Database\Eloquent\Model;
 use Illuminate\Database\Eloquent\Relations\BelongsTo;
 use Illuminate\Database\Eloquent\Relations\BelongsToMany;
 use Illuminate\Database\Eloquent\Relations\HasMany;
+use Illuminate\Database\Eloquent\Relations\MorphOne;
 use Illuminate\Database\Eloquent\Relations\MorphToMany;
 use Illuminate\Support\Facades\Bus;
 use Illuminate\Support\Facades\DB;
@@ -86,6 +88,15 @@ class Series extends Model
     public function dynamicGroups(): MorphToMany
     {
         return $this->morphToMany(DynamicGroup::class, 'item', 'dynamic_group_items');
+    }
+
+    /**
+     * The Sonarr request for this series, if any.
+     */
+    public function arrCachedContentFile(): MorphOne
+    {
+        return $this->morphOne(CachedContentFile::class, 'cacheable')
+            ->where('source', CachedContentSource::Sonarr->value);
     }
 
     public function streamFileSetting(): BelongsTo

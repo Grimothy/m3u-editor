@@ -4,6 +4,8 @@ namespace Database\Factories;
 
 use App\Enums\CachedContentFileStatus;
 use App\Enums\CachedContentManagedBy;
+use App\Enums\CachedContentSource;
+use App\Models\ArrIntegration;
 use App\Models\CachedContentFile;
 use App\Models\Channel;
 use App\Models\Episode;
@@ -99,6 +101,43 @@ class CachedContentFileFactory extends Factory
     {
         return $this->state(fn (array $attributes) => [
             'managed_by' => CachedContentManagedBy::DynamicGroup,
+        ]);
+    }
+
+    /**
+     * A Radarr-requested movie row for the given channel (source pill +
+     * arr statuses; no local file).
+     */
+    public function arrMovie(ArrIntegration $integration, Channel $channel): static
+    {
+        return $this->forItem($channel)
+            ->state(fn (array $attributes) => [
+                'source' => CachedContentSource::Radarr,
+                'arr_integration_id' => $integration->id,
+                'arr_library_id' => 1,
+                'status' => CachedContentFileStatus::Requested,
+            ]);
+    }
+
+    /**
+     * A Sonarr-requested series row (one row per series; `arr_seasons`
+     * null = all seasons).
+     */
+    public function arrSeries(ArrIntegration $integration, Series $series, ?array $seasons = null): static
+    {
+        return $this->state(fn (array $attributes) => [
+            'source' => CachedContentSource::Sonarr,
+            'content_type' => 'series',
+            'cacheable_type' => (new Series)->getMorphClass(),
+            'cacheable_id' => $series->getKey(),
+            'user_id' => $series->user_id,
+            'playlist_id' => $series->playlist_id,
+            'tmdb_id' => null,
+            'tvdb_id' => (string) $series->tvdb_id,
+            'arr_seasons' => $seasons,
+            'arr_integration_id' => $integration->id,
+            'arr_library_id' => 1,
+            'status' => CachedContentFileStatus::Requested,
         ]);
     }
 

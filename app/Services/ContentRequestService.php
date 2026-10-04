@@ -221,59 +221,14 @@ class ContentRequestService
 
         $service = ArrService::make($integration);
 
-        try {
-            if ($service->checkExists($externalId)['exists']) {
-                return ['ok' => false, 'code' => 'already_available', 'error' => 'This title is already available.'];
-            }
+        $lookup = $this->lookupForAdd($integration, $service, $type, $externalId, $selectedSeasons);
 
-            $lookupTerm = ($type === 'movie' ? 'tmdb:' : 'tvdb:').$externalId;
-            $externalKey = $type === 'movie' ? 'tmdbId' : 'tvdbId';
-            $item = collect($service->search($lookupTerm))->first(
-                fn (array $result): bool => (int) ($result[$externalKey] ?? 0) === $externalId,
-            );
-        } catch (Throwable $throwable) {
-            Log::warning('Content request lookup failed', [
-                'integration_id' => $integration->id,
-                'error' => $throwable->getMessage(),
-            ]);
-
-            return ['ok' => false, 'code' => 'provider_unavailable', 'error' => 'The request provider is temporarily unavailable.'];
+        if (! $lookup['ok']) {
+            return ['ok' => false, 'code' => $lookup['code'], 'error' => $lookup['error']];
         }
 
-        if (! $item) {
-            return ['ok' => false, 'code' => 'not_found', 'error' => 'The requested title was not found.'];
-        }
-
-        $payload = [
-            $externalKey => $externalId,
-            'title' => $item['title'] ?? null,
-            'titleSlug' => $item['titleSlug'] ?? null,
-            'images' => $item['images'] ?? [],
-            'qualityProfileId' => $integration->quality_profile_id,
-            'rootFolderPath' => $integration->root_folder_path,
-            $type === 'movie' ? 'searchForMovie' : 'searchForMissingEpisodes' => true,
-        ];
-
-        if ($type === 'series' && $selectedSeasons !== null) {
-            $availableSeasons = collect($item['seasons'] ?? [])
-                ->pluck('seasonNumber')
-                ->map(fn (mixed $season): int => (int) $season)
-                ->all();
-
-            if (array_diff($selectedSeasons, $availableSeasons) !== []) {
-                return ['ok' => false, 'code' => 'invalid_seasons', 'error' => 'One or more selected seasons are unavailable.'];
-            }
-
-            $payload['seasons'] = collect($item['seasons'])
-                ->map(fn (array $season): array => [
-                    'seasonNumber' => (int) $season['seasonNumber'],
-                    'monitored' => in_array((int) $season['seasonNumber'], $selectedSeasons, true),
-                ])
-                ->values()
-                ->all();
-        }
-
-        $title = $item['title'] ?? 'Unknown';
+        $payload = $lookup['payload'];
+        $title = $lookup['title'];
 
         if (! $playlistAuth->auto_approve_requests) {
             $mediaRequest = $this->createMediaRequest($playlistAuth, $integration, $type, $externalId, $title, $payload, 'pending');
@@ -324,6 +279,77 @@ class ContentRequestService
         ];
     }
 
+    /**
+     * Resolve an external ID into an arr add payload: existence check, provider lookup
+     * and (for series) season filtering. Shared by the guest flow and the cache.
+     *
+     * @param  array<int, int>|null  $selectedSeasons
+     * @return array{ok: true, payload: array<string, mixed>, title: string}|array{ok: false, code: string, error: string, library_id?: int, has_file?: bool}
+     */
+    private function lookupForAdd(ArrIntegration $integration, ArrIntegrationInterface $service, string $type, int $externalId, ?array $selectedSeasons): array
+    {
+        try {
+            $exists = $service->checkExists($externalId);
+            if ($exists['exists']) {
+                return [
+                    'ok' => false,
+                    'code' => 'already_available',
+                    'error' => 'This title is already available.',
+                    'library_id' => (int) $exists['id'],
+                    'has_file' => (bool) ($exists['has_file'] ?? false),
+                ];
+            }
+
+            $lookupTerm = ($type === 'movie' ? 'tmdb:' : 'tvdb:').$externalId;
+            $externalKey = $type === 'movie' ? 'tmdbId' : 'tvdbId';
+            $item = collect($service->search($lookupTerm))->first(
+                fn (array $result): bool => (int) ($result[$externalKey] ?? 0) === $externalId,
+            );
+        } catch (Throwable $throwable) {
+            Log::warning('Content request lookup failed', [
+                'integration_id' => $integration->id,
+                'error' => $throwable->getMessage(),
+            ]);
+
+            return ['ok' => false, 'code' => 'provider_unavailable', 'error' => 'The request provider is temporarily unavailable.'];
+        }
+
+        if (! $item) {
+            return ['ok' => false, 'code' => 'not_found', 'error' => 'The requested title was not found.'];
+        }
+
+        $payload = [
+            $externalKey => $externalId,
+            'title' => $item['title'] ?? null,
+            'titleSlug' => $item['titleSlug'] ?? null,
+            'images' => $item['images'] ?? [],
+            'qualityProfileId' => $integration->quality_profile_id,
+            'rootFolderPath' => $integration->root_folder_path,
+            $type === 'movie' ? 'searchForMovie' : 'searchForMissingEpisodes' => true,
+        ];
+
+        if ($type === 'series' && $selectedSeasons !== null) {
+            $availableSeasons = collect($item['seasons'] ?? [])
+                ->pluck('seasonNumber')
+                ->map(fn (mixed $season): int => (int) $season)
+                ->all();
+
+            if (array_diff($selectedSeasons, $availableSeasons) !== []) {
+                return ['ok' => false, 'code' => 'invalid_seasons', 'error' => 'One or more selected seasons are unavailable.'];
+            }
+
+            $payload['seasons'] = collect($item['seasons'])
+                ->map(fn (array $season): array => [
+                    'seasonNumber' => (int) $season['seasonNumber'],
+                    'monitored' => in_array((int) $season['seasonNumber'], $selectedSeasons, true),
+                ])
+                ->values()
+                ->all();
+        }
+
+        return ['ok' => true, 'payload' => $payload, 'title' => $item['title'] ?? 'Unknown'];
+    }
+
     /** @param array<string, mixed> $payload */
     private function createMediaRequest(
         PlaylistAuth $playlistAuth,
@@ -360,6 +386,58 @@ class ContentRequestService
 
             throw $e;
         }
+    }
+
+    /**
+     * The enabled arr integrations of one type owned by the user (cache-side; no guest gating).
+     *
+     * @param  'radarr'|'sonarr'  $arrType
+     * @return Collection<int, ArrIntegration>
+     */
+    public function cacheIntegrations(int $userId, string $arrType): Collection
+    {
+        return ArrIntegration::query()->where('user_id', $userId)->where('type', $arrType)->enabled()->orderBy('name')->get();
+    }
+
+    /**
+     * Send a title to Radarr/Sonarr on behalf of the cache (no PlaylistAuth, auto-approved).
+     *
+     * @param  'movie'|'series'  $type
+     * @param  array<int, int>|null  $selectedSeasons  null = all seasons
+     * @return array{ok: bool, code?: string, error?: string, media_request?: MediaRequest, library_id?: int, has_file?: bool}
+     */
+    public function requestForCache(ArrIntegration $integration, string $type, int $externalId, ?array $selectedSeasons = null): array
+    {
+        $service = ArrService::make($integration);
+
+        $lookup = $this->lookupForAdd($integration, $service, $type, $externalId, $selectedSeasons);
+        if (! $lookup['ok']) {
+            return $lookup;
+        }
+
+        $payload = $lookup['payload'];
+        $result = $service->add($payload);
+        if (! ($result['ok'] ?? false)) {
+            return [
+                'ok' => false,
+                'code' => 'submission_failed',
+                'error' => $result['error'] ?? __('The request provider could not accept this title.'),
+            ];
+        }
+
+        $mediaRequest = MediaRequest::create([
+            'playlist_auth_id' => null,
+            'arr_integration_id' => $integration->id,
+            'title' => $lookup['title'],
+            'external_id' => (string) $externalId,
+            'request_type' => $type,
+            'payload' => $payload,
+            'status' => 'approved',
+            'requested_at' => now(),
+            'reviewed_at' => now(),
+        ]);
+
+        return ['ok' => true, 'media_request' => $mediaRequest, 'library_id' => (int) ($result['data']['id'] ?? 0)];
     }
 
     /** @return array{requests: array<int, array<string, mixed>>, total: int} */
@@ -401,71 +479,17 @@ class ContentRequestService
             return $formatted;
         }
 
-        try {
-            $queueItem = collect(ArrService::make($integration)->fetchQueue())
-                ->first(function (array $item) use ($mediaRequest): bool {
-                    if ($mediaRequest->external_id !== null) {
-                        if (isset($item['externalId'])) {
-                            return (string) $item['externalId'] === $mediaRequest->external_id;
-                        }
+        $progress = $this->resolveProgress($mediaRequest);
 
-                        return false;
-                    }
-
-                    return mb_strtolower(trim($item['title']))
-                        === mb_strtolower(trim($mediaRequest->title));
-                });
-        } catch (Throwable $throwable) {
-            Log::warning('Content request status lookup failed', [
-                'integration_id' => $integration->id,
-                'error' => $throwable->getMessage(),
-            ]);
-
-            $queueItem = null;
+        if ($progress === null) {
+            return $formatted;
         }
 
-        $canPersistCompleted = false;
-
-        if ($queueItem) {
-            $status = ArrQueueMonitor::resolveStatus(
-                $queueItem['status'],
-                $queueItem['trackedDownloadState'] ?? null,
-            );
-            $progress = $queueItem['progress'];
-            $quality = $queueItem['quality'] ?? null;
-            $protocol = $queueItem['protocol'] ?? null;
-            $size = $queueItem['size'];
-            $timeLeft = $queueItem['timeLeft'] ?? null;
-            $canPersistCompleted = $mediaRequest->external_id === null
-                || (string) ($queueItem['externalId'] ?? '') === $mediaRequest->external_id;
-        } else {
-            $eventQuery = ArrQueueEvent::query()
-                ->where('arr_integration_id', $integration->id)
-                ->where('last_event_at', '>=', $mediaRequest->requested_at);
-
-            if ($mediaRequest->external_id !== null) {
-                $eventQuery->where('external_id', $mediaRequest->external_id);
-            } else {
-                $eventQuery->where('title', $mediaRequest->title);
-            }
-
-            $event = $eventQuery->orderByDesc('last_event_at')->first();
-            if (! $event) {
-                return $formatted;
-            }
-
-            $status = $event->status;
-            $progress = $event->progress;
-            $quality = $event->quality;
-            $protocol = null;
-            $size = $event->size;
-            $timeLeft = null;
-            $canPersistCompleted = true;
-        }
+        $status = $progress['status'];
 
         if (in_array($status, ['completed', 'imported'], true)) {
             $status = 'completed';
-            if ($canPersistCompleted) {
+            if ($progress['can_persist_completed']) {
                 $this->completeRequest($mediaRequest);
                 $formatted = $this->formatRequest($mediaRequest);
             }
@@ -473,12 +497,111 @@ class ContentRequestService
 
         return array_merge($formatted, [
             'status' => $status,
-            'progress' => $progress,
-            'quality' => $quality,
-            'protocol' => $protocol,
-            'size' => $size,
-            'time_left' => $timeLeft,
+            'progress' => $progress['progress'],
+            'quality' => $progress['quality'],
+            'protocol' => $progress['protocol'],
+            'size' => $progress['size'],
+            'time_left' => $progress['time_left'],
         ]);
+    }
+
+    /**
+     * Live progress for an approved request, from the arr queue or the latest webhook event. Null when nothing is known yet.
+     *
+     * @param  array<int, array<string, mixed>>|null  $queue  pre-fetched fetchQueue() result (batch callers); null = fetch here
+     * @return array{status: string, tracked_state: ?string, progress: int, size: int, size_left: int, quality: ?string, protocol: ?string, time_left: ?string, can_persist_completed: bool}|null
+     */
+    public function resolveProgress(MediaRequest $mediaRequest, ?array $queue = null, bool $aggregateEpisodes = false): ?array
+    {
+        $integration = $mediaRequest->arrIntegration;
+
+        try {
+            $records = $queue ?? ArrService::make($integration)->fetchQueue();
+        } catch (Throwable $throwable) {
+            Log::warning('Content request status lookup failed', [
+                'integration_id' => $integration->id,
+                'error' => $throwable->getMessage(),
+            ]);
+
+            $records = [];
+        }
+
+        $matches = collect($records)->filter(function (array $item) use ($mediaRequest): bool {
+            if ($mediaRequest->external_id !== null) {
+                if (isset($item['externalId'])) {
+                    return (string) $item['externalId'] === $mediaRequest->external_id;
+                }
+
+                return false;
+            }
+
+            return mb_strtolower(trim($item['title']))
+                === mb_strtolower(trim($mediaRequest->title));
+        })->values();
+
+        $canPersistCompleted = false;
+
+        if ($matches->isNotEmpty()) {
+            $queueItem = $matches->first();
+
+            if ($aggregateEpisodes && $mediaRequest->external_id !== null && $matches->count() > 1) {
+                $size = (int) $matches->sum(fn (array $item): int => (int) ($item['size'] ?? 0));
+                $sizeLeft = (int) $matches->sum(fn (array $item): int => (int) ($item['sizeLeft'] ?? 0));
+                $progress = $size > 0 ? (int) round((1 - $sizeLeft / $size) * 100) : 0;
+                $queueItem = $matches->first(fn (array $item): bool => in_array($item['status'], ['failed', 'warning'], true)
+                    || in_array($item['trackedDownloadState'] ?? null, ['importBlocked', 'importFailed', 'failed', 'failedPending'], true))
+                    ?? $queueItem;
+                $canPersistCompleted = (string) ($queueItem['externalId'] ?? '') === $mediaRequest->external_id;
+            } else {
+                $progress = $queueItem['progress'];
+                $size = (int) ($queueItem['size'] ?? 0);
+                $sizeLeft = (int) ($queueItem['sizeLeft'] ?? 0);
+                $canPersistCompleted = $mediaRequest->external_id === null
+                    || (string) ($queueItem['externalId'] ?? '') === $mediaRequest->external_id;
+            }
+
+            return [
+                'status' => ArrQueueMonitor::resolveStatus($queueItem['status'], $queueItem['trackedDownloadState'] ?? null),
+                'tracked_state' => $queueItem['trackedDownloadState'] ?? null,
+                'progress' => $progress,
+                'size' => $size,
+                'size_left' => $sizeLeft,
+                'quality' => $queueItem['quality'] ?? null,
+                'protocol' => $queueItem['protocol'] ?? null,
+                'time_left' => $queueItem['timeLeft'] ?? null,
+                'can_persist_completed' => $canPersistCompleted,
+            ];
+        }
+
+        $eventQuery = ArrQueueEvent::query()
+            ->where('arr_integration_id', $integration->id)
+            ->where('last_event_at', '>=', $mediaRequest->requested_at);
+
+        if ($mediaRequest->external_id !== null) {
+            $eventQuery->where('external_id', $mediaRequest->external_id);
+        } else {
+            $eventQuery->where('title', $mediaRequest->title);
+        }
+
+        $event = $eventQuery->orderByDesc('last_event_at')->first();
+        if (! $event) {
+            return null;
+        }
+
+        $size = $event->size;
+        $progress = $event->progress;
+
+        return [
+            'status' => $event->status,
+            'tracked_state' => null,
+            'progress' => $progress,
+            'size' => $size,
+            'size_left' => (int) round($size * (100 - $progress) / 100),
+            'quality' => $event->quality,
+            'protocol' => null,
+            'time_left' => null,
+            'can_persist_completed' => true,
+        ];
     }
 
     /** @return array{ok: bool, code?: string} */

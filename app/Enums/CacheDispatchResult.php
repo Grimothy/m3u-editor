@@ -14,4 +14,11 @@ enum CacheDispatchResult: string
     case Disabled = 'disabled';
     case CoolingDown = 'cooling_down';
     case MediaServerAvailable = 'media_server_available';
+
+    // Arr-stack results (feat/cache-now-arr). ArrMonitoredFallback and
+    // ArrFallbackQueued mean the provider leg queued instead.
+    case ArrRequested = 'arr_requested';
+    case ArrAlreadyAvailable = 'arr_already_available';
+    case ArrMonitoredFallback = 'arr_monitored_fallback';
+    case ArrFallbackQueued = 'arr_fallback_queued';
 }

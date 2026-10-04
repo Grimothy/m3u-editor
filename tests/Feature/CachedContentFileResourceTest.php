@@ -4,8 +4,11 @@ use App\Enums\CachedContentFileStatus;
 use App\Filament\Resources\CachedContentFiles\CachedContentFileResource;
 use App\Filament\Resources\CachedContentFiles\Pages\ListCachedContentFiles;
 use App\Jobs\DownloadCachedContentFile;
+use App\Jobs\RefreshMediaServerLibraryJob;
+use App\Models\ArrIntegration;
 use App\Models\CachedContentFile;
 use App\Models\Channel;
+use App\Models\MediaServerIntegration;
 use App\Models\Playlist;
 use App\Models\User;
 use App\Settings\GeneralSettings;
@@ -13,6 +16,7 @@ use App\Tables\Columns\ProgressColumn;
 use Illuminate\Foundation\Testing\RefreshDatabase;
 use Illuminate\Support\Facades\Bus;
 use Illuminate\Support\Facades\Cache;
+use Illuminate\Support\Facades\Http;
 use Livewire\Livewire;
 
 uses(RefreshDatabase::class);
@@ -632,4 +636,320 @@ it('table poll resolves to 5s when at least one visible row is Downloading', fun
     $instance = Livewire::test(ListCachedContentFiles::class)->instance();
     $table = $instance->getTable();
     expect($table->getPollingInterval())->toBe('5s');
+});
+
+// Arr (Radarr/Sonarr) rows
+
+/**
+ * A Radarr-backed row owned by $user (Requested status, arr_library_id 1).
+ */
+function radarrRowFor(User $user): CachedContentFile
+{
+    $integration = ArrIntegration::factory()->radarr()->create(['user_id' => $user->id]);
+    $playlist = Playlist::factory()->for($user)->create();
+    $channel = Channel::factory()->for($user)->for($playlist)->create(['is_vod' => true, 'tmdb_id' => 5100]);
+
+    return CachedContentFile::factory()->arrMovie($integration, $channel)->create(['title' => 'Radarr movie']);
+}
+
+it('renders the source badge for a radarr row', function () {
+    $user = User::factory()->create();
+    $this->actingAs($user);
+    radarrRowFor($user);
+
+    Livewire::test(ListCachedContentFiles::class)
+        ->assertOk()
+        ->loadTable()
+        ->assertSee('Radarr');
+});
+
+it('the source filter narrows the table to arr rows', function () {
+    $user = User::factory()->create();
+    $this->actingAs($user);
+    $arrRow = radarrRowFor($user);
+    $providerRow = CachedContentFile::factory()->completed()->create([
+        'user_id' => $user->id,
+        'playlist_id' => $arrRow->playlist_id,
+        'content_type' => 'movie',
+        'tmdb_id' => '5101',
+        'title' => 'Provider movie',
+    ]);
+
+    Livewire::test(ListCachedContentFiles::class)
+        ->loadTable()
+        ->assertCanSeeTableRecords([$arrRow, $providerRow])
+        ->filterTable('source', 'radarr')
+        ->assertCanSeeTableRecords([$arrRow])
+        ->assertCanNotSeeTableRecords([$providerRow]);
+});
+
+it('the cancel action is visible for an in-flight arr row and hidden once imported', function () {
+    $user = User::factory()->create();
+    $this->actingAs($user);
+    $row = radarrRowFor($user);
+
+    Livewire::test(ListCachedContentFiles::class)
+        ->loadTable()
+        ->assertTableActionVisible('cancel', $row);
+
+    $row->forceFill(['status' => CachedContentFileStatus::Imported])->save();
+
+    Livewire::test(ListCachedContentFiles::class)
+        ->loadTable()
+        ->assertTableActionHidden('cancel', $row);
+});
+
+it('cancel on an arr row stops its radarr downloads, removes the title, and deletes the row', function () {
+    Http::fake([
+        '*/api/v3/queue/details*' => Http::response([['id' => 11], ['id' => 12]], 200),
+        '*/api/v3/queue/bulk*' => Http::response([], 200),
+        '*/api/v3/movie/1*' => Http::response([], 200),
+    ]);
+    Http::preventStrayRequests();
+
+    $user = User::factory()->create();
+    $this->actingAs($user);
+    $row = radarrRowFor($user);
+    $row->forceFill(['status' => CachedContentFileStatus::Downloading])->save();
+
+    Livewire::test(ListCachedContentFiles::class)
+        ->callTableAction('cancel', $row)
+        ->assertNotified(__('Download cancelled'));
+
+    expect(CachedContentFile::find($row->id))->toBeNull();
+
+    Http::assertSent(fn ($request): bool => $request->method() === 'GET'
+        && str_contains($request->url(), '/api/v3/queue/details')
+        && str_contains($request->url(), 'movieId=1'));
+    Http::assertSent(fn ($request): bool => $request->method() === 'DELETE'
+        && str_contains($request->url(), '/api/v3/queue/bulk')
+        && str_contains($request->url(), 'removeFromClient=true')
+        && $request['ids'] === [11, 12]);
+    Http::assertSent(fn ($request): bool => $request->method() === 'DELETE'
+        && str_contains($request->url(), '/api/v3/movie/1?deleteFiles=true'));
+});
+
+it('cancel keeps an arr row when radarr cannot stop its downloads', function () {
+    Http::fake([
+        '*/api/v3/queue/details*' => Http::response(['message' => 'boom'], 500),
+    ]);
+    Http::preventStrayRequests();
+
+    $user = User::factory()->create();
+    $this->actingAs($user);
+    $row = radarrRowFor($user);
+
+    Livewire::test(ListCachedContentFiles::class)
+        ->callTableAction('cancel', $row)
+        ->assertNotified(__('Could not remove from :arr', ['arr' => 'Radarr']));
+
+    expect(CachedContentFile::find($row->id))->not->toBeNull();
+    Http::assertNotSent(fn ($request): bool => $request->method() === 'DELETE');
+});
+
+it('bulkCancel stops and removes in-flight arr rows', function () {
+    Http::fake([
+        '*/api/v3/queue/details*' => Http::response([], 200),
+        '*/api/v3/movie/1*' => Http::response([], 200),
+    ]);
+    Http::preventStrayRequests();
+
+    $user = User::factory()->create();
+    $this->actingAs($user);
+    $row = radarrRowFor($user);
+
+    Livewire::test(ListCachedContentFiles::class)
+        ->callTableBulkAction('bulkCancel', [$row])
+        ->assertNotified();
+
+    expect(CachedContentFile::find($row->id))->toBeNull();
+    Http::assertSent(fn ($request): bool => $request->method() === 'DELETE'
+        && str_contains($request->url(), '/api/v3/movie/1?deleteFiles=true'));
+});
+
+it('deleteCache defaults to removing the title from arr', function () {
+    $user = User::factory()->create();
+    $this->actingAs($user);
+    $row = radarrRowFor($user);
+
+    Livewire::test(ListCachedContentFiles::class)
+        ->mountTableAction('deleteCache', $row)
+        ->assertTableActionDataSet(['remove_from_arr' => true]);
+});
+
+it('deleteCache with remove_from_arr sends the DELETE to Radarr and removes the row', function () {
+    Storage::fake('cache');
+    Http::fake([
+        '*/api/v3/queue/details*' => Http::response([], 200),
+        '*/api/v3/movie/1*' => Http::response([], 200),
+    ]);
+    Http::preventStrayRequests();
+
+    $user = User::factory()->create();
+    $this->actingAs($user);
+    $row = radarrRowFor($user);
+
+    Livewire::test(ListCachedContentFiles::class)
+        ->callTableAction('deleteCache', $row, ['remove_from_arr' => true])
+        ->assertNotified();
+
+    expect(CachedContentFile::find($row->id))->toBeNull();
+
+    Http::assertSent(fn ($request): bool => $request->method() === 'DELETE'
+        && str_contains($request->url(), '/api/v3/movie/1'));
+});
+
+it('deleteCache with remove_from_arr refreshes the linked media server', function () {
+    Http::fake([
+        '*/api/v3/queue/details*' => Http::response([], 200),
+        '*/api/v3/movie/1*' => Http::response([], 200),
+    ]);
+    Http::preventStrayRequests();
+
+    $user = User::factory()->create();
+    $this->actingAs($user);
+    $row = radarrRowFor($user);
+    $mediaServer = MediaServerIntegration::factory()->for($user)->create(['type' => 'emby', 'enabled' => true]);
+    $row->arrIntegration->update(['media_server_integration_id' => $mediaServer->id]);
+
+    // Null cache locks always acquire, so ShouldBeUnique can't hide per-title dispatches.
+    config(['cache.default' => 'null']);
+    Livewire::test(ListCachedContentFiles::class)
+        ->callTableAction('deleteCache', $row, ['remove_from_arr' => true])
+        ->assertNotified();
+
+    Bus::assertDispatchedTimes(RefreshMediaServerLibraryJob::class, 1);
+});
+
+it('deleteCache without remove_from_arr does not refresh the media server', function () {
+    Http::preventStrayRequests();
+
+    $user = User::factory()->create();
+    $this->actingAs($user);
+    $row = radarrRowFor($user);
+    $mediaServer = MediaServerIntegration::factory()->for($user)->create(['type' => 'emby', 'enabled' => true]);
+    $row->arrIntegration->update(['media_server_integration_id' => $mediaServer->id]);
+
+    // Null cache locks always acquire, so ShouldBeUnique can't hide per-title dispatches.
+    config(['cache.default' => 'null']);
+    Livewire::test(ListCachedContentFiles::class)
+        ->callTableAction('deleteCache', $row, ['remove_from_arr' => false])
+        ->assertNotified();
+
+    Bus::assertNotDispatched(RefreshMediaServerLibraryJob::class);
+});
+
+it('bulkDelete with remove_from_arr refreshes each media server once, not once per title', function () {
+    Http::fake([
+        '*/api/v3/queue/details*' => Http::response([], 200),
+        '*/api/v3/movie/*' => Http::response([], 200),
+    ]);
+    Http::preventStrayRequests();
+
+    $user = User::factory()->create();
+    $this->actingAs($user);
+    $mediaServer = MediaServerIntegration::factory()->for($user)->create(['type' => 'emby', 'enabled' => true]);
+    $integration = ArrIntegration::factory()->radarr()->create([
+        'user_id' => $user->id,
+        'media_server_integration_id' => $mediaServer->id,
+    ]);
+    $playlist = Playlist::factory()->for($user)->create();
+    $rows = collect([5100, 5101])->map(fn (int $tmdbId): CachedContentFile => CachedContentFile::factory()
+        ->arrMovie($integration, Channel::factory()->for($user)->for($playlist)->create(['is_vod' => true, 'tmdb_id' => $tmdbId]))
+        ->create(['arr_library_id' => $tmdbId]));
+
+    // Null cache locks always acquire, so ShouldBeUnique can't hide per-title dispatches.
+    config(['cache.default' => 'null']);
+    Livewire::test(ListCachedContentFiles::class)
+        ->callTableBulkAction('bulkDelete', $rows, ['remove_from_arr' => true])
+        ->assertNotified();
+
+    expect(CachedContentFile::query()->count())->toBe(0);
+    Http::assertSentCount(4); // queue lookup + title DELETE, per title
+    Bus::assertDispatchedTimes(RefreshMediaServerLibraryJob::class, 1);
+});
+
+it('deleteCache keeps the row when the Radarr DELETE fails', function () {
+    Http::fake([
+        '*/api/v3/queue/details*' => Http::response([], 200),
+        '*/api/v3/movie/1*' => Http::response(['errorMessage' => 'boom'], 500),
+    ]);
+    Http::preventStrayRequests();
+
+    $user = User::factory()->create();
+    $this->actingAs($user);
+    $row = radarrRowFor($user);
+
+    Livewire::test(ListCachedContentFiles::class)
+        ->callTableAction('deleteCache', $row, ['remove_from_arr' => true])
+        ->assertNotified();
+
+    expect(CachedContentFile::find($row->id))->not->toBeNull();
+
+    Http::assertSent(fn ($request): bool => $request->method() === 'DELETE'
+        && str_contains($request->url(), '/api/v3/movie/1'));
+});
+
+it('retry on a Failed arr row posts the search command and sets Requested', function () {
+    Http::fake([
+        '*/api/v3/command' => Http::response(['id' => 9], 201),
+    ]);
+    Http::preventStrayRequests();
+
+    $user = User::factory()->create();
+    $this->actingAs($user);
+    $row = radarrRowFor($user);
+    $row->forceFill([
+        'status' => CachedContentFileStatus::Failed,
+        'last_error_message' => 'stuck in queue',
+        'fallback_dispatched_at' => now(),
+    ])->save();
+
+    Livewire::test(ListCachedContentFiles::class)
+        ->callTableAction('retry', $row)
+        ->assertNotified();
+
+    Http::assertSent(fn ($request): bool => $request->method() === 'POST'
+        && str_contains($request->url(), '/api/v3/command')
+        && str_contains($request->body(), 'MoviesSearch'));
+
+    $row->refresh();
+    expect($row->status)->toBe(CachedContentFileStatus::Requested)
+        ->and($row->last_error_message)->toBeNull()
+        ->and($row->fallback_dispatched_at)->toBeNull();
+});
+
+it('deleteCache removes an arr row locally when its integration was deleted, without calling arr', function () {
+    Http::preventStrayRequests();
+
+    $user = User::factory()->create();
+    $this->actingAs($user);
+    $row = radarrRowFor($user);
+    $row->arrIntegration->delete();
+
+    Livewire::test(ListCachedContentFiles::class)
+        ->callTableAction('deleteCache', $row->refresh(), ['remove_from_arr' => true])
+        ->assertNotified();
+
+    expect(CachedContentFile::find($row->id))->toBeNull();
+
+    Http::assertNothingSent();
+});
+
+it('retry on a Failed arr row whose integration was deleted reports it could not retry', function () {
+    Http::preventStrayRequests();
+
+    $user = User::factory()->create();
+    $this->actingAs($user);
+    $row = radarrRowFor($user);
+    $row->forceFill(['status' => CachedContentFileStatus::Failed])->save();
+    $row->arrIntegration->delete();
+
+    Livewire::test(ListCachedContentFiles::class)
+        ->callTableAction('retry', $row->refresh())
+        ->assertNotified(__('Could not retry'));
+
+    expect($row->refresh()->status)->toBe(CachedContentFileStatus::Failed);
+
+    Http::assertNothingSent();
 });

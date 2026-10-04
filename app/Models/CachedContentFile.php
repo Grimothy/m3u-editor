@@ -4,6 +4,7 @@ namespace App\Models;
 
 use App\Enums\CachedContentFileStatus;
 use App\Enums\CachedContentManagedBy;
+use App\Enums\CachedContentSource;
 use Illuminate\Database\Eloquent\Builder;
 use Illuminate\Database\Eloquent\Factories\HasFactory;
 use Illuminate\Database\Eloquent\Model;
@@ -49,12 +50,20 @@ use Illuminate\Support\Str;
  * @property string|null $last_error_message
  * @property int $failure_count
  * @property CachedContentManagedBy|null $managed_by
+ * @property CachedContentSource $source
+ * @property int|null $arr_integration_id
+ * @property int|null $media_request_id
+ * @property int|null $arr_library_id
+ * @property array<int, int>|null $arr_seasons
+ * @property Carbon|null $fallback_dispatched_at
  * @property Carbon $created_at
  * @property Carbon $updated_at
  *
  * @method static Builder<static> ownedBy(int $userId)
  * @method static Builder<static> sharedWithPlaylist(Playlist|int $playlist)
  * @method static Builder<static> servableFor(Channel|Episode $item)
+ * @method static Builder<static> provider()
+ * @method static Builder<static> arr()
  */
 class CachedContentFile extends Model
 {
@@ -91,6 +100,21 @@ class CachedContentFile extends Model
         'last_error_message',
         'failure_count',
         'managed_by',
+        'source',
+        'arr_integration_id',
+        'media_request_id',
+        'arr_library_id',
+        'arr_seasons',
+        'fallback_dispatched_at',
+    ];
+
+    /**
+     * Arr rows carry their own source; without this default a freshly
+     * created provider row would have a null in-memory `source` until
+     * refreshed, breaking isArr() and the enum cast.
+     */
+    protected $attributes = [
+        'source' => 'provider',
     ];
 
     /**
@@ -111,6 +135,10 @@ class CachedContentFile extends Model
             'season_number' => 'integer',
             'episode_number' => 'integer',
             'managed_by' => CachedContentManagedBy::class,
+            'source' => CachedContentSource::class,
+            'arr_library_id' => 'integer',
+            'arr_seasons' => 'array',
+            'fallback_dispatched_at' => 'datetime',
         ];
     }
 
@@ -221,6 +249,22 @@ class CachedContentFile extends Model
     }
 
     /**
+     * The Radarr/Sonarr integration this arr row was requested through.
+     */
+    public function arrIntegration(): BelongsTo
+    {
+        return $this->belongsTo(ArrIntegration::class);
+    }
+
+    /**
+     * The media request created for the arr leg (null on provider rows).
+     */
+    public function mediaRequest(): BelongsTo
+    {
+        return $this->belongsTo(MediaRequest::class);
+    }
+
+    /**
      * Filter to cached files owned by the given user.
      *
      * @param  Builder<static>  $query
@@ -229,6 +273,38 @@ class CachedContentFile extends Model
     public function scopeOwnedBy(Builder $query, int $userId): Builder
     {
         return $query->where('user_id', $userId);
+    }
+
+    /**
+     * Filter to provider rows (files downloaded to our cache disk).
+     *
+     * @param  Builder<static>  $query
+     * @return Builder<static>
+     */
+    public function scopeProvider(Builder $query): Builder
+    {
+        return $query->where('source', CachedContentSource::Provider->value);
+    }
+
+    /**
+     * Filter to Radarr/Sonarr rows (no local file; progress is mirrored
+     * from the arr queue).
+     *
+     * @param  Builder<static>  $query
+     * @return Builder<static>
+     */
+    public function scopeArr(Builder $query): Builder
+    {
+        return $query->whereIn('source', [CachedContentSource::Radarr->value, CachedContentSource::Sonarr->value]);
+    }
+
+    /**
+     * Whether this row is an arr (Radarr/Sonarr) request rather than a
+     * local provider download.
+     */
+    public function isArr(): bool
+    {
+        return $this->source?->isArr() ?? false;
     }
 
     /**
@@ -276,6 +352,7 @@ class CachedContentFile extends Model
 
         return $query
             ->where('status', CachedContentFileStatus::Completed->value)
+            ->where('source', CachedContentSource::Provider->value)
             ->where(function (Builder $q) use ($item, $playlistId, $fingerprint): void {
                 $q->whereMorphedTo('cacheable', $item)
                     ->orWhere(function (Builder $shared) use ($playlistId, $fingerprint): void {
@@ -306,7 +383,7 @@ class CachedContentFile extends Model
      */
     public function hasFilePath(): bool
     {
-        return $this->status === CachedContentFileStatus::Completed && ! empty($this->file_path);
+        return ! $this->isArr() && $this->status === CachedContentFileStatus::Completed && ! empty($this->file_path);
     }
 
     /**
@@ -333,6 +410,10 @@ class CachedContentFile extends Model
      */
     public function deleteStoredFile(): void
     {
+        if ($this->isArr()) {
+            return;
+        }
+
         if (empty($this->file_path)) {
             return;
         }

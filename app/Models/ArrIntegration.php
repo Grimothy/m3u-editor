@@ -2,6 +2,8 @@
 
 namespace App\Models;
 
+use App\Jobs\RefreshMediaServerLibraryJob;
+use App\Jobs\SyncMediaServer;
 use Illuminate\Database\Eloquent\Factories\HasFactory;
 use Illuminate\Database\Eloquent\Model;
 use Illuminate\Database\Eloquent\Relations\BelongsTo;
@@ -44,6 +46,31 @@ class ArrIntegration extends Model
     public function user(): BelongsTo
     {
         return $this->belongsTo(User::class);
+    }
+
+    /**
+     * Optional link to the media server whose library contains this
+     * integration's root folder. When set, arr imports (and removals)
+     * trigger a refresh + rescan on that server.
+     */
+    public function mediaServerIntegration(): BelongsTo
+    {
+        return $this->belongsTo(MediaServerIntegration::class);
+    }
+
+    /**
+     * Ask the linked media server to rescan, then resync it here a few minutes later
+     * so new or removed arr titles get (un)matched without waiting for its schedule.
+     */
+    public function requestMediaServerRefresh(): void
+    {
+        $mediaServer = $this->mediaServerIntegration;
+        if (! $mediaServer || ! $mediaServer->enabled) {
+            return;
+        }
+
+        RefreshMediaServerLibraryJob::dispatch($mediaServer, false);
+        SyncMediaServer::dispatch($mediaServer->id)->delay(now()->addMinutes(5));
     }
 
     public function isSonarr(): bool

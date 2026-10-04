@@ -141,6 +141,10 @@ class DownloadCachedContentFile implements ShouldQueue
     public function handle(): void
     {
         $file = CachedContentFile::find($this->cachedContentFileId);
+        if ($file?->isArr()) {
+            return;
+        }
+
         if (! $file) {
             // Deleted (or cancelled while Pending) before we got to it.
             return;

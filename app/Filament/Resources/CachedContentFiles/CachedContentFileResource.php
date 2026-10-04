@@ -3,9 +3,13 @@
 namespace App\Filament\Resources\CachedContentFiles;
 
 use App\Enums\CachedContentFileStatus;
+use App\Enums\CachedContentSource;
 use App\Filament\Resources\CachedContentFiles\Pages\ListCachedContentFiles;
 use App\Livewire\ArrQueueMonitor;
+use App\Models\ArrIntegration;
 use App\Models\CachedContentFile;
+use App\Services\Arr\ArrService;
+use App\Services\Arr\Contracts\ArrIntegrationInterface;
 use App\Services\CachedContentDispatchService;
 use App\Settings\GeneralSettings;
 use App\Tables\Columns\ProgressColumn;
@@ -13,6 +17,7 @@ use Filament\Actions\Action;
 use Filament\Actions\ActionGroup;
 use Filament\Actions\BulkAction;
 use Filament\Actions\BulkActionGroup;
+use Filament\Forms\Components\Checkbox;
 use Filament\Infolists\Components\TextEntry;
 use Filament\Notifications\Notification;
 use Filament\Resources\Pages\PageRegistration;
@@ -29,7 +34,9 @@ use Illuminate\Support\Facades\Cache;
 /**
  * Cached Downloads: every cached_content_files row the current user owns
  * (admins see all), with live progress, ETA, and retry / cancel / delete
- * actions. Read-only apart from those actions; rows are created by the
+ * actions. Rows come either from direct provider downloads (local file) or
+ * from Radarr/Sonarr requests (no local file; progress mirrored from the arr
+ * queue). Read-only apart from those actions; rows are created by the
  * Cache Now actions. Only reachable while `enable_cache` is on.
  */
 class CachedContentFileResource extends Resource
@@ -102,7 +109,7 @@ class CachedContentFileResource extends Resource
     public static function table(Table $table): Table
     {
         return $table
-            ->modifyQueryUsing(fn (Builder $query) => $query->with(['playlist:id,name']))
+            ->modifyQueryUsing(fn (Builder $query) => $query->with(['playlist:id,name', 'arrIntegration:id,name']))
             ->persistSortInSession()
             ->filtersTriggerAction(function ($action) {
                 return $action->button()->label(__('Filters'));
@@ -130,20 +137,32 @@ class CachedContentFileResource extends Resource
                     ->formatStateUsing(fn (string $state): string => match ($state) {
                         'movie' => __('VOD'),
                         'episode' => __('Episode'),
+                        'series' => __('Series'),
                         default => ucfirst($state),
                     })
                     ->color(fn (string $state): string => match ($state) {
                         'movie' => 'info',
                         'episode' => 'primary',
+                        'series' => 'warning',
                         default => 'gray',
                     }),
+                TextColumn::make('source')
+                    ->label(__('Source'))
+                    ->badge()
+                    ->formatStateUsing(fn (CachedContentSource $state): string => $state->getLabel())
+                    ->color(fn (CachedContentSource $state): string => $state->getColor())
+                    ->icon(fn (CachedContentSource $state): string => $state->getIcon())
+                    ->tooltip(fn (CachedContentFile $record): ?string => $record->arrIntegration?->name),
                 TextColumn::make('status')
                     ->label(__('Status'))
                     ->badge()
                     ->formatStateUsing(fn (CachedContentFileStatus $state): string => $state->getLabel())
                     ->color(fn (CachedContentFileStatus $state): string => $state->getColor())
                     ->icon(fn (CachedContentFileStatus $state): string => $state->getIcon())
-                    ->tooltip(fn (CachedContentFile $record): ?string => $record->status === CachedContentFileStatus::Failed
+                    ->tooltip(fn (CachedContentFile $record): ?string => in_array($record->status, [
+                        CachedContentFileStatus::Failed,
+                        CachedContentFileStatus::Imported,
+                    ], true)
                         ? $record->last_error_message
                         : null),
                 ProgressColumn::make('progress')
@@ -176,6 +195,11 @@ class CachedContentFileResource extends Resource
                     ->label(__('Status'))
                     ->options(collect(CachedContentFileStatus::cases())
                         ->mapWithKeys(fn (CachedContentFileStatus $status): array => [$status->value => $status->getLabel()])
+                        ->all()),
+                SelectFilter::make('source')
+                    ->label(__('Source'))
+                    ->options(collect(CachedContentSource::cases())
+                        ->mapWithKeys(fn (CachedContentSource $source): array => [$source->value => $source->getLabel()])
                         ->all()),
                 SelectFilter::make('content_type')
                     ->label(__('Type'))
@@ -237,16 +261,17 @@ class CachedContentFileResource extends Resource
                         ->label(__('Cancel download'))
                         ->icon('heroicon-o-x-circle')
                         ->color('warning')
-                        ->visible(fn (CachedContentFile $record): bool => in_array($record->status, [
-                            CachedContentFileStatus::Pending,
-                            CachedContentFileStatus::Downloading,
-                        ], true))
+                        ->visible(fn (CachedContentFile $record): bool => self::isCancellable($record))
                         ->requiresConfirmation()
                         ->modalHeading(__('Cancel this download?'))
-                        ->modalDescription(__('Stops the transfer within a few seconds and removes the entry and any partial file.'))
+                        ->modalDescription(fn (CachedContentFile $record): string => $record->isArr()
+                            ? __('Stops the download in :arr, removes the title and any files from :arr, and removes the entry.', ['arr' => $record->source->getLabel()])
+                            : __('Stops the transfer within a few seconds and removes the entry and any partial file.'))
                         ->modalSubmitActionLabel(__('Cancel download'))
                         ->action(function (CachedContentFile $record): void {
-                            self::deleteCachedFile($record);
+                            if (! self::deleteWithArrRemoval($record, removeFromArr: true)) {
+                                return;
+                            }
 
                             Notification::make()
                                 ->success()
@@ -262,8 +287,16 @@ class CachedContentFileResource extends Resource
                         ->modalHeading(__('Delete this cached file?'))
                         ->modalDescription(__('Removes the cached file. Playback will use the provider again.'))
                         ->modalSubmitActionLabel(__('Delete'))
-                        ->action(function (CachedContentFile $record): void {
-                            self::deleteCachedFile($record);
+                        ->schema([
+                            Checkbox::make('remove_from_arr')
+                                ->label(fn (CachedContentFile $record): string => __('Also remove from :arr', ['arr' => $record->source->getLabel()]))
+                                ->default(true)
+                                ->visible(fn (CachedContentFile $record): bool => $record->isArr()),
+                        ])
+                        ->action(function (CachedContentFile $record, array $data): void {
+                            if (! self::deleteWithArrRemoval($record, (bool) ($data['remove_from_arr'] ?? false))) {
+                                return;
+                            }
 
                             Notification::make()
                                 ->success()
@@ -303,20 +336,42 @@ class CachedContentFileResource extends Resource
                         ->color('warning')
                         ->requiresConfirmation()
                         ->modalHeading(__('Cancel selected downloads?'))
-                        ->modalDescription(__('Stops every pending or downloading transfer in the selection and removes those entries. Other rows are skipped.'))
+                        ->modalDescription(__('Stops every in-flight download in the selection and removes those entries. Radarr/Sonarr downloads are stopped and their titles removed from Radarr/Sonarr. Other rows are skipped.'))
                         ->modalSubmitActionLabel(__('Cancel selected'))
                         ->deselectRecordsAfterCompletion()
                         ->action(function (Collection $records): void {
                             $cancelled = 0;
                             $skipped = 0;
+                            $failed = 0;
+                            /** @var array<int, ArrIntegration> $refreshIntegrations */
+                            $refreshIntegrations = [];
                             foreach (self::filterToOwnedRecords($records) as $record) {
-                                if (! in_array($record->status, [CachedContentFileStatus::Pending, CachedContentFileStatus::Downloading], true)) {
+                                if (! self::isCancellable($record)) {
                                     $skipped++;
 
                                     continue;
                                 }
+
+                                if ($record->isArr()) {
+                                    $removal = self::removeArrTitle($record);
+
+                                    if ($removal['outcome'] === 'failed') {
+                                        $failed++;
+
+                                        continue;
+                                    }
+
+                                    if ($removal['integration'] !== null) {
+                                        $refreshIntegrations[$removal['integration']->id] = $removal['integration'];
+                                    }
+                                }
+
                                 self::deleteCachedFile($record);
                                 $cancelled++;
+                            }
+
+                            foreach ($refreshIntegrations as $integration) {
+                                $integration->requestMediaServerRefresh();
                             }
 
                             Notification::make()
@@ -324,6 +379,13 @@ class CachedContentFileResource extends Resource
                                 ->title($cancelled === 1 ? __('Cancelled 1 download') : __('Cancelled :count downloads', ['count' => $cancelled]))
                                 ->body($skipped > 0 ? __(':skipped row(s) skipped (not in-flight).', ['skipped' => $skipped]) : null)
                                 ->send();
+
+                            if ($failed > 0) {
+                                Notification::make()
+                                    ->danger()
+                                    ->title(__('Could not remove :count arr download(s) from Radarr/Sonarr; those rows were kept.', ['count' => $failed]))
+                                    ->send();
+                            }
                         }),
 
                     BulkAction::make('bulkDelete')
@@ -335,22 +397,69 @@ class CachedContentFileResource extends Resource
                         ->modalDescription(__('Removes every selected entry and its file. Downloads still in progress are stopped.'))
                         ->modalSubmitActionLabel(__('Delete selected'))
                         ->deselectRecordsAfterCompletion()
-                        ->action(function (Collection $records): void {
+                        ->schema([
+                            Checkbox::make('remove_from_arr')
+                                ->label(__('Also remove arr downloads from Radarr/Sonarr'))
+                                ->default(true),
+                        ])
+                        ->action(function (Collection $records, array $data): void {
+                            $removeFromArr = (bool) ($data['remove_from_arr'] ?? false);
                             $count = 0;
+                            $failed = 0;
+                            $unreachable = 0;
+                            /** @var array<int, ArrIntegration> $refreshIntegrations */
+                            $refreshIntegrations = [];
                             foreach (self::filterToOwnedRecords($records) as $record) {
+                                if ($record->isArr() && $removeFromArr) {
+                                    $removal = self::removeArrTitle($record);
+                                    $outcome = $removal['outcome'];
+
+                                    if ($removal['integration'] !== null) {
+                                        $refreshIntegrations[$removal['integration']->id] = $removal['integration'];
+                                    }
+
+                                    if ($outcome === 'failed') {
+                                        $failed++;
+
+                                        continue;
+                                    }
+
+                                    if ($outcome === 'unreachable') {
+                                        $unreachable++;
+                                    }
+                                }
                                 self::deleteCachedFile($record);
                                 $count++;
+                            }
+
+                            // One rescan per integration, not per removed title.
+                            foreach ($refreshIntegrations as $integration) {
+                                $integration->requestMediaServerRefresh();
                             }
 
                             Notification::make()
                                 ->success()
                                 ->title($count === 1 ? __('Deleted 1 cached file') : __('Deleted :count cached files', ['count' => $count]))
                                 ->send();
+
+                            if ($failed > 0) {
+                                Notification::make()
+                                    ->danger()
+                                    ->title(__('Could not remove :count arr download(s) from Radarr/Sonarr; those rows were kept.', ['count' => $failed]))
+                                    ->send();
+                            }
+
+                            if ($unreachable > 0) {
+                                Notification::make()
+                                    ->warning()
+                                    ->title(__(':count arr download(s) were removed from Cached Downloads only: their Radarr/Sonarr integration is missing or disabled.', ['count' => $unreachable]))
+                                    ->send();
+                            }
                         }),
                 ]),
             ])
             ->emptyStateHeading(__('No cache activity yet'))
-            ->emptyStateDescription(__('Downloads appear here after you use "Cache Now" on a VOD or episode, or "Cache all episodes" on a series.'))
+            ->emptyStateDescription(__('Downloads appear here after you use "Cache Now" on a VOD or episode, "Cache all episodes" on a series, or when a dynamic group sends a title to Radarr or Sonarr.'))
             ->emptyStateIcon('heroicon-o-circle-stack');
     }
 
@@ -524,8 +633,10 @@ class CachedContentFileResource extends Resource
     }
 
     /**
-     * Queue a Failed row again. Returns false when the user can't act on it,
-     * it isn't Failed, or its source item is gone.
+     * Queue a Failed row again. Arr rows re-trigger the arr search command
+     * and flip back to Requested; provider rows re-dispatch the provider
+     * download. Returns false when the user can't act on it, it isn't
+     * Failed, or the source can't be reached.
      */
     public static function retryCachedFile(CachedContentFile $record): bool
     {
@@ -533,7 +644,119 @@ class CachedContentFileResource extends Resource
             return false;
         }
 
+        if ($record->isArr()) {
+            $service = self::arrServiceFor($record);
+            if (! $service) {
+                return false;
+            }
+
+            $result = $service->triggerAutomaticSearch((int) $record->arr_library_id);
+
+            if (! ($result['ok'] ?? false)) {
+                return false;
+            }
+
+            $record->forceFill([
+                'status' => CachedContentFileStatus::Requested,
+                'last_error_message' => null,
+                'fallback_dispatched_at' => null,
+            ])->save();
+
+            return true;
+        }
+
         return app(CachedContentDispatchService::class)->requeue($record);
+    }
+
+    /**
+     * A fully loaded arr service for an arr row, or null when the row can't
+     * reach arr (integration deleted or disabled, or no library id). The
+     * table only eager-loads id,name, so this loads the integration fresh.
+     */
+    private static function arrServiceFor(CachedContentFile $record): ?ArrIntegrationInterface
+    {
+        if (! $record->isArr() || (int) $record->arr_library_id <= 0) {
+            return null;
+        }
+
+        $integration = ArrIntegration::query()->whereKey($record->arr_integration_id)->enabled()->first();
+
+        return $integration ? ArrService::make($integration) : null;
+    }
+
+    /**
+     * Whether a row has a download that can still be stopped: provider rows
+     * while transferring, arr rows from the request until arr imports it.
+     */
+    private static function isCancellable(CachedContentFile $record): bool
+    {
+        $inFlight = $record->isArr()
+            ? [CachedContentFileStatus::Requested, CachedContentFileStatus::Pending, CachedContentFileStatus::Downloading]
+            : [CachedContentFileStatus::Pending, CachedContentFileStatus::Downloading];
+
+        return in_array($record->status, $inFlight, true);
+    }
+
+    /**
+     * Delete a row, first removing an arr row's title (stopping its
+     * downloads) from Radarr/Sonarr when asked. Sends the failure/warning
+     * notifications itself; returns false when nothing was deleted.
+     */
+    private static function deleteWithArrRemoval(CachedContentFile $record, bool $removeFromArr): bool
+    {
+        if (! self::canActOnRecord($record)) {
+            return false;
+        }
+
+        $removal = null;
+
+        if ($record->isArr() && $removeFromArr) {
+            $removal = self::removeArrTitle($record);
+
+            if ($removal['outcome'] === 'failed') {
+                Notification::make()
+                    ->danger()
+                    ->title(__('Could not remove from :arr', ['arr' => $record->source->getLabel()]))
+                    ->body($removal['error'])
+                    ->send();
+
+                return false;
+            }
+
+            if ($removal['outcome'] === 'unreachable') {
+                Notification::make()
+                    ->warning()
+                    ->title(__('Removed from Cached Downloads only: the :arr integration is missing or disabled.', ['arr' => $record->source->getLabel()]))
+                    ->send();
+            }
+        }
+
+        self::deleteCachedFile($record);
+        ($removal['integration'] ?? null)?->requestMediaServerRefresh();
+
+        return true;
+    }
+
+    /**
+     * Delete an arr row's title (and its files) from Radarr/Sonarr.
+     * `unreachable` means there is nothing to call, so the caller only
+     * removes the local row. `integration` is set on `removed` so the
+     * caller can ask its media server to rescan once it is done.
+     *
+     * @return array{outcome: 'removed'|'failed'|'unreachable', error: ?string, integration: ?ArrIntegration}
+     */
+    private static function removeArrTitle(CachedContentFile $record): array
+    {
+        $service = self::arrServiceFor($record);
+        if (! $service) {
+            return ['outcome' => 'unreachable', 'error' => null, 'integration' => null];
+        }
+
+        $result = $service->remove((int) $record->arr_library_id);
+
+        return ($result['ok'] ?? false)
+            ? ['outcome' => 'removed', 'error' => null, 'integration' => $service->getIntegration()]
+            : ['outcome' => 'failed', 'error' => $result['error'] ?? null, 'integration' => null];
     }
 
     private static function canActOnRecord(CachedContentFile $record): bool
