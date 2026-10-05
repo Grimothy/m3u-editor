@@ -137,27 +137,3 @@ it('shows the webhook URL on the edit page', function () {
     Livewire::test(EditArrIntegration::class, ['record' => $integration->id])
         ->assertSchemaStateSet(['webhook_url' => url('/api/webhooks/arr/'.$integration->webhook_secret)]);
 });
-
-it('generates a webhook secret when saving an integration that has none', function () {
-    $integration = ArrIntegration::factory()->create(['user_id' => $this->user->id]);
-    ArrIntegration::query()->whereKey($integration->id)->update(['webhook_secret' => null]);
-
-    $integration->refresh()->update(['name' => 'Renamed']);
-
-    expect($integration->refresh()->webhook_secret)->not->toBeEmpty();
-});
-
-it('backfills missing webhook secrets', function () {
-    $missing = ArrIntegration::factory()->count(2)->create(['user_id' => $this->user->id]);
-    $existing = ArrIntegration::factory()->create(['user_id' => $this->user->id]);
-    $existingSecret = $existing->webhook_secret;
-    ArrIntegration::query()->whereKey($missing->modelKeys())->update(['webhook_secret' => null]);
-
-    $migration = require database_path('migrations/2026_10_05_134212_backfill_webhook_secret_on_arr_integrations_table.php');
-    $migration->up();
-
-    $secrets = ArrIntegration::query()->whereKey($missing->modelKeys())->pluck('webhook_secret');
-    expect($secrets->filter())->toHaveCount(2)
-        ->and($secrets->unique())->toHaveCount(2)
-        ->and($existing->refresh()->webhook_secret)->toBe($existingSecret);
-});

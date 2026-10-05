@@ -34,7 +34,7 @@ class ArrIntegration extends Model
 
     protected static function booted(): void
     {
-        static::saving(function (self $model) {
+        static::creating(function (self $model) {
             if (empty($model->webhook_secret)) {
                 $model->webhook_secret = (string) Str::uuid();
             }
