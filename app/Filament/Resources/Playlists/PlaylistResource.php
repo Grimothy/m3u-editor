@@ -3730,7 +3730,18 @@ class PlaylistResource extends Resource implements CopilotResource
                         ->live()
                         ->default(false)
                         ->inline(false)
-                        ->columnSpan(4),
+                        ->columnSpan(3),
+                    Toggle::make('cache_never_expire')
+                        ->label(__('Never expire'))
+                        ->hintIcon(
+                            'heroicon-m-question-mark-circle',
+                            tooltip: __('Keep everything this rule caches, even after it leaves the group. Kept files show as Manual on Cached Downloads.'),
+                        )
+                        ->live()
+                        ->default(false)
+                        ->inline(false)
+                        ->visible(fn (Get $get): bool => (bool) $get('cache_enabled'))
+                        ->columnSpan(3),
                     TextInput::make('cache_keep_days')
                         ->label(__('Keep after leaving (days)'))
                         ->hintIcon(
@@ -3740,8 +3751,10 @@ class PlaylistResource extends Resource implements CopilotResource
                         ->numeric()
                         ->minValue(0)
                         ->default(0)
+                        ->disabled(fn (Get $get): bool => (bool) $get('cache_never_expire'))
+                        ->dehydrated()
                         ->visible(fn (Get $get): bool => (bool) $get('cache_enabled'))
-                        ->columnSpan(4),
+                        ->columnSpan(3),
                     TextInput::make('cache_max_items')
                         ->label(__('Top N members'))
                         ->numeric()
@@ -3749,7 +3762,7 @@ class PlaylistResource extends Resource implements CopilotResource
                         ->default(20)
                         ->placeholder(__('No limit'))
                         ->visible(fn (Get $get): bool => (bool) $get('cache_enabled'))
-                        ->columnSpan(4),
+                        ->columnSpan(3),
                 ]),
         ];
     }

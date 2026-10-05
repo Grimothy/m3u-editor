@@ -219,7 +219,7 @@ class DynamicGroup extends Model
      * `dynamic_groups_config`, or null when the rule is gone (removed, or
      * renamed and not re-synced yet).
      *
-     * @return array{enabled: bool, keep_days: int, max_items: int|null}|null
+     * @return array{enabled: bool, never_expire: bool, keep_days: int, max_items: int|null}|null
      */
     public function cacheSettings(): ?array
     {
@@ -234,6 +234,7 @@ class DynamicGroup extends Model
 
         return [
             'enabled' => (bool) ($rule['enabled'] ?? false) && (bool) ($rule['cache_enabled'] ?? false),
+            'never_expire' => (bool) ($rule['cache_never_expire'] ?? false),
             'keep_days' => max(0, (int) ($rule['cache_keep_days'] ?? 0)),
             'max_items' => $maxItems > 0 ? $maxItems : null,
         ];

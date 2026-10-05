@@ -296,6 +296,26 @@ it('makes a group-managed row manual on manual dispatch', function () {
         ->and($file->fresh()->managed_by)->toBeNull();
 });
 
+it('keeps files a Never expire rule caches, including ones it cached earlier', function () {
+    [$playlist, $group] = dgacPlaylistWithGroup('vod', ['cache_enabled' => true, 'cache_never_expire' => true]);
+    $new = dgacChannel($playlist, 1);
+    $earlier = dgacChannel($playlist, 2);
+    dgacAttachMember($group, $new, 0);
+    dgacAttachMember($group, $earlier, 1);
+    $earlierFile = dgacManagedFile($earlier, $group);
+
+    dgacDispatch($group);
+
+    expect(CachedContentFile::where('cacheable_id', $new->id)->sole()->managed_by)->toBeNull()
+        ->and($earlierFile->fresh()->managed_by)->toBeNull();
+
+    // Both leave the group; cleanup keeps them.
+    DB::table('dynamic_group_items')->where('dynamic_group_id', $group->id)->delete();
+
+    expect(dgacRelease())->toBe(0)
+        ->and(CachedContentFile::count())->toBe(2);
+});
+
 // --- local media wins ---
 
 it('skips a member that is on the media server', function () {

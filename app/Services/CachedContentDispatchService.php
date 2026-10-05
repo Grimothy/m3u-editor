@@ -86,8 +86,8 @@ class CachedContentDispatchService
         $existing = $item->cachedContentFile()->first();
 
         if ($existing) {
-            if (! $automatic && $existing->managed_by !== null) {
-                $existing->forceFill(['managed_by' => null])->save();
+            if (! $automatic) {
+                $existing->keep();
             }
 
             if (in_array($existing->status, [CachedContentFileStatus::Pending, CachedContentFileStatus::Downloading], true)) {
@@ -236,7 +236,7 @@ class CachedContentDispatchService
             $member->setRelation('playlist', $playlist);
 
             if ($member instanceof Channel) {
-                $this->dispatchGroupItem($member, $group, $counts);
+                $this->dispatchGroupItem($member, $group, $settings['never_expire'], $counts);
 
                 continue;
             }
@@ -245,7 +245,7 @@ class CachedContentDispatchService
                 $episode->setRelation('series', $member);
                 $episode->setRelation('playlist', $playlist);
 
-                $this->dispatchGroupItem($episode, $group, $counts);
+                $this->dispatchGroupItem($episode, $group, $settings['never_expire'], $counts);
             }
         }
 
@@ -255,11 +255,12 @@ class CachedContentDispatchService
     /**
      * Dispatch one auto-cache item and link the group to the file it
      * manages (clearing `dropped_at` when the item is back in the group).
-     * Manual files and copies shared from another playlist are never linked.
+     * A Never expire rule keeps the file instead, like Cache Now. Manual
+     * files and copies shared from another playlist are never linked.
      *
      * @param  array<string, int>  $counts
      */
-    private function dispatchGroupItem(Channel|Episode $item, DynamicGroup $group, array &$counts): void
+    private function dispatchGroupItem(Channel|Episode $item, DynamicGroup $group, bool $neverExpire, array &$counts): void
     {
         if (app(MediaSourcePreferenceService::class)->hasEligibleMatch($item)) {
             $item->cachedContentFile()->first()?->dynamicGroups()
@@ -272,9 +273,17 @@ class CachedContentDispatchService
         $counts[$this->dispatch($item, automatic: true)->value]++;
 
         $file = $item->cachedContentFile()->first();
-        if ($file?->managed_by === CachedContentManagedBy::DynamicGroup) {
-            $file->dynamicGroups()->syncWithoutDetaching([$group->id => ['dropped_at' => null]]);
+        if ($file?->managed_by !== CachedContentManagedBy::DynamicGroup) {
+            return;
         }
+
+        if ($neverExpire) {
+            $file->keep();
+
+            return;
+        }
+
+        $file->dynamicGroups()->syncWithoutDetaching([$group->id => ['dropped_at' => null]]);
     }
 
     /**

@@ -199,6 +199,19 @@ class CachedContentFile extends Model
     }
 
     /**
+     * Make an auto-cached file manual so retention never deletes it.
+     * Returns whether anything changed.
+     */
+    public function keep(): bool
+    {
+        if ($this->managed_by === null) {
+            return false;
+        }
+
+        return $this->forceFill(['managed_by' => null])->save();
+    }
+
+    /**
      * Dynamic groups whose auto-cache manages this file.
      */
     public function dynamicGroups(): BelongsToMany
