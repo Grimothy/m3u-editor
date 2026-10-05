@@ -219,7 +219,11 @@ class DynamicGroup extends Model
      * `dynamic_groups_config`, or null when the rule is gone (removed, or
      * renamed and not re-synced yet).
      *
-     * @return array{enabled: bool, never_expire: bool, keep_days: int, max_items: int|null}|null
+     * `arr_cleanup` removes movies this rule sent to Radarr once they've
+     * been out of every group for `keep_days` (see ArrCacheCleanupService).
+     * Never expire keeps everything, so it turns cleanup off.
+     *
+     * @return array{enabled: bool, never_expire: bool, keep_days: int, max_items: int|null, arr_cleanup: bool}|null
      */
     public function cacheSettings(): ?array
     {
@@ -237,6 +241,7 @@ class DynamicGroup extends Model
             'never_expire' => (bool) ($rule['cache_never_expire'] ?? false),
             'keep_days' => max(0, (int) ($rule['cache_keep_days'] ?? 0)),
             'max_items' => $maxItems > 0 ? $maxItems : null,
+            'arr_cleanup' => (bool) ($rule['cache_arr_cleanup'] ?? false) && ! (bool) ($rule['cache_never_expire'] ?? false),
         ];
     }
 

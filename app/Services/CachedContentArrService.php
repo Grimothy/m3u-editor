@@ -9,6 +9,7 @@ use App\Models\Episode;
 use App\Models\Playlist;
 use App\Models\Series;
 use App\Services\Arr\ArrService;
+use App\Services\Arr\RadarrService;
 use App\Services\Arr\SonarrService;
 use Illuminate\Support\Facades\Log;
 use Throwable;
@@ -36,6 +37,9 @@ class CachedContentArrService
     /** @var array<int, true> integration ids that failed during this run */
     private array $unreachable = [];
 
+    /** @var array<int, int|null> cleanup tag id per Radarr integration id */
+    private array $cleanupTagIds = [];
+
     /** @var array<int, Playlist> playlists reloaded with the columns routing reads */
     private array $routablePlaylists = [];
 
@@ -50,12 +54,13 @@ class CachedContentArrService
     /**
      * Send one movie (Radarr) or episode (Sonarr). An automatic episode adds
      * its series with only that season monitored; a manual one asks Sonarr
-     * for that episode alone.
+     * for that episode alone. `$cleanup` tags a movie Radarr didn't have
+     * so ArrCacheCleanupService can remove it after it leaves its groups.
      */
-    public function request(Channel|Episode $item, bool $automatic): ?CacheDispatchResult
+    public function request(Channel|Episode $item, bool $automatic, bool $cleanup = false): ?CacheDispatchResult
     {
         return $item instanceof Channel
-            ? $this->requestMovie($item, $automatic)
+            ? $this->requestMovie($item, $automatic, $automatic && $cleanup)
             : $this->requestEpisode($item, $automatic);
     }
 
@@ -71,7 +76,7 @@ class CachedContentArrService
         return $this->seriesState($series, $series->playlist, $seasons)['added'] ?? false;
     }
 
-    private function requestMovie(Channel $channel, bool $automatic): ?CacheDispatchResult
+    private function requestMovie(Channel $channel, bool $automatic, bool $cleanup): ?CacheDispatchResult
     {
         $radarr = $this->integration($channel->playlist, 'radarr');
         $tmdbId = (int) $channel->getTmdbId();
@@ -88,11 +93,14 @@ class CachedContentArrService
             return $movie['hasFile'] || $automatic ? CacheDispatchResult::InArrLibrary : null;
         }
 
+        $cleanupTagId = $cleanup ? $this->cleanupTagId($radarr) : null;
+
         return $this->add($radarr, $tmdbId, [
             'tmdbId' => $tmdbId,
             'title' => $movie['title'],
             'titleSlug' => $movie['titleSlug'],
             'images' => $movie['images'],
+            'tags' => $cleanupTagId !== null ? [$cleanupTagId] : [],
         ]) ? CacheDispatchResult::SentToArr : null;
     }
 
@@ -218,6 +226,32 @@ class CachedContentArrService
         return $this->routablePlaylists[$playlist->getKey()] ??= Playlist::query()
             ->select(['id', 'user_id', 'prefer_media_server_sources'])
             ->findOrFail($playlist->getKey());
+    }
+
+    /**
+     * The integration's cleanup tag, created on first use. Null when Radarr
+     * won't create it; the movie is then added untagged, so it's never
+     * cleaned up.
+     */
+    private function cleanupTagId(ArrIntegration $radarr): ?int
+    {
+        if (array_key_exists($radarr->id, $this->cleanupTagIds)) {
+            return $this->cleanupTagIds[$radarr->id];
+        }
+
+        try {
+            /** @var RadarrService $service */
+            $service = ArrService::make($radarr);
+            $tagId = $service->cacheCleanupTagId(create: true);
+        } catch (Throwable $e) {
+            Log::warning('Cache cleanup tag unavailable, adding the movie untagged', [
+                'integration_id' => $radarr->id,
+                'error' => $e->getMessage(),
+            ]);
+            $tagId = null;
+        }
+
+        return $this->cleanupTagIds[$radarr->id] = $tagId;
     }
 
     /**

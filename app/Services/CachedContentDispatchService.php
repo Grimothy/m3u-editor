@@ -77,9 +77,10 @@ class CachedContentDispatchService
      * makes it manual, so group retention never deletes it.
      *
      * `$viaArr` false keeps the provider even when a caching Radarr/Sonarr
-     * is set up.
+     * is set up. `$arrCleanup` tags a movie added to Radarr so cleanup can
+     * remove it after it leaves its dynamic group.
      */
-    public function dispatch(Channel|Episode $item, bool $automatic = false, bool $viaArr = true): CacheDispatchResult
+    public function dispatch(Channel|Episode $item, bool $automatic = false, bool $viaArr = true, bool $arrCleanup = false): CacheDispatchResult
     {
         if (! $this->isEnabled()) {
             return CacheDispatchResult::Disabled;
@@ -117,7 +118,7 @@ class CachedContentDispatchService
             return CacheDispatchResult::AlreadyCached;
         }
 
-        $sent = $viaArr ? $this->arr->request($item, $automatic) : null;
+        $sent = $viaArr ? $this->arr->request($item, $automatic, $arrCleanup) : null;
         if ($sent !== null) {
             return $sent;
         }
@@ -260,7 +261,7 @@ class CachedContentDispatchService
             $member->setRelation('playlist', $playlist);
 
             if ($member instanceof Channel) {
-                $this->dispatchGroupItem($member, $group, $settings['never_expire'], $counts);
+                $this->dispatchGroupItem($member, $group, $settings['never_expire'], $counts, $settings['arr_cleanup']);
 
                 continue;
             }
@@ -284,7 +285,7 @@ class CachedContentDispatchService
      *
      * @param  array<string, int>  $counts
      */
-    private function dispatchGroupItem(Channel|Episode $item, DynamicGroup $group, bool $neverExpire, array &$counts): void
+    private function dispatchGroupItem(Channel|Episode $item, DynamicGroup $group, bool $neverExpire, array &$counts, bool $arrCleanup = false): void
     {
         if (app(MediaSourcePreferenceService::class)->hasEligibleMatch($item)) {
             $item->cachedContentFile()->first()?->dynamicGroups()
@@ -294,7 +295,7 @@ class CachedContentDispatchService
             return;
         }
 
-        $counts[$this->dispatch($item, automatic: true)->value]++;
+        $counts[$this->dispatch($item, automatic: true, arrCleanup: $arrCleanup)->value]++;
 
         $file = $item->cachedContentFile()->first();
         if ($file?->managed_by !== CachedContentManagedBy::DynamicGroup) {

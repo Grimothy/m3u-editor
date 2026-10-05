@@ -6,6 +6,7 @@ use App\Models\User;
 use App\Services\TmdbService;
 use Illuminate\Foundation\Testing\RefreshDatabase;
 use Illuminate\Support\Facades\Bus;
+use Livewire\Livewire;
 
 uses(RefreshDatabase::class);
 
@@ -57,6 +58,27 @@ it('persists the per-rule cache keys in dynamic_groups_config on round-trip', fu
     $this->playlist->update(['dynamic_groups_config' => [$rule]]);
 
     expect($this->playlist->fresh()->dynamic_groups_config)->toEqual([$rule]);
+});
+
+it('saves the Remove from Radarr after leaving toggle through the playlist form', function () {
+    $rule = [
+        'enabled' => true,
+        'type' => 'vod',
+        'source' => 'now_playing',
+        'name' => 'In Theatres',
+        'tmdb_params' => [],
+        'cache_enabled' => true,
+        'cache_keep_days' => 7,
+        'cache_arr_cleanup' => true,
+    ];
+
+    Livewire::test(EditPlaylist::class, ['record' => $this->playlist->id])
+        ->fillForm(['user_agent' => 'test-agent'])
+        ->fillForm(['dynamic_groups_config' => [$rule]])
+        ->call('save')
+        ->assertHasNoFormErrors();
+
+    expect($this->playlist->fresh()->dynamic_groups_config[0]['cache_arr_cleanup'])->toBeTrue();
 });
 
 it('preserves all other tmdb_params keys alongside pages', function () {

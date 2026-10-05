@@ -3836,6 +3836,17 @@ class PlaylistResource extends Resource implements CopilotResource
                         ->placeholder(__('No limit'))
                         ->visible(fn (Get $get): bool => (bool) $get('cache_enabled'))
                         ->columnSpan(3),
+                    Toggle::make('cache_arr_cleanup')
+                        ->label(__('Remove from Radarr after leaving'))
+                        ->hintIcon(
+                            'heroicon-m-question-mark-circle',
+                            tooltip: __('Movies this rule sends to Radarr are removed from Radarr, files included, once they have been out of every dynamic group for the keep days (at least 1). Only movies added while this is on are removed, never ones already in Radarr. Remove the m3u-editor-cache tag from a movie in Radarr to keep it.'),
+                        )
+                        ->default(false)
+                        ->inline(false)
+                        ->disabled(fn (Get $get): bool => (bool) $get('cache_never_expire'))
+                        ->visible(fn (Get $get): bool => (bool) $get('cache_enabled') && $get('type') !== 'series')
+                        ->columnSpan(3),
                 ]),
         ];
     }
