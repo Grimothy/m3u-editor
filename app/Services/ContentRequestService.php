@@ -404,7 +404,7 @@ class ContentRequestService
      *
      * @param  'movie'|'series'  $type
      * @param  array<int, int>|null  $selectedSeasons  null = all seasons
-     * @return array{ok: bool, code?: string, error?: string, media_request?: MediaRequest, library_id?: int, has_file?: bool}
+     * @return array{ok: bool, code?: string, error?: string, media_request?: ?MediaRequest, library_id?: int, has_file?: bool}
      */
     public function requestForCache(ArrIntegration $integration, string $type, int $externalId, ?array $selectedSeasons = null): array
     {
@@ -425,10 +425,37 @@ class ContentRequestService
             ];
         }
 
-        $mediaRequest = MediaRequest::create([
+        // The arr add succeeded, so the title must not be lost to a failed
+        // local write: log it and report success with no request record.
+        // The sync job's library check still finishes the row, and a later
+        // dispatch rebuilds the record (recoverArrClaim).
+        try {
+            $mediaRequest = $this->recordCacheRequest($integration, $type, $externalId, $lookup['title'], $payload);
+        } catch (Throwable $e) {
+            Log::warning('Cache request record creation failed after arr add', [
+                'integration_id' => $integration->id,
+                'external_id' => $externalId,
+                'message' => $e->getMessage(),
+            ]);
+            $mediaRequest = null;
+        }
+
+        return ['ok' => true, 'media_request' => $mediaRequest, 'library_id' => (int) ($result['data']['id'] ?? 0)];
+    }
+
+    /**
+     * Record the auto-approved MediaRequest behind a cache request
+     * (extracted from requestForCache so recovery can rebuild the record
+     * without re-adding the title to the arr).
+     *
+     * @param  'movie'|'series'  $type
+     */
+    public function recordCacheRequest(ArrIntegration $integration, string $type, int $externalId, string $title, array $payload): MediaRequest
+    {
+        return MediaRequest::create([
             'playlist_auth_id' => null,
             'arr_integration_id' => $integration->id,
-            'title' => $lookup['title'],
+            'title' => $title,
             'external_id' => (string) $externalId,
             'request_type' => $type,
             'payload' => $payload,
@@ -436,8 +463,6 @@ class ContentRequestService
             'requested_at' => now(),
             'reviewed_at' => now(),
         ]);
-
-        return ['ok' => true, 'media_request' => $mediaRequest, 'library_id' => (int) ($result['data']['id'] ?? 0)];
     }
 
     /** @return array{requests: array<int, array<string, mixed>>, total: int} */

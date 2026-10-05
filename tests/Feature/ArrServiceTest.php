@@ -282,7 +282,7 @@ it('add posts correct payload for Radarr', function () {
 it('checkExists returns true when found', function () {
     Http::fake([
         '*/api/v3/series/lookup*' => Http::response([
-            ['id' => 42, 'tvdbId' => 12345, 'title' => 'Breaking Bad'],
+            ['id' => 42, 'tvdbId' => 12345, 'title' => 'Breaking Bad', 'added' => '2026-03-11T02:43:13Z'],
         ], 200),
     ]);
 
@@ -294,6 +294,7 @@ it('checkExists returns true when found', function () {
 
     expect($result['exists'])->toBeTrue();
     expect($result['id'])->toBe(42);
+    expect($result['added'])->toBe('2026-03-11T02:43:13Z');
 });
 
 it('checkExists returns false when not found', function () {
@@ -308,6 +309,20 @@ it('checkExists returns false when not found', function () {
     $result = ArrService::make($integration)->checkExists(99999);
 
     expect($result['exists'])->toBeFalse();
+});
+
+it('checkExists treats a sonarr lookup item without a positive id as not in the library', function () {
+    Http::fake([
+        '*/api/v3/series/lookup*' => Http::response([
+            ['id' => 0, 'tvdbId' => 81189, 'title' => 'Game of Thrones', 'added' => '0001-01-01T00:00:00Z'],
+        ], 200),
+    ]);
+
+    $integration = ArrIntegration::factory()->sonarr()->create([
+        'user_id' => $this->user->id,
+    ]);
+
+    expect(ArrService::make($integration)->checkExists(81189))->toBe(['exists' => false]);
 });
 
 it('RadarrService checkExists uses /movie endpoint', function () {

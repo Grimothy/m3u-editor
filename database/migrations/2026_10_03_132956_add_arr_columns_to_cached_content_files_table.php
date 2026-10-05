@@ -2,6 +2,7 @@
 
 use Illuminate\Database\Migrations\Migration;
 use Illuminate\Database\Schema\Blueprint;
+use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Facades\Schema;
 
 return new class extends Migration
@@ -40,9 +41,19 @@ return new class extends Migration
 
     /**
      * Reverse the migrations.
+     *
+     * Deletes every Radarr/Sonarr tracking row first: the restored schema
+     * allows only one row per item and has no `source` column, so arr rows
+     * sharing an item with a provider row would break the old unique key.
+     * Arr rows have no local file (their files live in the arr), so no
+     * files are deleted here and nothing is removed from Radarr/Sonarr;
+     * their dynamic-group pivot rows go with them (cascadeOnDelete).
+     * Provider rows and their files are untouched.
      */
     public function down(): void
     {
+        DB::table('cached_content_files')->where('source', '!=', 'provider')->delete();
+
         Schema::table('cached_content_files', function (Blueprint $table) {
             $table->dropIndex('cached_content_files_arr_lookup_index');
             $table->dropUnique('cached_content_files_cacheable_source_unique');

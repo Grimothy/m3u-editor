@@ -10,7 +10,10 @@ use Filament\Notifications\Notification;
 use Illuminate\Database\UniqueConstraintViolationException;
 use Illuminate\Foundation\Testing\RefreshDatabase;
 use Illuminate\Support\Facades\Bus;
+use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Facades\Http;
+use Illuminate\Support\Facades\Schema;
+use Illuminate\Support\Str;
 
 uses(RefreshDatabase::class);
 
@@ -49,6 +52,44 @@ it('rejects a second arr row for the same channel and source', function () {
     CachedContentFile::factory()->arrMovie($integration, $channel)->create();
     CachedContentFile::factory()->arrMovie($integration, $channel)->create();
 })->throws(UniqueConstraintViolationException::class);
+
+it('rolls back cleanly: drops arr rows, keeps provider rows, and restores the old unique key', function () {
+    $provider = CachedContentFile::factory()->create();
+    $channel = $provider->cacheable;
+    $integration = ArrIntegration::factory()->radarr()->create();
+    CachedContentFile::factory()->arrMovie($integration, $channel)->create();
+
+    $migration = require database_path('migrations/2026_10_03_132956_add_arr_columns_to_cached_content_files_table.php');
+    $migration->down();
+
+    expect(CachedContentFile::find($provider->id))->not->toBeNull()
+        ->and(CachedContentFile::query()->count())->toBe(1)
+        ->and(Schema::hasColumn('cached_content_files', 'source'))->toBeFalse();
+
+    // The restored old unique key: a second row for the same cacheable
+    // fails. Raw insert with only the old columns — the model now expects
+    // `source`, which the rolled-back schema no longer has.
+    $threw = false;
+
+    try {
+        DB::table('cached_content_files')->insert([
+            'uuid' => (string) Str::uuid(),
+            'cacheable_type' => $channel->getMorphClass(),
+            'cacheable_id' => $channel->getKey(),
+            'content_type' => 'movie',
+            'content_fingerprint' => 'rollback-duplicate-fingerprint',
+        ]);
+    } catch (UniqueConstraintViolationException) {
+        $threw = true;
+    }
+
+    expect($threw)->toBeTrue();
+
+    // Put the current schema back for anything else running in this file.
+    $migration->up();
+
+    expect(Schema::hasColumn('cached_content_files', 'source'))->toBeTrue();
+});
 
 it('scopes provider and arr rows separately', function () {
     $provider = CachedContentFile::factory()->create();

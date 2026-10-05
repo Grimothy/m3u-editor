@@ -184,7 +184,7 @@ class RadarrService extends BaseArrService
     }
 
     /**
-     * @return array{exists: bool, id?: int, has_file?: bool}
+     * @return array{exists: bool, id?: int, has_file?: bool, added?: ?string}
      */
     public function checkExists(int $externalId): array
     {
@@ -201,7 +201,7 @@ class RadarrService extends BaseArrService
             return ['exists' => false];
         }
 
-        return ['exists' => true, 'id' => (int) $first['id'], 'has_file' => (bool) ($first['hasFile'] ?? false)];
+        return ['exists' => true, 'id' => (int) $first['id'], 'has_file' => (bool) ($first['hasFile'] ?? false), 'added' => $first['added'] ?? null];
     }
 
     /**

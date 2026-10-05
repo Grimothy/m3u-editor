@@ -791,3 +791,87 @@ it('leaves a requested row waiting when radarr considers the movie available', f
     expect($row->refresh()->status)->toBe(CachedContentFileStatus::Requested)
         ->and(CachedContentFile::query()->provider()->count())->toBe(0);
 });
+
+// ── 14. Requested rows reconcile against the arr library ──────────────────
+
+it('marks a requested radarr row imported when arr imported it before the first poll', function () {
+    $channel = sadChannel($this->playlist);
+    $request = sadMediaRequest($this->radarr, '550', 'movie');
+    $row = sadArrRow($channel, $this->radarr, [
+        'media_request_id' => $request->id,
+    ]);
+
+    Http::fake([
+        '*/api/v3/queue*' => Http::response(['records' => []], 200),
+        '*/api/v3/movie*' => Http::response([['id' => 77, 'tmdbId' => 550, 'hasFile' => true, 'isAvailable' => true]], 200),
+    ]);
+
+    sadRunSync($this->radarr);
+
+    expect($row->refresh()->status)->toBe(CachedContentFileStatus::Imported)
+        ->and($request->refresh()->status)->toBe('completed');
+});
+
+it('marks a requested sonarr row imported when its tracked seasons have files before the first poll', function () {
+    $series = sadSeriesWithEpisodes($this->playlist);
+    $request = sadMediaRequest($this->sonarr, '81189', 'series');
+    $row = sadArrRow($series, $this->sonarr, [
+        'media_request_id' => $request->id,
+        'arr_seasons' => [1],
+    ]);
+
+    Http::fake([
+        '*/api/v3/queue*' => Http::response(['records' => []], 200),
+        '*/api/v3/episode*' => Http::response([
+            ['seasonNumber' => 1, 'episodeNumber' => 1, 'hasFile' => true],
+        ], 200),
+    ]);
+
+    sadRunSync($this->sonarr);
+
+    expect($row->refresh()->status)->toBe(CachedContentFileStatus::Imported)
+        ->and($request->refresh()->status)->toBe('completed');
+});
+
+it('leaves a requested radarr row without a library id alone even when radarr has the file', function () {
+    $channel = sadChannel($this->playlist);
+    $row = sadArrRow($channel, $this->radarr, [
+        'arr_library_id' => null,
+    ]);
+
+    Http::fake([
+        '*/api/v3/queue*' => Http::response(['records' => []], 200),
+        '*/api/v3/movie*' => Http::response([['id' => 77, 'tmdbId' => 550, 'hasFile' => true, 'isAvailable' => true]], 200),
+    ]);
+
+    sadRunSync($this->radarr);
+
+    expect($row->refresh()->status)->toBe(CachedContentFileStatus::Requested)
+        ->and(CachedContentFile::query()->provider()->count())->toBe(0);
+});
+
+it('throttles the sonarr requested-row library check to once every five minutes', function () {
+    $series = sadSeriesWithEpisodes($this->playlist);
+    $request = sadMediaRequest($this->sonarr, '81189', 'series');
+    $row = sadArrRow($series, $this->sonarr, [
+        'media_request_id' => $request->id,
+        'arr_seasons' => [1],
+    ]);
+
+    Http::fake([
+        '*/api/v3/queue*' => Http::response(['records' => []], 200),
+        '*/api/v3/episode*' => Http::response([
+            ['seasonNumber' => 1, 'episodeNumber' => 1, 'hasFile' => false],
+        ], 200),
+    ]);
+
+    sadRunSync($this->sonarr);
+    sadRunSync($this->sonarr);
+
+    $episodeChecks = collect(Http::recorded())
+        ->filter(fn (array $pair): bool => str_contains($pair[0]->url(), '/api/v3/episode'))
+        ->count();
+
+    expect($row->refresh()->status)->toBe(CachedContentFileStatus::Requested)
+        ->and($episodeChecks)->toBe(1);
+});

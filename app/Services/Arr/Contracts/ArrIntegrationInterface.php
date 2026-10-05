@@ -68,7 +68,7 @@ interface ArrIntegrationInterface
     /**
      * Check whether an external ID already exists in the library.
      *
-     * @return array{exists: bool, id?: int}
+     * @return array{exists: bool, id?: int, has_file?: bool, added?: ?string}
      */
     public function checkExists(int $externalId): array;
 

@@ -10,6 +10,7 @@ use App\Models\CachedContentFile;
 use App\Models\Channel;
 use App\Models\DynamicGroup;
 use App\Models\Episode;
+use App\Models\MediaRequest;
 use App\Models\MediaServerIntegration;
 use App\Models\Playlist;
 use App\Models\Series;
@@ -1081,4 +1082,224 @@ it('attaches the group pivot to a tmdb-resolved series arr row and resolves the 
         return true;
     });
     expect($tmdbLookups)->toBe(1);
+});
+
+// ── 12. A failed local write after the arr add stays recoverable ──────────
+
+it('keeps the claim recoverable when the media request write fails after the arr add', function () {
+    $playlist = Playlist::factory()->for($this->user)->create(['prefer_media_server_sources' => true]);
+    $channel = cadChannel($playlist);
+    cadSettings(method: 'arr', radarrId: $this->radarr->id);
+    Http::fake(cadRadarrSuccessFakes());
+    MediaRequest::creating(fn () => throw new RuntimeException('db down'));
+
+    $result = app(CachedContentDispatchService::class)->dispatch($channel);
+
+    expect($result)->toBe(CacheDispatchResult::ArrRequested);
+
+    $row = CachedContentFile::sole();
+    expect($row->status)->toBe(CachedContentFileStatus::Requested)
+        ->and($row->arr_library_id)->toBe(77)
+        ->and($row->media_request_id)->toBeNull();
+
+    Bus::assertDispatched(MonitorArrSearch::class);
+});
+
+// ── 13. Recovery of an unlinked claim on retry ────────────────────────────
+
+it('leaves a fresh unlinked claim alone because another dispatch may still be requesting it', function () {
+    $playlist = Playlist::factory()->for($this->user)->create(['prefer_media_server_sources' => true]);
+    $channel = cadChannel($playlist);
+    cadSettings(method: 'arr', radarrId: $this->radarr->id);
+    $row = CachedContentFile::factory()->arrMovie($this->radarr, $channel)->create(['arr_library_id' => null]);
+    // Radarr would report an adoptable title, so only the in-flight grace
+    // keeps recovery from acting on this claim.
+    Http::fake([
+        '*/api/v3/movie?tmdbId=*' => Http::response([['id' => 5, 'added' => now()->toIso8601String()]], 200),
+    ]);
+
+    $result = app(CachedContentDispatchService::class)->dispatch($channel);
+
+    expect($result)->toBe(CacheDispatchResult::AlreadyQueued);
+
+    $row->refresh();
+    expect($row->status)->toBe(CachedContentFileStatus::Requested)
+        ->and($row->arr_library_id)->toBeNull()
+        ->and($row->media_request_id)->toBeNull();
+
+    Http::assertNothingSent();
+    Bus::assertNotDispatched(MonitorArrSearch::class);
+});
+
+it('recovers an unlinked radarr claim when the arr title was added after the claim', function () {
+    $playlist = Playlist::factory()->for($this->user)->create(['prefer_media_server_sources' => true]);
+    $channel = cadChannel($playlist);
+    cadSettings(method: 'arr', radarrId: $this->radarr->id);
+    $row = CachedContentFile::factory()->arrMovie($this->radarr, $channel)->create(['arr_library_id' => null, 'created_at' => now()->subMinutes(10)]);
+    Http::fake([
+        '*/api/v3/movie?tmdbId=*' => Http::response([['id' => 5, 'added' => now()->toIso8601String()]], 200),
+    ]);
+
+    $result = app(CachedContentDispatchService::class)->dispatch($channel);
+
+    expect($result)->toBe(CacheDispatchResult::ArrRequested);
+
+    $row->refresh();
+    expect($row->arr_library_id)->toBe(5)
+        ->and($row->media_request_id)->not->toBeNull()
+        ->and($row->status)->toBe(CachedContentFileStatus::Requested);
+
+    Bus::assertDispatched(MonitorArrSearch::class);
+});
+
+it('releases an unlinked radarr claim whose arr title predates it', function (bool $hasFile) {
+    $playlist = Playlist::factory()->for($this->user)->create(['prefer_media_server_sources' => true]);
+    $channel = cadChannel($playlist);
+    cadSettings(method: 'arr', radarrId: $this->radarr->id);
+    $row = CachedContentFile::factory()->arrMovie($this->radarr, $channel)->create(['arr_library_id' => null, 'created_at' => now()->subMinutes(10)]);
+    Http::fake([
+        '*/api/v3/movie?tmdbId=*' => Http::response([[
+            'id' => 5,
+            'hasFile' => $hasFile,
+            'added' => now()->subDay()->toIso8601String(),
+        ]], 200),
+    ]);
+
+    $result = app(CachedContentDispatchService::class)->dispatch($channel);
+
+    expect($result)->toBe($hasFile ? CacheDispatchResult::ArrAlreadyAvailable : CacheDispatchResult::ArrMonitoredFallback)
+        ->and(CachedContentFile::where('source', 'radarr')->count())->toBe(0);
+
+    // Adoption never touches the arr: no add, no delete.
+    Http::assertSent(fn (Request $request) => in_array($request->method(), ['POST', 'DELETE']) === false);
+})->with([true, false]);
+
+it('releases an unlinked radarr claim whose arr response has no added timestamp', function () {
+    $playlist = Playlist::factory()->for($this->user)->create(['prefer_media_server_sources' => true]);
+    $channel = cadChannel($playlist);
+    cadSettings(method: 'arr', radarrId: $this->radarr->id);
+    CachedContentFile::factory()->arrMovie($this->radarr, $channel)->create(['arr_library_id' => null, 'created_at' => now()->subMinutes(10)]);
+    Http::fake([
+        '*/api/v3/movie?tmdbId=*' => Http::response([['id' => 5, 'hasFile' => true]], 200),
+    ]);
+
+    $result = app(CachedContentDispatchService::class)->dispatch($channel);
+
+    expect($result)->toBe(CacheDispatchResult::ArrAlreadyAvailable)
+        ->and(CachedContentFile::count())->toBe(0);
+});
+
+it('re-issues the add when the unlinked radarr claim never reached the arr', function () {
+    $playlist = Playlist::factory()->for($this->user)->create(['prefer_media_server_sources' => true]);
+    $channel = cadChannel($playlist);
+    cadSettings(method: 'arr', radarrId: $this->radarr->id);
+    $row = CachedContentFile::factory()->arrMovie($this->radarr, $channel)->create(['arr_library_id' => null, 'created_at' => now()->subMinutes(10)]);
+    Http::fake(cadRadarrSuccessFakes());
+
+    $result = app(CachedContentDispatchService::class)->dispatch($channel);
+
+    expect($result)->toBe(CacheDispatchResult::ArrRequested);
+
+    $row->refresh();
+    expect($row->arr_library_id)->toBe(77)
+        ->and($row->media_request_id)->not->toBeNull();
+
+    Http::assertSent(fn (Request $request) => $request->method() === 'POST' && str_contains($request->url(), '/api/v3/movie'));
+});
+
+it('rebuilds the missing request record for a linked radarr claim without touching the arr', function () {
+    $playlist = Playlist::factory()->for($this->user)->create(['prefer_media_server_sources' => true]);
+    $channel = cadChannel($playlist);
+    cadSettings(method: 'arr', radarrId: $this->radarr->id);
+    $row = CachedContentFile::factory()->arrMovie($this->radarr, $channel)->create();
+
+    $result = app(CachedContentDispatchService::class)->dispatch($channel);
+
+    expect($result)->toBe(CacheDispatchResult::AlreadyQueued);
+
+    $row->refresh();
+    expect($row->media_request_id)->not->toBeNull()
+        ->and(MediaRequest::whereKey($row->media_request_id)->exists())->toBeTrue();
+
+    Http::assertNothingSent();
+});
+
+it('leaves an unlinked radarr claim alone when the arr cannot be reached', function () {
+    $playlist = Playlist::factory()->for($this->user)->create(['prefer_media_server_sources' => true]);
+    $channel = cadChannel($playlist);
+    cadSettings(method: 'arr', radarrId: $this->radarr->id);
+    $row = CachedContentFile::factory()->arrMovie($this->radarr, $channel)->create(['arr_library_id' => null, 'created_at' => now()->subMinutes(10)]);
+    // No fakes: preventStrayRequests throws inside checkExists → rescue → null.
+
+    $result = app(CachedContentDispatchService::class)->dispatch($channel);
+
+    expect($result)->toBe(CacheDispatchResult::AlreadyQueued);
+
+    $row->refresh();
+    expect($row->status)->toBe(CachedContentFileStatus::Requested)
+        ->and($row->arr_library_id)->toBeNull()
+        ->and($row->media_request_id)->toBeNull();
+
+    Http::assertNothingSent();
+});
+
+it('recovers an unlinked sonarr claim when the lookup title was added after the claim', function () {
+    $playlist = Playlist::factory()->for($this->user)->create(['prefer_media_server_sources' => true]);
+    $series = cadSeriesWithEpisodes($playlist);
+    cadSettings(method: 'arr', sonarrId: $this->sonarr->id);
+    $row = CachedContentFile::factory()->arrSeries($this->sonarr, $series)->create([
+        'arr_library_id' => null,
+        'arr_seasons' => [1],
+        'created_at' => now()->subMinutes(10),
+    ]);
+    Http::fake([
+        '*/api/v3/series/lookup*' => Http::response([[
+            'id' => 9,
+            'tvdbId' => 81189,
+            'added' => now()->toIso8601String(),
+        ]], 200),
+    ]);
+
+    $result = app(CachedContentDispatchService::class)->dispatchArr($series, $this->sonarr, [1]);
+
+    expect($result)->toBe(CacheDispatchResult::ArrRequested);
+
+    $row->refresh();
+    expect($row->arr_library_id)->toBe(9)
+        ->and($row->media_request_id)->not->toBeNull();
+
+    Bus::assertDispatched(MonitorArrSearch::class);
+});
+
+it('re-issues the add when a sonarr lookup reports the title with no library id', function () {
+    $playlist = Playlist::factory()->for($this->user)->create(['prefer_media_server_sources' => true]);
+    $series = cadSeriesWithEpisodes($playlist);
+    cadSettings(method: 'arr', sonarrId: $this->sonarr->id);
+    $row = CachedContentFile::factory()->arrSeries($this->sonarr, $series)->create(['arr_library_id' => null, 'created_at' => now()->subMinutes(10)]);
+    Http::fake([
+        // id 0 + a default-added timestamp: reported but not in the library.
+        '*/api/v3/series/lookup*' => Http::response([[
+            'id' => 0,
+            'tmdbId' => 1399,
+            'tvdbId' => 81189,
+            'title' => 'Game of Thrones',
+            'titleSlug' => 'game-of-thrones',
+            'added' => '0001-01-01T00:00:00Z',
+            'seasons' => [
+                ['seasonNumber' => 1],
+                ['seasonNumber' => 2],
+            ],
+        ]], 200),
+        '*/api/v3/series' => Http::response(['id' => 9], 201),
+    ]);
+
+    $result = app(CachedContentDispatchService::class)->dispatchArr($series, $this->sonarr, [1]);
+
+    expect($result)->toBe(CacheDispatchResult::ArrRequested);
+
+    $row->refresh();
+    expect($row->arr_library_id)->toBe(9)
+        ->and($row->media_request_id)->not->toBeNull();
+
+    Http::assertSent(fn (Request $request) => $request->method() === 'POST' && str_contains($request->url(), '/api/v3/series'));
 });

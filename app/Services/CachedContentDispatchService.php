@@ -19,7 +19,10 @@ use App\Services\Arr\ArrService;
 use App\Settings\GeneralSettings;
 use Filament\Notifications\Notification;
 use Illuminate\Database\UniqueConstraintViolationException;
+use Illuminate\Support\Carbon;
 use Illuminate\Support\Facades\DB;
+use Illuminate\Support\Facades\Log;
+use Throwable;
 
 /**
  * Queues cache downloads for VOD channels and series episodes.
@@ -323,6 +326,14 @@ class CachedContentDispatchService
                 }
             }
 
+            // A Requested claim missing one of its two links: the arr add
+            // went through but the local bookkeeping didn't finish (see
+            // requestForCache). Reconnect or re-issue it instead of leaving
+            // it stuck behind AlreadyQueued forever.
+            if ($row->status === CachedContentFileStatus::Requested && ((int) $row->arr_library_id <= 0 || $row->media_request_id === null)) {
+                return $this->recoverArrClaim($row, $integration, $isMovie, $externalId, $seasons, $playlist);
+            }
+
             return match (true) {
                 $row->status === CachedContentFileStatus::Failed => CacheDispatchResult::Unavailable,
                 in_array($row->status, [CachedContentFileStatus::Requested, CachedContentFileStatus::Pending, CachedContentFileStatus::Downloading], true) => CacheDispatchResult::AlreadyQueued,
@@ -355,6 +366,20 @@ class CachedContentDispatchService
             return CacheDispatchResult::AlreadyQueued;
         }
 
+        // 5. Ask the arr integration, link the row, and schedule the search.
+        return $this->requestAndLinkArrRow($row, $integration, $isMovie, $externalId, $seasons, $playlist);
+    }
+
+    /**
+     * Steps 5–8 of dispatchArr for a freshly claimed row: request the title
+     * from the arr, release the claim when it's already in the arr library,
+     * record failures, or link the row to the request and schedule the
+     * search check.
+     *
+     * @param  array<int, int>|null  $seasons
+     */
+    private function requestAndLinkArrRow(CachedContentFile $row, ArrIntegration $integration, bool $isMovie, int $externalId, ?array $seasons, Playlist $playlist): CacheDispatchResult
+    {
         // 5. Ask the arr integration.
         $result = app(ContentRequestService::class)->requestForCache($integration, $isMovie ? 'movie' : 'series', $externalId, $seasons);
 
@@ -363,20 +388,7 @@ class CachedContentDispatchService
         if (($result['code'] ?? null) === 'already_available') {
             $row->delete();
 
-            if ($isMovie) {
-                return ($result['has_file'] ?? false)
-                    ? CacheDispatchResult::ArrAlreadyAvailable
-                    : CacheDispatchResult::ArrMonitoredFallback;
-            }
-
-            $status = ArrService::make($integration)->fetchEpisodeData($result['library_id'])['status'];
-            foreach ($seasons ?? array_keys($status) as $season) {
-                if (! in_array(true, $status[$season] ?? [], true)) {
-                    return CacheDispatchResult::ArrMonitoredFallback;
-                }
-            }
-
-            return CacheDispatchResult::ArrAlreadyAvailable;
+            return $this->alreadyInArrLibraryResult($integration, $isMovie, (int) $result['library_id'], (bool) ($result['has_file'] ?? false), $seasons);
         }
 
         // 7. Any other failure: record it and let the caller fall back now.
@@ -394,7 +406,7 @@ class CachedContentDispatchService
 
         // 8. Accepted: link the row to the request and schedule the search check.
         $row->update([
-            'media_request_id' => $result['media_request']->id,
+            'media_request_id' => $result['media_request']?->id,
             'arr_library_id' => $result['library_id'],
         ]);
 
@@ -407,6 +419,142 @@ class CachedContentDispatchService
         )->delay(now()->addSeconds(30));
 
         return CacheDispatchResult::ArrRequested;
+    }
+
+    /**
+     * Finish a Requested claim that lost one of its two links between the
+     * arr add and the local writes.
+     *
+     * Provenance (D1): a claim with no library id adopts an arr title only
+     * when that title's `added` timestamp is at or after the claim row's
+     * created_at (minus 5 minutes of clock skew). A title that was already
+     * in the arr before we asked predates the claim, so it isn't ours —
+     * the claim is released and the normal already-in-library verdict
+     * applies. `managed_by` is deliberately not consulted: manual Cache
+     * Now claims have managed_by = null and must recover too, and
+     * managed_by says nothing about whether the arr title came from our
+     * add anyway.
+     *
+     * The claim row is also the lock for concurrent dispatches of one
+     * title: while another dispatch is still inside requestForCache() its
+     * row is Requested with neither link. So a claim with no library id is
+     * only treated as abandoned once it is older than 5 minutes, well past
+     * the arr client's worst case (30 s timeout × 3 attempts plus the
+     * lookup calls). Younger claims stay AlreadyQueued, as before.
+     *
+     * @param  array<int, int>|null  $seasons
+     */
+    private function recoverArrClaim(CachedContentFile $row, ArrIntegration $integration, bool $isMovie, int $externalId, ?array $seasons, Playlist $playlist): CacheDispatchResult
+    {
+        // 1. Linked to the arr title, but the request record is missing.
+        if ((int) $row->arr_library_id > 0) {
+            $this->rebuildCacheRequest($row, $integration, $isMovie, $externalId);
+
+            return CacheDispatchResult::AlreadyQueued;
+        }
+
+        // 2. No library id. A young claim may still be in flight in another
+        // dispatch (see docblock): leave it alone.
+        if ($row->created_at->gt(now()->subMinutes(5))) {
+            return CacheDispatchResult::AlreadyQueued;
+        }
+
+        // Ask the arr whether the add ever landed.
+        $exists = rescue(fn (): array => ArrService::make($integration)->checkExists($externalId), null, report: false);
+
+        if ($exists === null) {
+            // Arr unreachable: change nothing; a later retry tries again.
+            return CacheDispatchResult::AlreadyQueued;
+        }
+
+        // A reported hit without an id (Sonarr lookups carry id 0 or omit
+        // it for titles not in the library) is not in the library.
+        if (! ($exists['exists'] ?? false) || (int) ($exists['id'] ?? 0) <= 0) {
+            // The add never reached the arr: re-run the request path.
+            return $this->requestAndLinkArrRow($row, $integration, $isMovie, $externalId, $seasons, $playlist);
+        }
+
+        // Adopt only when the arr gained the title at/after our claim.
+        $rawAdded = $exists['added'] ?? null;
+        $adoptable = false;
+
+        if (is_string($rawAdded) && $rawAdded !== '') {
+            try {
+                $adoptable = Carbon::parse($rawAdded)->gte($row->created_at->copy()->subMinutes(5));
+            } catch (Throwable) {
+                $adoptable = false;
+            }
+        }
+
+        if ($adoptable) {
+            $row->update(['arr_library_id' => (int) $exists['id']]);
+            $this->rebuildCacheRequest($row, $integration, $isMovie, $externalId);
+
+            MonitorArrSearch::dispatch(
+                $integration->id,
+                (int) $exists['id'],
+                (string) $row->title,
+                (int) $playlist->user_id,
+                $row->id,
+            )->delay(now()->addSeconds(30));
+
+            return CacheDispatchResult::ArrRequested;
+        }
+
+        // Not adoptable (D1): we never owned this pre-existing title.
+        $row->delete();
+
+        return $this->alreadyInArrLibraryResult($integration, $isMovie, (int) $exists['id'], (bool) ($exists['has_file'] ?? false), $seasons);
+    }
+
+    /**
+     * (Re)create the auto-approved request record for a claim whose
+     * MediaRequest write failed earlier. Null on a repeated failure
+     * (logged); the sync job's library check still finishes the row.
+     */
+    private function rebuildCacheRequest(CachedContentFile $row, ArrIntegration $integration, bool $isMovie, int $externalId): ?int
+    {
+        try {
+            $request = app(ContentRequestService::class)->recordCacheRequest($integration, $isMovie ? 'movie' : 'series', $externalId, (string) $row->title, []);
+        } catch (Throwable $e) {
+            Log::warning('Cache claim request record rebuild failed', [
+                'cached_content_file_id' => $row->id,
+                'integration_id' => $integration->id,
+                'external_id' => $externalId,
+                'message' => $e->getMessage(),
+            ]);
+
+            return null;
+        }
+
+        $row->update(['media_request_id' => $request->id]);
+
+        return $request->id;
+    }
+
+    /**
+     * The verdict for a title the arr already has: with a file it's simply
+     * available; without one (movies) or with holes among the tracked
+     * seasons (series), the caller should fall back to the provider.
+     *
+     * @param  array<int, int>|null  $seasons
+     */
+    private function alreadyInArrLibraryResult(ArrIntegration $integration, bool $isMovie, int $libraryId, bool $hasFile, ?array $seasons): CacheDispatchResult
+    {
+        if ($isMovie) {
+            return $hasFile
+                ? CacheDispatchResult::ArrAlreadyAvailable
+                : CacheDispatchResult::ArrMonitoredFallback;
+        }
+
+        $status = ArrService::make($integration)->fetchEpisodeData($libraryId)['status'];
+        foreach ($seasons ?? array_keys($status) as $season) {
+            if (! in_array(true, $status[$season] ?? [], true)) {
+                return CacheDispatchResult::ArrMonitoredFallback;
+            }
+        }
+
+        return CacheDispatchResult::ArrAlreadyAvailable;
     }
 
     /**

@@ -230,7 +230,7 @@ class SonarrService extends BaseArrService
     }
 
     /**
-     * @return array{exists: bool, id?: int}
+     * @return array{exists: bool, id?: int, has_file?: bool, added?: ?string}
      */
     public function checkExists(int $externalId): array
     {
@@ -243,11 +243,13 @@ class SonarrService extends BaseArrService
         $items = $response->json() ?? [];
         $first = $items[0] ?? null;
 
-        if (! $first || ! isset($first['id'])) {
+        // Sonarr's lookup omits `id` (or sends 0 on some versions) for
+        // series that aren't in the library.
+        if (! $first || (int) ($first['id'] ?? 0) <= 0) {
             return ['exists' => false];
         }
 
-        return ['exists' => true, 'id' => (int) $first['id']];
+        return ['exists' => true, 'id' => (int) $first['id'], 'added' => $first['added'] ?? null];
     }
 
     /**

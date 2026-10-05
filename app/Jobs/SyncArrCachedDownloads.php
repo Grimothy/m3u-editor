@@ -17,6 +17,7 @@ use App\Services\MediaSourcePreferenceService;
 use Illuminate\Contracts\Queue\ShouldBeUnique;
 use Illuminate\Contracts\Queue\ShouldQueue;
 use Illuminate\Foundation\Queue\Queueable;
+use Illuminate\Support\Facades\Cache;
 use Illuminate\Support\Facades\Log;
 
 /**
@@ -183,16 +184,33 @@ class SyncArrCachedDownloads implements ShouldBeUnique, ShouldQueue
 
     /**
      * A Pending/Downloading row that left arr's queue with no webhook event
-     * to say why: arr drops a title from its queue once it imports it, so
-     * without a webhook the queue alone would leave the row stuck at
-     * Downloading. Ask the library instead, and report an import when the
-     * title's files are there. Null means "no news" (still unknown).
+     * to say why — or a Requested row arr imported before our first poll
+     * (arr drops a title from its queue once it imports it, so without a
+     * webhook neither the queue nor an event would ever say so). Ask the
+     * library instead, and report an import when the title's files are
+     * there. Requested rows are only asked about when we know the title is
+     * ours in arr (arr_library_id, set by dispatchArr) — anything else
+     * stays untouched. Sonarr checks /episode per row on every sweep, so
+     * its Requested-row checks run at most once every 5 minutes; Radarr's
+     * library is fetched at most once per sweep, so it needs no throttle.
+     * Null means "no news" (still unknown).
      *
      * @return array{status: string, tracked_state: ?string, progress: int, size: int, size_left: int, quality: ?string, protocol: ?string, time_left: ?string, can_persist_completed: bool}|null
      */
     private function libraryImportProgress(CachedContentFile $row, ArrIntegration $integration): ?array
     {
-        if (! in_array($row->status, [CachedContentFileStatus::Pending, CachedContentFileStatus::Downloading], true)) {
+        $status = $row->status;
+
+        $inFlight = in_array($status, [CachedContentFileStatus::Pending, CachedContentFileStatus::Downloading], true);
+        $requestedOurs = $status === CachedContentFileStatus::Requested && (int) $row->arr_library_id > 0;
+
+        if (! $inFlight && ! $requestedOurs) {
+            return null;
+        }
+
+        if ($requestedOurs
+            && $row->source === CachedContentSource::Sonarr
+            && ! Cache::add('cached-content:arr-library-check:'.$row->id, true, now()->addMinutes(5))) {
             return null;
         }
 
