@@ -216,16 +216,10 @@ class SyncDynamicGroups implements ShouldQueue
 
         $this->syncMembership($group, $type, $playlist->id, $tmdbIds, $this->syncRunId);
 
-        // Auto-cache hook: this is the single point all three callers
-        // (pipeline sync, daily cron, listing CreateAction) pass through
-        // with fresh membership. Fan out to a queued job rather than
-        // inline — this job owns the pipeline-phase `finally` and a 900s
-        // timeout.
+        // Rules that cache their members queue the downloads in their own
+        // job so a large series group can't hold up this pipeline phase.
         $group->setRelation('playlist', $playlist);
-        if (
-            DynamicGroup::cacheSettings($group->ruleFromConfig()) !== null
-            && app(CachedContentDispatchService::class)->isEnabled()
-        ) {
+        if (($group->cacheSettings()['enabled'] ?? false) && app(CachedContentDispatchService::class)->isEnabled()) {
             dispatch(new QueueDynamicGroupCacheDownloads($group->id));
         }
 

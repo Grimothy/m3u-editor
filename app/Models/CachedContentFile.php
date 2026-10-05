@@ -199,16 +199,12 @@ class CachedContentFile extends Model
     }
 
     /**
-     * Dynamic groups that queued this file, carrying the retention
-     * snapshot taken at attach time (see the pivot table migration).
-     * Group retention only ever deletes files whose `managed_by` is
-     * `CachedContentManagedBy::DynamicGroup`, so files cached manually are
-     * never affected by these rows.
+     * Dynamic groups whose auto-cache manages this file.
      */
     public function dynamicGroups(): BelongsToMany
     {
         return $this->belongsToMany(DynamicGroup::class, 'cached_content_file_dynamic_groups')
-            ->withPivot(['retention', 'retention_days', 'dropped_at'])
+            ->withPivot('dropped_at')
             ->withTimestamps();
     }
 

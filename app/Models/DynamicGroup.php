@@ -35,26 +35,6 @@ class DynamicGroup extends Model
      */
     public const XTREAM_CATEGORY_ID_OFFSET = 900_000_000;
 
-    /**
-     * Rule keys inside a `dynamic_groups_config` entry that configure the
-     * rule's automatic caching. Declared here so the Playlist form, the
-     * dispatch service, and retention all read the same shape.
-     */
-    public const CACHE_ENABLED_KEY = 'cache_enabled';
-
-    public const CACHE_RETENTION_KEY = 'cache_retention';
-
-    public const CACHE_RETENTION_DAYS_KEY = 'cache_retention_days';
-
-    public const CACHE_MAX_ITEMS_KEY = 'cache_max_items';
-
-    public const CACHE_MAX_GB_KEY = 'cache_max_gb';
-
-    /**
-     * Valid `cache_retention` values.
-     */
-    public const CACHE_RETENTIONS = ['in_group', 'in_group_plus_days', 'never_expire'];
-
     protected $fillable = [
         'playlist_id',
         'user_id',
@@ -119,14 +99,30 @@ class DynamicGroup extends Model
     }
 
     /**
-     * Cached files this group queued, via the provenance pivot that
-     * snapshots the rule's retention settings at attach time.
+     * Cached files this group's auto-cache manages.
      */
     public function cachedContentFiles(): BelongsToMany
     {
         return $this->belongsToMany(CachedContentFile::class, 'cached_content_file_dynamic_groups')
-            ->withPivot(['retention', 'retention_days', 'dropped_at'])
+            ->withPivot('dropped_at')
             ->withTimestamps();
+    }
+
+    /**
+     * Members the group's auto-cache covers: enabled members in TMDB rank
+     * order, capped at $maxItems.
+     */
+    public function cacheMembers(?int $maxItems): MorphToMany
+    {
+        $members = $this->type === 'series' ? $this->series() : $this->channels();
+        $members->where($members->getRelated()->qualifyColumn('enabled'), true)
+            ->orderByPivot('position');
+
+        if ($maxItems !== null) {
+            $members->limit($maxItems);
+        }
+
+        return $members;
     }
 
     /**
@@ -219,58 +215,27 @@ class DynamicGroup extends Model
     }
 
     /**
-     * The playlist's `dynamic_groups_config` entry this row was materialized
-     * from, or null when the rule no longer exists (removed, or the row's
-     * triple no longer matches after a rename).
+     * Auto-cache settings from this group's rule in the playlist's
+     * `dynamic_groups_config`, or null when the rule is gone (removed, or
+     * renamed and not re-synced yet).
      *
-     * @return array<string, mixed>|null
+     * @return array{enabled: bool, keep_days: int, max_items: int|null}|null
      */
-    public function ruleFromConfig(): ?array
+    public function cacheSettings(): ?array
     {
-        foreach ($this->playlist?->dynamic_groups_config ?? [] as $rule) {
-            if ($this->matchesRule($rule)) {
-                return $rule;
-            }
-        }
+        $rule = collect($this->playlist?->dynamic_groups_config ?? [])
+            ->first(fn (array $rule): bool => $this->matchesRule($rule));
 
-        return null;
-    }
-
-    /**
-     * Normalized cache settings for a `dynamic_groups_config` rule, or null
-     * when the rule (or its caching) is not enabled — existing behavior is
-     * unchanged in that case.
-     *
-     * Returned shape:
-     *  - retention: 'in_group' | 'in_group_plus_days' | 'never_expire'
-     *  - retention_days: int (>= 1)
-     *  - max_items: ?int — cache only the first N members by position
-     *  - max_bytes: ?int — soft byte budget for the group's tracked files
-     *
-     * @param  array<string, mixed>|null  $rule
-     * @return array{retention: string, retention_days: int, max_items: int|null, max_bytes: int|null}|null
-     */
-    public static function cacheSettings(?array $rule): ?array
-    {
-        if ($rule === null || ! (bool) ($rule['enabled'] ?? false) || ! (bool) ($rule[self::CACHE_ENABLED_KEY] ?? false)) {
+        if ($rule === null) {
             return null;
         }
 
-        $retention = (string) ($rule[self::CACHE_RETENTION_KEY] ?? self::CACHE_RETENTIONS[0]);
-        if (! in_array($retention, self::CACHE_RETENTIONS, true)) {
-            $retention = self::CACHE_RETENTIONS[0];
-        }
-
-        $retentionDays = max(1, (int) ($rule[self::CACHE_RETENTION_DAYS_KEY] ?? 7));
-
-        $maxItems = (int) ($rule[self::CACHE_MAX_ITEMS_KEY] ?? 0);
-        $maxGb = (float) ($rule[self::CACHE_MAX_GB_KEY] ?? 0);
+        $maxItems = (int) ($rule['cache_max_items'] ?? 0);
 
         return [
-            'retention' => $retention,
-            'retention_days' => $retentionDays,
+            'enabled' => (bool) ($rule['enabled'] ?? false) && (bool) ($rule['cache_enabled'] ?? false),
+            'keep_days' => max(0, (int) ($rule['cache_keep_days'] ?? 0)),
             'max_items' => $maxItems > 0 ? $maxItems : null,
-            'max_bytes' => $maxGb > 0 ? (int) round($maxGb * 1024 ** 3) : null,
         ];
     }
 

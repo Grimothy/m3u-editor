@@ -12,6 +12,4 @@ enum CacheDispatchResult: string
     case AlreadyQueued = 'already_queued';
     case Unavailable = 'unavailable';
     case Disabled = 'disabled';
-    case CoolingDown = 'cooling_down';
-    case MediaServerAvailable = 'media_server_available';
 }

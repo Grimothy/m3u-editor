@@ -50,10 +50,8 @@ it('persists the per-rule cache keys in dynamic_groups_config on round-trip', fu
         'name' => 'In Theatres',
         'tmdb_params' => [],
         'cache_enabled' => true,
-        'cache_retention' => 'in_group_plus_days',
-        'cache_retention_days' => 14,
+        'cache_keep_days' => 14,
         'cache_max_items' => 10,
-        'cache_max_gb' => 2.5,
     ];
 
     $this->playlist->update(['dynamic_groups_config' => [$rule]]);

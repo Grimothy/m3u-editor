@@ -24,13 +24,13 @@ use Illuminate\Support\Facades\Storage;
 uses(RefreshDatabase::class);
 
 /**
- * Bind GeneralSettings with the requested enable_cache / TMDB state.
+ * Bind GeneralSettings with the requested enable_cache state.
  */
-function dgacSettings(bool $enableCache = true, ?string $tmdbApiKey = 'fake-api-key'): GeneralSettings
+function dgacSettings(bool $enableCache = true): GeneralSettings
 {
     $settings = new GeneralSettings;
     $settings->enable_cache = $enableCache;
-    $settings->tmdb_api_key = $tmdbApiKey;
+    $settings->tmdb_api_key = 'fake-api-key';
     app()->instance(GeneralSettings::class, $settings);
 
     return $settings;
@@ -43,24 +43,24 @@ function dgacSettings(bool $enableCache = true, ?string $tmdbApiKey = 'fake-api-
  * @param  array<string, mixed>  $ruleOverrides
  * @return array{0: Playlist, 1: DynamicGroup}
  */
-function dgacPlaylistWithGroup(string $type = 'vod', array $ruleOverrides = []): array
+function dgacPlaylistWithGroup(string $type = 'vod', array $ruleOverrides = [], string $name = 'Trending Now', ?Playlist $playlist = null): array
 {
     $rule = array_merge([
         'enabled' => true,
         'type' => $type,
         'source' => 'trending',
-        'name' => 'Trending Now',
+        'name' => $name,
         'tmdb_params' => [],
     ], $ruleOverrides);
 
-    $playlist = Playlist::factory()->create();
-    $playlist->update(['dynamic_groups_config' => [$rule]]);
+    $playlist ??= Playlist::factory()->create();
+    $playlist->update(['dynamic_groups_config' => [...($playlist->dynamic_groups_config ?? []), $rule]]);
 
     $group = DynamicGroup::factory()->for($playlist)->create([
         'user_id' => $playlist->user_id,
         'type' => $type,
         'source' => 'trending',
-        'name' => 'Trending Now',
+        'name' => $name,
     ]);
 
     return [$playlist, $group];
@@ -68,15 +68,47 @@ function dgacPlaylistWithGroup(string $type = 'vod', array $ruleOverrides = []):
 
 /**
  * A VOD channel with a cacheable URL on $playlist.
+ *
+ * @param  array<string, mixed>  $attributes
  */
-function dgacChannel(Playlist $playlist, int $n): Channel
+function dgacChannel(Playlist $playlist, int $n, array $attributes = []): Channel
 {
     return Channel::factory()->create([
         'user_id' => $playlist->user_id,
         'playlist_id' => $playlist->id,
         'is_vod' => true,
+        'enabled' => true,
         'tmdb_id' => (string) (100 + $n),
         'url' => "https://provider.example.com/movie/{$n}.mkv",
+        ...$attributes,
+    ]);
+}
+
+/**
+ * An enabled series on $playlist.
+ */
+function dgacSeries(Playlist $playlist): Series
+{
+    return Series::factory()->create([
+        'user_id' => $playlist->user_id,
+        'playlist_id' => $playlist->id,
+        'enabled' => true,
+    ]);
+}
+
+/**
+ * An enabled episode of $series with a cacheable URL.
+ */
+function dgacEpisode(Series $series, int $season, int $episodeNum): Episode
+{
+    return Episode::factory()->create([
+        'user_id' => $series->user_id,
+        'playlist_id' => $series->playlist_id,
+        'series_id' => $series->id,
+        'enabled' => true,
+        'season' => $season,
+        'episode_num' => $episodeNum,
+        'url' => "https://provider.example.com/{$series->id}/s{$season}e{$episodeNum}.mkv",
     ]);
 }
 
@@ -90,26 +122,26 @@ function dgacAttachMember(DynamicGroup $group, Channel|Series $item, int $positi
 }
 
 /**
- * Attach a provenance pivot row carrying a retention snapshot.
+ * A completed, group-managed cached file for $item, linked to $group.
  */
-function dgacAttachPivot(CachedContentFile $file, ?DynamicGroup $group, string $retention, ?int $days = 7, ?string $droppedAt = null): void
+function dgacManagedFile(Channel|Episode $item, DynamicGroup $group, ?Carbon $droppedAt = null): CachedContentFile
 {
-    $file->dynamicGroups()->attach($group?->id, [
-        'retention' => $retention,
-        'retention_days' => $days,
-        'dropped_at' => $droppedAt,
-    ]);
+    $file = CachedContentFile::factory()->completed()->dynamicGroupManaged()->forItem($item)->create();
+    Storage::disk(CachedContentFile::DISK)->put($file->file_path, 'bytes');
+    $file->dynamicGroups()->attach($group->id, ['dropped_at' => $droppedAt]);
+
+    return $file;
 }
 
 /**
  * Give $channel an eligible media-server match: a media playlist with an
  * enabled emby integration and an enabled media channel sharing the
- * provider channel's tmdb_id (mirrors makeMatchedMovieFixture).
+ * provider channel's tmdb_id.
  */
-function dgacMatchToMedia(Playlist $provider, Channel $channel): Channel
+function dgacMatchToMedia(Playlist $provider, Channel $channel): void
 {
     $media = Playlist::factory()->for($provider->user)->create();
-    $mediaChannel = Channel::factory()->for($media)->for($provider->user)->create([
+    Channel::factory()->for($media)->for($provider->user)->create([
         'enabled' => true,
         'is_vod' => true,
         'tmdb_id' => $channel->tmdb_id,
@@ -122,8 +154,24 @@ function dgacMatchToMedia(Playlist $provider, Channel $channel): Channel
     ]);
 
     app(MediaSourceMatchService::class)->rebuildForPlaylist($provider->refresh());
+}
 
-    return $mediaChannel;
+function dgacDispatch(DynamicGroup $group): array
+{
+    return app(CachedContentDispatchService::class)->dispatchForDynamicGroup($group->fresh());
+}
+
+function dgacRelease(): int
+{
+    return app(CachedContentRetentionService::class)->releaseDynamicGroupCaches();
+}
+
+function dgacDroppedAt(CachedContentFile $file, DynamicGroup $group): ?string
+{
+    return DB::table('cached_content_file_dynamic_groups')
+        ->where('cached_content_file_id', $file->id)
+        ->where('dynamic_group_id', $group->id)
+        ->value('dropped_at');
 }
 
 beforeEach(function () {
@@ -134,272 +182,113 @@ beforeEach(function () {
     dgacSettings(true);
 });
 
-// --- dispatchForDynamicGroup(): queueing ---
+// --- dispatchForDynamicGroup() ---
 
-it('queues one download per VOD member and attaches provenance', function () {
+it('queues one group-managed download per VOD member and links the group', function () {
     [$playlist, $group] = dgacPlaylistWithGroup('vod', ['cache_enabled' => true]);
     dgacAttachMember($group, dgacChannel($playlist, 1), 0);
     dgacAttachMember($group, dgacChannel($playlist, 2), 1);
 
-    $counts = app(CachedContentDispatchService::class)->dispatchForDynamicGroup($group);
+    $counts = dgacDispatch($group);
 
     expect($counts[CacheDispatchResult::Queued->value])->toBe(2);
     Bus::assertDispatchedTimes(DownloadCachedContentFile::class, 2);
 
     $files = CachedContentFile::query()->where('managed_by', CachedContentManagedBy::DynamicGroup->value)->get();
     expect($files)->toHaveCount(2);
-
     foreach ($files as $file) {
-        $pivot = DB::table('cached_content_file_dynamic_groups')
-            ->where('cached_content_file_id', $file->id)
-            ->where('dynamic_group_id', $group->id)
-            ->first();
-
-        expect($pivot)->not->toBeNull()
-            ->and($pivot->retention)->toBe('in_group')
-            ->and($pivot->retention_days)->toBe(7)
-            ->and($pivot->dropped_at)->toBeNull();
+        expect($file->dynamicGroups()->pluck('dynamic_groups.id')->all())->toBe([$group->id]);
     }
 });
 
 it('queues nothing when caching is off on the rule, the rule is disabled, or enable_cache is off', function () {
-    // Rule without cache_enabled.
     [$playlist, $group] = dgacPlaylistWithGroup('vod');
     dgacAttachMember($group, dgacChannel($playlist, 1), 0);
+    expect(dgacDispatch($group)[CacheDispatchResult::Queued->value])->toBe(0);
 
-    $counts = app(CachedContentDispatchService::class)->dispatchForDynamicGroup($group);
-    expect($counts[CacheDispatchResult::Queued->value])->toBe(0)
-        ->and(CachedContentFile::count())->toBe(0);
-
-    // Disabled rule with cache_enabled.
     [$playlist, $group] = dgacPlaylistWithGroup('vod', ['enabled' => false, 'cache_enabled' => true]);
     dgacAttachMember($group, dgacChannel($playlist, 2), 0);
+    expect(dgacDispatch($group)[CacheDispatchResult::Queued->value])->toBe(0);
 
-    $counts = app(CachedContentDispatchService::class)->dispatchForDynamicGroup($group);
-    expect($counts[CacheDispatchResult::Queued->value])->toBe(0)
-        ->and(CachedContentFile::count())->toBe(0);
-
-    // Global enable_cache off.
     dgacSettings(false);
     [$playlist, $group] = dgacPlaylistWithGroup('vod', ['cache_enabled' => true]);
     dgacAttachMember($group, dgacChannel($playlist, 3), 0);
+    expect(dgacDispatch($group)[CacheDispatchResult::Queued->value])->toBe(0);
 
-    $counts = app(CachedContentDispatchService::class)->dispatchForDynamicGroup($group);
-    expect($counts[CacheDispatchResult::Disabled->value])->toBe(1)
-        ->and(CachedContentFile::count())->toBe(0);
+    expect(CachedContentFile::count())->toBe(0);
 });
 
-it('caps members by cache_max_items using TMDB rank order', function () {
+it('caps members at cache_max_items in rank order, skipping disabled members', function () {
     [$playlist, $group] = dgacPlaylistWithGroup('vod', ['cache_enabled' => true, 'cache_max_items' => 2]);
     dgacAttachMember($group, $top = dgacChannel($playlist, 1), 0);
-    dgacAttachMember($group, $second = dgacChannel($playlist, 2), 1);
-    dgacAttachMember($group, $third = dgacChannel($playlist, 3), 2);
+    dgacAttachMember($group, $disabled = dgacChannel($playlist, 2, ['enabled' => false]), 1);
+    dgacAttachMember($group, $second = dgacChannel($playlist, 3), 2);
+    dgacAttachMember($group, $third = dgacChannel($playlist, 4), 3);
 
-    $counts = app(CachedContentDispatchService::class)->dispatchForDynamicGroup($group);
+    $counts = dgacDispatch($group);
 
     expect($counts[CacheDispatchResult::Queued->value])->toBe(2)
-        ->and(CachedContentFile::where('cacheable_id', $top->id)->exists())->toBeTrue()
-        ->and(CachedContentFile::where('cacheable_id', $second->id)->exists())->toBeTrue()
+        ->and(CachedContentFile::pluck('cacheable_id')->sort()->values()->all())->toBe([$top->id, $second->id])
+        ->and(CachedContentFile::where('cacheable_id', $disabled->id)->exists())->toBeFalse()
         ->and(CachedContentFile::where('cacheable_id', $third->id)->exists())->toBeFalse();
-});
-
-it('stops queueing once the group budget is reached', function () {
-    [$playlist, $group] = dgacPlaylistWithGroup('vod', ['cache_enabled' => true, 'cache_max_gb' => 0.01]); // ~10.7 MB
-
-    $seed = dgacChannel($playlist, 9);
-    $seedFile = CachedContentFile::factory()->completed()->dynamicGroupManaged()->forItem($seed)->create([
-        'file_size_bytes' => 20_000_000,
-    ]);
-    dgacAttachPivot($seedFile, $group, 'in_group');
-    dgacAttachMember($group, $seed, 0);
-
-    dgacAttachMember($group, $new = dgacChannel($playlist, 1), 1);
-
-    $counts = app(CachedContentDispatchService::class)->dispatchForDynamicGroup($group);
-
-    expect($counts[CacheDispatchResult::Queued->value])->toBe(0)
-        ->and(CachedContentFile::where('cacheable_id', $new->id)->exists())->toBeFalse();
 });
 
 it('caches only the latest season of each member series', function () {
     [$playlist, $group] = dgacPlaylistWithGroup('series', ['cache_enabled' => true]);
-
-    $series = Series::factory()->create([
-        'user_id' => $playlist->user_id,
-        'playlist_id' => $playlist->id,
-        'tmdb_id' => '1399',
-    ]);
-    $owner = ['user_id' => $playlist->user_id, 'playlist_id' => $playlist->id, 'series_id' => $series->id];
-    Episode::factory()->create($owner + ['season' => 1, 'episode_num' => 1, 'url' => 'https://provider.example.com/s1e1.mkv']);
-    Episode::factory()->create($owner + ['season' => 1, 'episode_num' => 2, 'url' => 'https://provider.example.com/s1e2.mkv']);
-    $latest = Episode::factory()->create($owner + ['season' => 2, 'episode_num' => 1, 'url' => 'https://provider.example.com/s2e1.mkv']);
-
+    $series = dgacSeries($playlist);
+    dgacEpisode($series, 1, 1);
+    dgacEpisode($series, 1, 2);
+    $latest = dgacEpisode($series, 2, 1);
     dgacAttachMember($group, $series, 0);
 
-    $counts = app(CachedContentDispatchService::class)->dispatchForDynamicGroup($group);
+    $counts = dgacDispatch($group);
 
     expect($counts[CacheDispatchResult::Queued->value])->toBe(1)
-        ->and(CachedContentFile::query()->where('cacheable_id', $latest->id)->exists())->toBeTrue()
-        ->and(CachedContentFile::count())->toBe(1);
+        ->and(CachedContentFile::sole()->cacheable_id)->toBe($latest->id);
 });
 
-it('does not attach provenance to a manual cached file', function () {
+it('does not link a manual cached file', function () {
     [$playlist, $group] = dgacPlaylistWithGroup('vod', ['cache_enabled' => true]);
     $channel = dgacChannel($playlist, 1);
     $file = CachedContentFile::factory()->completed()->forItem($channel)->create();
     Storage::disk(CachedContentFile::DISK)->put($file->file_path, 'bytes');
     dgacAttachMember($group, $channel, 0);
 
-    $counts = app(CachedContentDispatchService::class)->dispatchForDynamicGroup($group);
+    $counts = dgacDispatch($group);
 
     expect($counts[CacheDispatchResult::AlreadyCached->value])->toBe(1)
         ->and(DB::table('cached_content_file_dynamic_groups')->count())->toBe(0)
         ->and($file->fresh()->managed_by)->toBeNull();
 });
 
-// --- local media always wins (media-server match) ---
+it('clears dropped_at when a member returns to the group', function () {
+    [$playlist, $group] = dgacPlaylistWithGroup('vod', ['cache_enabled' => true, 'cache_keep_days' => 7]);
+    $channel = dgacChannel($playlist, 1);
+    dgacAttachMember($group, $channel, 0);
+    $file = dgacManagedFile($channel, $group, droppedAt: now()->subDays(3));
 
-it('skips a member whose item has an eligible media-server match', function () {
-    [$playlist, $group] = dgacPlaylistWithGroup('vod', ['cache_enabled' => true]);
-    $playlist->update(['prefer_media_server_sources' => true]);
+    dgacDispatch($group);
 
-    $matched = dgacChannel($playlist, 1);
-    dgacAttachMember($group, $matched, 0);
-    dgacMatchToMedia($playlist, $matched);
-
-    $counts = app(CachedContentDispatchService::class)->dispatchForDynamicGroup($group);
-
-    expect($counts[CacheDispatchResult::MediaServerAvailable->value])->toBe(1)
-        ->and($counts[CacheDispatchResult::Queued->value])->toBe(0)
-        ->and(CachedContentFile::count())->toBe(0)
-        ->and(DB::table('cached_content_file_dynamic_groups')->count())->toBe(0);
-    Bus::assertNotDispatched(DownloadCachedContentFile::class);
+    expect(dgacDroppedAt($file, $group))->toBeNull();
 });
 
-it('still queues a matched member when the playlist does not prefer media sources', function () {
-    [$playlist, $group] = dgacPlaylistWithGroup('vod', ['cache_enabled' => true]);
-    // Toggle stays off.
-
-    $matched = dgacChannel($playlist, 1);
-    dgacAttachMember($group, $matched, 0);
-    dgacMatchToMedia($playlist, $matched);
-
-    $counts = app(CachedContentDispatchService::class)->dispatchForDynamicGroup($group);
-
-    expect($counts[CacheDispatchResult::Queued->value])->toBe(1)
-        ->and($counts[CacheDispatchResult::MediaServerAvailable->value])->toBe(0);
-});
-
-it('manual dispatch still caches a media-matched item', function () {
-    $playlist = Playlist::factory()->create(['prefer_media_server_sources' => true]);
-    $matched = dgacChannel($playlist, 1);
-    dgacMatchToMedia($playlist, $matched);
-
-    $result = app(CachedContentDispatchService::class)->dispatch($matched);
-
-    expect($result)->toBe(CacheDispatchResult::Queued);
-    Bus::assertDispatched(DownloadCachedContentFile::class);
-});
-
-it('releases a managed in_group file whose item gained an eligible media match', function () {
+it('leaves a failed group-managed row alone, while manual dispatch re-queues it', function () {
     [$playlist, $group] = dgacPlaylistWithGroup('vod', ['cache_enabled' => true]);
     $channel = dgacChannel($playlist, 1);
-    $file = CachedContentFile::factory()->completed()->dynamicGroupManaged()->forItem($channel)->create();
-    dgacAttachPivot($file, $group, 'in_group');
-
-    // The item stays a member but gains an eligible media match.
-    $playlist->update(['prefer_media_server_sources' => true]);
-    dgacMatchToMedia($playlist, $channel);
-
-    expect(app(CachedContentRetentionService::class)->releaseDynamicGroupCaches())->toBe(1)
-        ->and(CachedContentFile::find($file->id))->toBeNull()
-        ->and($channel->exists)->toBeTrue(); // the member row itself is untouched
-});
-
-it('keeps a never_expire file whose item gained an eligible media match', function () {
-    [$playlist, $group] = dgacPlaylistWithGroup('vod', [
-        'cache_enabled' => true,
-        'cache_retention' => 'never_expire',
-    ]);
-    $channel = dgacChannel($playlist, 1);
-    $file = CachedContentFile::factory()->completed()->forItem($channel)->create(); // pinned
-    dgacAttachPivot($file, $group, 'never_expire');
-
-    $playlist->update(['prefer_media_server_sources' => true]);
-    dgacMatchToMedia($playlist, $channel);
-
-    expect(app(CachedContentRetentionService::class)->releaseDynamicGroupCaches())->toBe(0)
-        ->and($file->fresh())->not->toBeNull();
-});
-
-// --- dispatch(automatic: true) cooldown / adoption ---
-
-it('returns CoolingDown for a recently failed managed row on the automatic path', function () {
-    [$playlist, $group] = dgacPlaylistWithGroup('vod', ['cache_enabled' => true]);
-    $channel = dgacChannel($playlist, 1);
-    CachedContentFile::factory()->failed()->dynamicGroupManaged()->forItem($channel)->create([
-        'last_failed_at' => now()->subHour(),
-    ]);
+    CachedContentFile::factory()->failed()->dynamicGroupManaged()->forItem($channel)->create();
     dgacAttachMember($group, $channel, 0);
 
-    $counts = app(CachedContentDispatchService::class)->dispatchForDynamicGroup($group);
-
-    expect($counts[CacheDispatchResult::CoolingDown->value])->toBe(1)
-        ->and($counts[CacheDispatchResult::Queued->value])->toBe(0);
+    expect(dgacDispatch($group)[CacheDispatchResult::Queued->value])->toBe(0);
     Bus::assertNotDispatched(DownloadCachedContentFile::class);
-});
 
-it('re-queues a failed managed row once the cooldown has elapsed', function () {
-    [$playlist, $group] = dgacPlaylistWithGroup('vod', ['cache_enabled' => true]);
-    $channel = dgacChannel($playlist, 1);
-    CachedContentFile::factory()->failed()->dynamicGroupManaged()->forItem($channel)->create([
-        'last_failed_at' => now()->subDays(2),
-    ]);
-    dgacAttachMember($group, $channel, 0);
-
-    $counts = app(CachedContentDispatchService::class)->dispatchForDynamicGroup($group);
-
-    expect($counts[CacheDispatchResult::Queued->value])->toBe(1);
+    expect(app(CachedContentDispatchService::class)->dispatch($channel))->toBe(CacheDispatchResult::Queued);
     Bus::assertDispatched(DownloadCachedContentFile::class);
 });
 
-it('re-queues a recently failed row immediately on the manual path', function () {
+it('makes a group-managed row manual on manual dispatch', function () {
     $playlist = Playlist::factory()->create();
     $channel = dgacChannel($playlist, 1);
-    CachedContentFile::factory()->failed()->dynamicGroupManaged()->forItem($channel)->create([
-        'last_failed_at' => now()->subHour(),
-    ]);
-
-    $result = app(CachedContentDispatchService::class)->dispatch($channel);
-
-    expect($result)->toBe(CacheDispatchResult::Queued);
-    Bus::assertDispatched(DownloadCachedContentFile::class);
-});
-
-it('pins never_expire files by clearing the managed flag after attaching', function () {
-    [$playlist, $group] = dgacPlaylistWithGroup('vod', [
-        'cache_enabled' => true,
-        'cache_retention' => 'never_expire',
-    ]);
-    dgacAttachMember($group, dgacChannel($playlist, 1), 0);
-
-    app(CachedContentDispatchService::class)->dispatchForDynamicGroup($group);
-
-    $file = CachedContentFile::sole();
-    expect($file->managed_by)->toBeNull();
-
-    $pivot = DB::table('cached_content_file_dynamic_groups')->where('cached_content_file_id', $file->id)->first();
-    expect($pivot)->not->toBeNull()
-        ->and($pivot->retention)->toBe('never_expire')
-        ->and($pivot->dynamic_group_id)->toBe($group->id);
-});
-
-it('adopts a managed row on manual dispatch', function () {
-    $playlist = Playlist::factory()->create();
-    $channel = dgacChannel($playlist, 1);
-    $file = CachedContentFile::factory()->forItem($channel)->create([
-        'managed_by' => CachedContentManagedBy::DynamicGroup,
-    ]);
+    $file = CachedContentFile::factory()->dynamicGroupManaged()->forItem($channel)->create();
 
     $result = app(CachedContentDispatchService::class)->dispatch($channel);
 
@@ -407,208 +296,167 @@ it('adopts a managed row on manual dispatch', function () {
         ->and($file->fresh()->managed_by)->toBeNull();
 });
 
-// --- retention: releaseDynamicGroupCaches() ---
+// --- local media wins ---
 
-it('releases an in_group file once its channel leaves the group', function () {
+it('skips a member that is on the media server', function () {
+    [$playlist, $group] = dgacPlaylistWithGroup('vod', ['cache_enabled' => true]);
+    $playlist->update(['prefer_media_server_sources' => true]);
+    $matched = dgacChannel($playlist, 1);
+    dgacAttachMember($group, $matched, 0);
+    dgacMatchToMedia($playlist, $matched);
+
+    expect(dgacDispatch($group)[CacheDispatchResult::Queued->value])->toBe(0)
+        ->and(CachedContentFile::count())->toBe(0);
+    Bus::assertNotDispatched(DownloadCachedContentFile::class);
+});
+
+it('still queues a matched member when the playlist does not prefer media sources', function () {
+    [$playlist, $group] = dgacPlaylistWithGroup('vod', ['cache_enabled' => true]);
+    $matched = dgacChannel($playlist, 1);
+    dgacAttachMember($group, $matched, 0);
+    dgacMatchToMedia($playlist, $matched);
+
+    expect(dgacDispatch($group)[CacheDispatchResult::Queued->value])->toBe(1);
+});
+
+it('manual dispatch still caches a media-matched item', function () {
+    $playlist = Playlist::factory()->create(['prefer_media_server_sources' => true]);
+    $matched = dgacChannel($playlist, 1);
+    dgacMatchToMedia($playlist, $matched);
+
+    expect(app(CachedContentDispatchService::class)->dispatch($matched))->toBe(CacheDispatchResult::Queued);
+});
+
+it('releases a group copy once the member appears on the media server', function () {
     [$playlist, $group] = dgacPlaylistWithGroup('vod', ['cache_enabled' => true]);
     $channel = dgacChannel($playlist, 1);
     dgacAttachMember($group, $channel, 0);
+    $file = dgacManagedFile($channel, $group);
 
-    $file = CachedContentFile::factory()->completed()->dynamicGroupManaged()->forItem($channel)->create();
-    Storage::disk(CachedContentFile::DISK)->put($file->file_path, 'bytes');
-    dgacAttachPivot($file, $group, 'in_group');
+    $playlist->update(['prefer_media_server_sources' => true]);
+    dgacMatchToMedia($playlist, $channel);
+    dgacDispatch($group);
 
-    // Channel leaves the membership.
-    DB::table('dynamic_group_items')->where('dynamic_group_id', $group->id)->delete();
-
-    $deleted = app(CachedContentRetentionService::class)->releaseDynamicGroupCaches();
-
-    expect($deleted)->toBe(1)
-        ->and(CachedContentFile::find($file->id))->toBeNull()
-        ->and(Storage::disk(CachedContentFile::DISK)->exists($file->file_path))->toBeFalse();
-});
-
-it('keeps an in_group file while its channel is still a member', function () {
-    [$playlist, $group] = dgacPlaylistWithGroup('vod', ['cache_enabled' => true]);
-    $channel = dgacChannel($playlist, 1);
-    dgacAttachMember($group, $channel, 0);
-
-    $file = CachedContentFile::factory()->completed()->dynamicGroupManaged()->forItem($channel)->create();
-    dgacAttachPivot($file, $group, 'in_group');
-
-    expect(app(CachedContentRetentionService::class)->releaseDynamicGroupCaches())->toBe(0)
-        ->and($file->fresh())->not->toBeNull();
-});
-
-it('honors the in_group_plus_days grace period', function () {
-    [$playlist, $group] = dgacPlaylistWithGroup('vod', [
-        'cache_enabled' => true,
-        'cache_retention' => 'in_group_plus_days',
-        'cache_retention_days' => 7,
-    ]);
-    $channel = dgacChannel($playlist, 1);
-    $file = CachedContentFile::factory()->completed()->dynamicGroupManaged()->forItem($channel)->create();
-    dgacAttachPivot($file, $group, 'in_group_plus_days', 7, now()->subDays(3)->format('Y-m-d H:i:s'));
-
-    expect(app(CachedContentRetentionService::class)->releaseDynamicGroupCaches())->toBe(0)
-        ->and($file->fresh())->not->toBeNull();
-
-    DB::table('cached_content_file_dynamic_groups')
-        ->where('cached_content_file_id', $file->id)
-        ->update(['dropped_at' => now()->subDays(8)->format('Y-m-d H:i:s')]);
-
-    expect(app(CachedContentRetentionService::class)->releaseDynamicGroupCaches())->toBe(1)
+    expect(dgacRelease())->toBe(1)
         ->and(CachedContentFile::find($file->id))->toBeNull();
 });
 
-it('keeps a never_expire file after the item left and the group was deleted', function () {
-    [$playlist, $group] = dgacPlaylistWithGroup('vod', [
-        'cache_enabled' => true,
-        'cache_retention' => 'never_expire',
-    ]);
+// --- releaseDynamicGroupCaches() ---
+
+it('releases a file once its channel leaves the group, and keeps it while a member', function () {
+    [$playlist, $group] = dgacPlaylistWithGroup('vod', ['cache_enabled' => true]);
+    $stays = dgacChannel($playlist, 1);
+    $leaves = dgacChannel($playlist, 2);
+    dgacAttachMember($group, $stays, 0);
+    $kept = dgacManagedFile($stays, $group);
+    $released = dgacManagedFile($leaves, $group);
+
+    expect(dgacRelease())->toBe(1)
+        ->and($kept->fresh())->not->toBeNull()
+        ->and(CachedContentFile::find($released->id))->toBeNull()
+        ->and(Storage::disk(CachedContentFile::DISK)->exists($released->file_path))->toBeFalse();
+});
+
+it('keeps a file for cache_keep_days after it leaves the group', function () {
+    [$playlist, $group] = dgacPlaylistWithGroup('vod', ['cache_enabled' => true, 'cache_keep_days' => 7]);
+    $file = dgacManagedFile(dgacChannel($playlist, 1), $group);
+
+    expect(dgacRelease())->toBe(0)
+        ->and(dgacDroppedAt($file, $group))->not->toBeNull();
+
+    Carbon::setTestNow(now()->addDays(6));
+    expect(dgacRelease())->toBe(0);
+
+    Carbon::setTestNow(now()->addDays(2));
+    expect(dgacRelease())->toBe(1)
+        ->and(CachedContentFile::find($file->id))->toBeNull();
+});
+
+it('releases files outside the top N or of disabled members', function () {
+    [$playlist, $group] = dgacPlaylistWithGroup('vod', ['cache_enabled' => true, 'cache_max_items' => 1]);
+    dgacAttachMember($group, $top = dgacChannel($playlist, 1), 0);
+    dgacAttachMember($group, $second = dgacChannel($playlist, 2), 1);
+    dgacAttachMember($group, $disabled = dgacChannel($playlist, 3, ['enabled' => false]), 2);
+    $kept = dgacManagedFile($top, $group);
+    dgacManagedFile($second, $group);
+    dgacManagedFile($disabled, $group);
+
+    expect(dgacRelease())->toBe(2)
+        ->and(CachedContentFile::sole()->id)->toBe($kept->id);
+});
+
+it('releases older-season episodes once a series gets a new season', function () {
+    [$playlist, $group] = dgacPlaylistWithGroup('series', ['cache_enabled' => true]);
+    $series = dgacSeries($playlist);
+    dgacAttachMember($group, $series, 0);
+    $oldSeason = dgacManagedFile(dgacEpisode($series, 1, 1), $group);
+
+    expect(dgacRelease())->toBe(0);
+
+    $newSeason = dgacManagedFile(dgacEpisode($series, 2, 1), $group);
+
+    expect(dgacRelease())->toBe(1)
+        ->and(CachedContentFile::find($oldSeason->id))->toBeNull()
+        ->and($newSeason->fresh())->not->toBeNull();
+});
+
+it('releases files once caching is turned off on the rule', function () {
+    [$playlist, $group] = dgacPlaylistWithGroup('vod', ['cache_enabled' => true]);
     $channel = dgacChannel($playlist, 1);
-    $file = CachedContentFile::factory()->completed()->forItem($channel)->create(); // pinned: not managed
-    dgacAttachPivot($file, $group, 'never_expire');
+    dgacAttachMember($group, $channel, 0);
+    $file = dgacManagedFile($channel, $group);
 
-    // Query-builder delete, matching SyncDynamicGroups' stale cleanup.
-    DynamicGroup::whereKey($group->id)->delete();
+    $config = $playlist->fresh()->dynamic_groups_config;
+    $config[0]['cache_enabled'] = false;
+    $playlist->update(['dynamic_groups_config' => $config]);
 
-    expect(app(CachedContentRetentionService::class)->releaseDynamicGroupCaches())->toBe(0)
-        ->and($file->fresh())->not->toBeNull()
-        ->and(DB::table('cached_content_file_dynamic_groups')->where('cached_content_file_id', $file->id)->count())->toBe(1);
+    expect(dgacRelease())->toBe(1)
+        ->and(CachedContentFile::find($file->id))->toBeNull();
 });
 
 it('keeps a managed file while another group still holds it', function () {
     [$playlist, $groupA] = dgacPlaylistWithGroup('vod', ['cache_enabled' => true]);
-
-    $ruleB = [
-        'enabled' => true,
-        'type' => 'vod',
-        'source' => 'trending',
-        'name' => 'Second Group',
-        'tmdb_params' => [],
-        'cache_enabled' => true,
-    ];
-    $config = $playlist->fresh()->dynamic_groups_config;
-    $config[] = $ruleB;
-    $playlist->update(['dynamic_groups_config' => $config]);
-
-    $groupB = DynamicGroup::factory()->for($playlist)->create([
-        'user_id' => $playlist->user_id,
-        'type' => 'vod',
-        'source' => 'trending',
-        'name' => 'Second Group',
-    ]);
-
+    [, $groupB] = dgacPlaylistWithGroup('vod', ['cache_enabled' => true], name: 'Second Group', playlist: $playlist);
     $channel = dgacChannel($playlist, 1);
-    $file = CachedContentFile::factory()->completed()->dynamicGroupManaged()->forItem($channel)->create();
-    dgacAttachPivot($file, $groupA, 'in_group');
-    dgacAttachPivot($file, $groupB, 'in_group');
-
-    // Channel leaves only group A.
-    DB::table('dynamic_group_items')->where('dynamic_group_id', $groupA->id)->delete();
     dgacAttachMember($groupB, $channel, 0);
+    $file = dgacManagedFile($channel, $groupA);
+    $file->dynamicGroups()->attach($groupB->id);
 
-    expect(app(CachedContentRetentionService::class)->releaseDynamicGroupCaches())->toBe(0)
-        ->and($file->fresh())->not->toBeNull();
+    expect(dgacRelease())->toBe(0)
+        ->and($file->fresh())->not->toBeNull()
+        ->and($file->dynamicGroups()->pluck('dynamic_groups.id')->all())->toBe([$groupB->id]);
 });
 
-it('starts the grace period for NULL-group rows and releases them after it', function () {
-    [$playlist, $group] = dgacPlaylistWithGroup('vod', [
-        'cache_enabled' => true,
-        'cache_retention' => 'in_group_plus_days',
-        'cache_retention_days' => 7,
-    ]);
-    $channel = dgacChannel($playlist, 1);
-    $file = CachedContentFile::factory()->completed()->dynamicGroupManaged()->forItem($channel)->create();
-    Storage::disk(CachedContentFile::DISK)->put($file->file_path, 'bytes');
-    dgacAttachPivot($file, $group, 'in_group_plus_days', 7);
-
-    DynamicGroup::whereKey($group->id)->delete();
-
-    // First sweep: the NULL-group row is stamped but inside the grace period.
-    expect(app(CachedContentRetentionService::class)->releaseDynamicGroupCaches())->toBe(0)
-        ->and($file->fresh())->not->toBeNull();
-
-    Carbon::setTestNow(now()->addDays(3));
-    expect(app(CachedContentRetentionService::class)->releaseDynamicGroupCaches())->toBe(0)
-        ->and($file->fresh())->not->toBeNull();
-
-    Carbon::setTestNow(now()->addDays(5)); // 8 days since the stamp
-    expect(app(CachedContentRetentionService::class)->releaseDynamicGroupCaches())->toBe(1)
-        ->and(CachedContentFile::find($file->id))->toBeNull();
-});
-
-it('gives NULL-group in_group rows a 24h floor before releasing them', function () {
-    [$playlist, $group] = dgacPlaylistWithGroup('vod', ['cache_enabled' => true]);
-    $channel = dgacChannel($playlist, 1);
-    $file = CachedContentFile::factory()->completed()->dynamicGroupManaged()->forItem($channel)->create();
-    Storage::disk(CachedContentFile::DISK)->put($file->file_path, 'bytes');
-    dgacAttachPivot($file, $group, 'in_group');
-
-    DynamicGroup::whereKey($group->id)->delete();
-
-    // First sweep stamps the NULL-group row but the 24h floor keeps the
-    // file — the group may just be between the 03:00 sweep and the 04:15
-    // refresh that would re-create it and re-adopt the file.
-    expect(app(CachedContentRetentionService::class)->releaseDynamicGroupCaches())->toBe(0)
-        ->and($file->fresh())->not->toBeNull();
-
-    Carbon::setTestNow(now()->addHours(25));
-    expect(app(CachedContentRetentionService::class)->releaseDynamicGroupCaches())->toBe(1)
-        ->and(CachedContentFile::find($file->id))->toBeNull();
-});
-
-it('still releases a live group\'s in_group rows on the first sweep', function () {
-    // The 24h floor applies only to NULL-group rows; a live group dropping
-    // a member releases the file on the very next sweep.
-    [$playlist, $group] = dgacPlaylistWithGroup('vod', ['cache_enabled' => true]);
-    $channel = dgacChannel($playlist, 1);
-    $file = CachedContentFile::factory()->completed()->dynamicGroupManaged()->forItem($channel)->create();
-    dgacAttachPivot($file, $group, 'in_group');
-
-    // Member leaves but the group stays alive.
-    DB::table('dynamic_group_items')->where('dynamic_group_id', $group->id)->delete();
-
-    expect(app(CachedContentRetentionService::class)->releaseDynamicGroupCaches())->toBe(1)
-        ->and(CachedContentFile::find($file->id))->toBeNull();
-});
-
-it('neither stamps nor releases NULL-group rows while TMDB is unconfigured', function () {
-    dgacSettings(true, tmdbApiKey: null);
-
-    [$playlist, $group] = dgacPlaylistWithGroup('vod', ['cache_enabled' => true]);
-    $channel = dgacChannel($playlist, 1);
-    $file = CachedContentFile::factory()->completed()->dynamicGroupManaged()->forItem($channel)->create();
-    dgacAttachPivot($file, $group, 'in_group');
-
-    DynamicGroup::whereKey($group->id)->delete();
-
-    expect(app(CachedContentRetentionService::class)->releaseDynamicGroupCaches())->toBe(0)
-        ->and($file->fresh())->not->toBeNull();
-
-    $pivot = DB::table('cached_content_file_dynamic_groups')->where('cached_content_file_id', $file->id)->first();
-    expect($pivot->dynamic_group_id)->toBeNull()
-        ->and($pivot->dropped_at)->toBeNull();
-});
-
-it('keeps a renamed group\'s adopted file and releases only the old NULL-group row', function () {
+it('releases a deleted group\'s files at the next cleanup', function () {
     [$playlist, $group] = dgacPlaylistWithGroup('vod', ['cache_enabled' => true]);
     $channel = dgacChannel($playlist, 1);
     dgacAttachMember($group, $channel, 0);
+    $file = dgacManagedFile($channel, $group);
 
-    $file = CachedContentFile::factory()->completed()->dynamicGroupManaged()->forItem($channel)->create();
-    Storage::disk(CachedContentFile::DISK)->put($file->file_path, 'bytes');
-    dgacAttachPivot($file, $group, 'in_group');
-
-    // The rule is renamed: the old group is deleted by stale cleanup and a
-    // new group materializes with the new name.
+    // Query-builder delete, matching SyncDynamicGroups' stale cleanup.
     DynamicGroup::whereKey($group->id)->delete();
 
+    expect(dgacRelease())->toBe(1)
+        ->and(CachedContentFile::find($file->id))->toBeNull();
+});
+
+it('holds a renamed rule\'s files until its new group re-links them', function () {
+    [$playlist, $group] = dgacPlaylistWithGroup('vod', ['cache_enabled' => true]);
+    $channel = dgacChannel($playlist, 1);
+    dgacAttachMember($group, $channel, 0);
+    $file = dgacManagedFile($channel, $group);
+
+    // Renamed in the playlist form; the old group survives until the next sync.
     $config = $playlist->fresh()->dynamic_groups_config;
     $config[0]['name'] = 'Renamed Group';
     $playlist->update(['dynamic_groups_config' => $config]);
 
+    // The 03:00 cleanup runs before the 04:15 refresh.
+    expect(dgacRelease())->toBe(0)
+        ->and($file->fresh())->not->toBeNull();
+
+    // The refresh materializes the renamed group, links the file, and
+    // deletes the old group.
     $renamed = DynamicGroup::factory()->for($playlist)->create([
         'user_id' => $playlist->user_id,
         'type' => 'vod',
@@ -616,66 +464,43 @@ it('keeps a renamed group\'s adopted file and releases only the old NULL-group r
         'name' => 'Renamed Group',
     ]);
     dgacAttachMember($renamed, $channel, 0);
+    expect(dgacDispatch($renamed)[CacheDispatchResult::AlreadyCached->value])->toBe(1);
+    DynamicGroup::whereKey($group->id)->delete();
 
-    // The fan-out adopts the old group's file: AlreadyCached + re-attach.
-    $counts = app(CachedContentDispatchService::class)->dispatchForDynamicGroup($renamed);
+    Carbon::setTestNow(now()->addDays(2));
+    expect(dgacRelease())->toBe(0)
+        ->and($file->dynamicGroups()->pluck('dynamic_groups.id')->all())->toBe([$renamed->id]);
+});
 
-    expect($counts[CacheDispatchResult::AlreadyCached->value])->toBe(1);
+it('releases a removed rule\'s files after a day', function () {
+    [$playlist, $group] = dgacPlaylistWithGroup('vod', ['cache_enabled' => true]);
+    $file = dgacManagedFile(dgacChannel($playlist, 1), $group);
+    $playlist->update(['dynamic_groups_config' => []]);
 
-    // First sweep: the NULL-group row is stamped but the 24h floor keeps
-    // it; the file is kept either way — the renamed group holds it.
-    expect(app(CachedContentRetentionService::class)->releaseDynamicGroupCaches())->toBe(0)
-        ->and($file->fresh())->not->toBeNull();
+    expect(dgacRelease())->toBe(0);
 
-    $pivotGroupIds = DB::table('cached_content_file_dynamic_groups')
-        ->where('cached_content_file_id', $file->id)
-        ->pluck('dynamic_group_id')
-        ->all();
-    expect($pivotGroupIds)->toContain($renamed->id)
-        ->toContain(null);
-
-    // After the floor elapses, the old NULL-group row is released under its
-    // own snapshot while the adopted file survives on the renamed group's row.
-    Carbon::setTestNow(now()->addHours(25));
-    expect(app(CachedContentRetentionService::class)->releaseDynamicGroupCaches())->toBe(0)
-        ->and($file->fresh())->not->toBeNull();
-
-    $remainingPivots = DB::table('cached_content_file_dynamic_groups')
-        ->where('cached_content_file_id', $file->id)
-        ->pluck('dynamic_group_id')
-        ->all();
-    expect($remainingPivots)->toBe([$renamed->id]);
+    Carbon::setTestNow(now()->addDay()->addMinute());
+    expect(dgacRelease())->toBe(1)
+        ->and(CachedContentFile::find($file->id))->toBeNull();
 });
 
 it('never deletes a manual file via group retention', function () {
     [$playlist, $group] = dgacPlaylistWithGroup('vod', ['cache_enabled' => true]);
-    $channel = dgacChannel($playlist, 1);
-    dgacAttachMember($group, $channel, 0);
+    $file = CachedContentFile::factory()->completed()->forItem(dgacChannel($playlist, 1))->create();
+    $file->dynamicGroups()->attach($group->id);
 
-    $file = CachedContentFile::factory()->completed()->forItem($channel)->create(); // manual
-    dgacAttachPivot($file, $group, 'in_group');
-
-    DB::table('dynamic_group_items')->where('dynamic_group_id', $group->id)->delete();
-
-    expect(app(CachedContentRetentionService::class)->releaseDynamicGroupCaches())->toBe(0)
+    expect(dgacRelease())->toBe(0)
         ->and($file->fresh())->not->toBeNull();
 });
 
 it('never deletes Pending or Downloading files', function () {
     [$playlist, $group] = dgacPlaylistWithGroup('vod', ['cache_enabled' => true]);
+    $pending = CachedContentFile::factory()->dynamicGroupManaged()->forItem(dgacChannel($playlist, 1))->create();
+    $downloading = CachedContentFile::factory()->downloading()->dynamicGroupManaged()->forItem(dgacChannel($playlist, 2))->create();
+    $pending->dynamicGroups()->attach($group->id);
+    $downloading->dynamicGroups()->attach($group->id);
 
-    $pendingChannel = dgacChannel($playlist, 1);
-    $pending = CachedContentFile::factory()->dynamicGroupManaged()->forItem($pendingChannel)->create();
-    dgacAttachPivot($pending, $group, 'in_group');
-
-    $downloadingChannel = dgacChannel($playlist, 2);
-    $downloading = CachedContentFile::factory()->downloading()->dynamicGroupManaged()->forItem($downloadingChannel)->create();
-    dgacAttachPivot($downloading, $group, 'in_group');
-
-    // Everything left the group's scope.
-    DB::table('dynamic_group_items')->where('dynamic_group_id', $group->id)->delete();
-
-    expect(app(CachedContentRetentionService::class)->releaseDynamicGroupCaches())->toBe(0)
+    expect(dgacRelease())->toBe(0)
         ->and($pending->fresh())->not->toBeNull()
         ->and($downloading->fresh())->not->toBeNull();
 });

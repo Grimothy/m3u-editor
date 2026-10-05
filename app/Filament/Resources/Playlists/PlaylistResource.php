@@ -3706,13 +3706,8 @@ class PlaylistResource extends Resource implements CopilotResource
     }
 
     /**
-     * Per-rule cache options appended to getDynamicGroupRuleSchema() inside
-     * the `dynamic_groups_config` Repeater on the Playlist form ONLY — per
-     * the docblock above, these fields intentionally do not ship on the
-     * VOD / Series Dynamic Groups listing CreateAction.
-     *
-     * All options default to off; the global `enable_cache` setting still
-     * gates everything at dispatch time.
+     * Per-rule auto-cache options, appended to getDynamicGroupRuleSchema()
+     * on the Playlist form only (not the Dynamic Groups listing CreateAction).
      *
      * @return array<int, Component>
      */
@@ -3723,7 +3718,7 @@ class PlaylistResource extends Resource implements CopilotResource
                 ->columnSpanFull()
                 ->columns(12)
                 ->schema([
-                    Toggle::make(DynamicGroup::CACHE_ENABLED_KEY)
+                    Toggle::make('cache_enabled')
                         ->label(__('Cache group members'))
                         ->hintIcon(
                             'heroicon-m-question-mark-circle',
@@ -3735,42 +3730,26 @@ class PlaylistResource extends Resource implements CopilotResource
                         ->live()
                         ->default(false)
                         ->inline(false)
-                        ->columnSpan(2),
-                    Select::make(DynamicGroup::CACHE_RETENTION_KEY)
-                        ->label(__('Retention'))
-                        ->options([
-                            'in_group' => __('While in group'),
-                            'in_group_plus_days' => __('While in group + N days'),
-                            'never_expire' => __('Never expire'),
-                        ])
-                        ->default('in_group')
-                        ->live()
-                        ->visible(fn (Get $get): bool => (bool) $get(DynamicGroup::CACHE_ENABLED_KEY))
                         ->columnSpan(4),
-                    TextInput::make(DynamicGroup::CACHE_RETENTION_DAYS_KEY)
-                        ->label(__('Extra days'))
+                    TextInput::make('cache_keep_days')
+                        ->label(__('Keep after leaving (days)'))
+                        ->hintIcon(
+                            'heroicon-m-question-mark-circle',
+                            tooltip: __('How long a cached item is kept after it leaves the group. 0 removes it at the next daily cleanup.'),
+                        )
                         ->numeric()
-                        ->minValue(1)
-                        ->default(7)
-                        ->visible(fn (Get $get): bool => (bool) $get(DynamicGroup::CACHE_ENABLED_KEY)
-                            && $get(DynamicGroup::CACHE_RETENTION_KEY) === 'in_group_plus_days')
-                        ->columnSpan(2),
-                    TextInput::make(DynamicGroup::CACHE_MAX_ITEMS_KEY)
+                        ->minValue(0)
+                        ->default(0)
+                        ->visible(fn (Get $get): bool => (bool) $get('cache_enabled'))
+                        ->columnSpan(4),
+                    TextInput::make('cache_max_items')
                         ->label(__('Top N members'))
                         ->numeric()
                         ->minValue(1)
+                        ->default(20)
                         ->placeholder(__('No limit'))
-                        ->visible(fn (Get $get): bool => (bool) $get(DynamicGroup::CACHE_ENABLED_KEY))
-                        ->columnSpan(2),
-                    TextInput::make(DynamicGroup::CACHE_MAX_GB_KEY)
-                        ->label(__('Max size'))
-                        ->numeric()
-                        ->minValue(0.1)
-                        ->step(0.1)
-                        ->placeholder(__('No limit'))
-                        ->suffix('GB')
-                        ->visible(fn (Get $get): bool => (bool) $get(DynamicGroup::CACHE_ENABLED_KEY))
-                        ->columnSpan(2),
+                        ->visible(fn (Get $get): bool => (bool) $get('cache_enabled'))
+                        ->columnSpan(4),
                 ]),
         ];
     }
