@@ -213,6 +213,41 @@ it('stops tracking a movie on Cache Now so cleanup keeps it', function () {
 
 // --- Cleanup ---
 
+it('adds a movie, then removes it once it has been out of every group for the keep days', function () {
+    $channel = accChannel($this->playlist, 550);
+    $group = accGroup($this->playlist, 'Trending', [$channel], ['cache_keep_days' => 2]);
+    Http::fake([
+        'radarr.test/api/v3/movie/lookup*' => Http::response([['tmdbId' => 550, 'title' => 'Fight Club', 'titleSlug' => 'fight-club', 'images' => []]]),
+        'radarr.test/api/v3/movie/42*' => Http::response(['id' => 42, 'tmdbId' => 550, 'title' => 'Fight Club']),
+        'radarr.test/api/v3/movie' => Http::response(['id' => 42]),
+    ]);
+
+    // A group refresh sends the movie to Radarr.
+    app(CachedContentDispatchService::class)->dispatchForDynamicGroup($group);
+
+    // Still in the group: the nightly run keeps it.
+    $this->artisan('cache:cleanup')->assertSuccessful();
+    expect(ArrCacheMovie::query()->sole()->left_at)->toBeNull();
+
+    // A later refresh drops it from the group.
+    $group->channels()->detach($channel->id);
+    $this->travel(1)->days();
+    $this->artisan('cache:cleanup')->assertSuccessful();
+    $this->travel(1)->days();
+    $this->artisan('cache:cleanup')->assertSuccessful();
+    expect(accDeletes())->toBe(0);
+
+    $this->travel(25)->hours();
+    $this->artisan('cache:cleanup')
+        ->expectsOutputToContain('Removed 1 dynamic-group movies from Radarr.')
+        ->assertSuccessful();
+
+    Http::assertSent(fn (Request $request): bool => $request->method() === 'DELETE'
+        && $request->url() === 'http://radarr.test/api/v3/movie/42?deleteFiles=true&addImportExclusion=false');
+    expect(accDeletes())->toBe(1)
+        ->and(ArrCacheMovie::query()->count())->toBe(0);
+});
+
 it('removes a tracked movie once it has been out of every group for the longest keep days', function () {
     accGroup($this->playlist, 'Trending', [accChannel($this->playlist, 999)], ['cache_keep_days' => 3]);
     accGroup($this->playlist, 'Popular', [], ['cache_keep_days' => 5]);
