@@ -6,6 +6,7 @@ use App\Enums\CachedContentFileStatus;
 use App\Enums\CachedContentManagedBy;
 use App\Enums\CacheDispatchResult;
 use App\Jobs\DownloadCachedContentFile;
+use App\Models\ArrCacheMovie;
 use App\Models\CachedContentFile;
 use App\Models\Channel;
 use App\Models\DynamicGroup;
@@ -77,10 +78,9 @@ class CachedContentDispatchService
      * makes it manual, so group retention never deletes it.
      *
      * `$viaArr` false keeps the provider even when a caching Radarr/Sonarr
-     * is set up. `$arrCleanup` records a movie added to Radarr so cleanup can
-     * remove it after it leaves its dynamic groups.
+     * is set up.
      */
-    public function dispatch(Channel|Episode $item, bool $automatic = false, bool $viaArr = true, bool $arrCleanup = false): CacheDispatchResult
+    public function dispatch(Channel|Episode $item, bool $automatic = false, bool $viaArr = true): CacheDispatchResult
     {
         if (! $this->isEnabled()) {
             return CacheDispatchResult::Disabled;
@@ -118,7 +118,7 @@ class CachedContentDispatchService
             return CacheDispatchResult::AlreadyCached;
         }
 
-        $sent = $viaArr ? $this->arr->request($item, $automatic, $arrCleanup) : null;
+        $sent = $viaArr ? $this->arr->request($item, $automatic) : null;
         if ($sent !== null) {
             return $sent;
         }
@@ -240,7 +240,8 @@ class CachedContentDispatchService
      * season of each series member, top-ranked first. Members already on
      * the user's media server are skipped (local media wins), and a copy
      * the group cached before the match appeared is marked dropped so
-     * retention releases it.
+     * retention releases it. A Never expire rule also keeps its movies out
+     * of Radarr cleanup, like Cache Now.
      *
      * @return array<string, int> keyed by CacheDispatchResult value
      */
@@ -261,7 +262,11 @@ class CachedContentDispatchService
             $member->setRelation('playlist', $playlist);
 
             if ($member instanceof Channel) {
-                $this->dispatchGroupItem($member, $group, $settings, $counts);
+                $this->dispatchGroupItem($member, $group, $settings['never_expire'], $counts);
+
+                if ($settings['never_expire']) {
+                    ArrCacheMovie::keep($playlist->user_id, (int) $member->getTmdbId());
+                }
 
                 continue;
             }
@@ -270,7 +275,7 @@ class CachedContentDispatchService
                 $episode->setRelation('series', $member);
                 $episode->setRelation('playlist', $playlist);
 
-                $this->dispatchGroupItem($episode, $group, $settings, $counts);
+                $this->dispatchGroupItem($episode, $group, $settings['never_expire'], $counts);
             }
         }
 
@@ -283,10 +288,9 @@ class CachedContentDispatchService
      * A Never expire rule keeps the file instead, like Cache Now. Manual
      * files and copies shared from another playlist are never linked.
      *
-     * @param  array{never_expire: bool, arr_cleanup: bool}  $settings  from DynamicGroup::cacheSettings()
      * @param  array<string, int>  $counts
      */
-    private function dispatchGroupItem(Channel|Episode $item, DynamicGroup $group, array $settings, array &$counts): void
+    private function dispatchGroupItem(Channel|Episode $item, DynamicGroup $group, bool $neverExpire, array &$counts): void
     {
         if (app(MediaSourcePreferenceService::class)->hasEligibleMatch($item)) {
             $item->cachedContentFile()->first()?->dynamicGroups()
@@ -296,14 +300,14 @@ class CachedContentDispatchService
             return;
         }
 
-        $counts[$this->dispatch($item, automatic: true, arrCleanup: $settings['arr_cleanup'])->value]++;
+        $counts[$this->dispatch($item, automatic: true)->value]++;
 
         $file = $item->cachedContentFile()->first();
         if ($file?->managed_by !== CachedContentManagedBy::DynamicGroup) {
             return;
         }
 
-        if ($settings['never_expire']) {
+        if ($neverExpire) {
             $file->keep();
 
             return;

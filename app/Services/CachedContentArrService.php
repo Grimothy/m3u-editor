@@ -26,9 +26,9 @@ use Throwable;
  * provider (so running Cache Now again gets past an arr that can't find
  * it), while dynamic-group auto-cache leaves it to the arr.
  *
- * Movies a dynamic-group rule with "Remove from Radarr after leaving" adds
- * are recorded (ArrCacheMovie) for ArrCacheCleanupService to remove later.
- * Cache Now on one stops tracking it.
+ * Movies dynamic-group auto-cache adds to a Radarr with "Remove after
+ * leaving dynamic groups" on are recorded (ArrCacheMovie) for
+ * ArrCacheCleanupService to remove later. Cache Now on one stops that.
  *
  * Methods return null (or false) when the provider should be used instead,
  * including when the arr is unreachable or rejects the title.
@@ -55,13 +55,12 @@ class CachedContentArrService
     /**
      * Send one movie (Radarr) or episode (Sonarr). An automatic episode adds
      * its series with only that season monitored; a manual one asks Sonarr
-     * for that episode alone. `$cleanup` records a movie Radarr didn't have
-     * so ArrCacheCleanupService can remove it after it leaves its groups.
+     * for that episode alone.
      */
-    public function request(Channel|Episode $item, bool $automatic, bool $cleanup = false): ?CacheDispatchResult
+    public function request(Channel|Episode $item, bool $automatic): ?CacheDispatchResult
     {
         return $item instanceof Channel
-            ? $this->requestMovie($item, $automatic, $cleanup)
+            ? $this->requestMovie($item, $automatic)
             : $this->requestEpisode($item, $automatic);
     }
 
@@ -77,7 +76,7 @@ class CachedContentArrService
         return $this->seriesState($series, $series->playlist, $seasons)['added'] ?? false;
     }
 
-    private function requestMovie(Channel $channel, bool $automatic, bool $cleanup): ?CacheDispatchResult
+    private function requestMovie(Channel $channel, bool $automatic): ?CacheDispatchResult
     {
         $radarr = $this->integration($channel->playlist, 'radarr');
         $tmdbId = (int) $channel->getTmdbId();
@@ -86,7 +85,7 @@ class CachedContentArrService
         }
 
         if (! $automatic) {
-            ArrCacheMovie::keep($radarr->id, $tmdbId);
+            ArrCacheMovie::keep($radarr->user_id, $tmdbId);
         }
 
         $movie = $this->lookup($radarr, $tmdbId);
@@ -108,7 +107,7 @@ class CachedContentArrService
             return null;
         }
 
-        if ($cleanup && isset($added['id'])) {
+        if ($automatic && $radarr->cache_cleanup && isset($added['id'])) {
             ArrCacheMovie::query()->updateOrCreate(
                 ['arr_integration_id' => $radarr->id, 'tmdb_id' => $tmdbId],
                 ['arr_movie_id' => (int) $added['id'], 'left_at' => null],
