@@ -41,17 +41,19 @@ class NfoService
             $xml .= $this->xmlElement('originaltitle', $seriesName);
             $xml .= $this->xmlElement('sorttitle', $seriesName);
 
-            if (! empty($metadata['plot']) && is_string($metadata['plot'])) {
-                $xml .= $this->xmlElement('plot', $metadata['plot']);
-                $xml .= $this->xmlElement('outline', $metadata['plot']);
+            $outline = $this->seriesOutline($series);
+            if ($outline !== null) {
+                $xml .= $this->xmlElement('plot', $outline);
+                $xml .= $this->xmlElement('outline', $outline);
             }
 
-            if (! empty($series->release_date) && is_string($series->release_date)) {
-                $xml .= $this->xmlElement('year', substr($series->release_date, 0, 4));
-                $xml .= $this->xmlElement('premiered', $series->release_date);
+            $premiered = $this->seriesPremiered($series);
+            if ($premiered !== null) {
+                $xml .= $this->xmlElement('year', substr($premiered, 0, 4));
+                $xml .= $this->xmlElement('premiered', $premiered);
             }
 
-            $this->appendXml($xml, 'rating', $metadata['vote_average'] ?? null);
+            $this->appendXml($xml, 'rating', $this->seriesRating($series));
             $this->appendXml($xml, 'votes', $metadata['vote_count'] ?? null);
 
             if (! empty($metadata['status']) && is_string($metadata['status'])) {
@@ -63,10 +65,8 @@ class NfoService
             $this->appendGenres($xml, $metadata['genres'] ?? null);
             $this->appendNamedList($xml, 'studio', $metadata['networks'] ?? null);
 
-            $poster = $this->getFirstUsableImage($series->cover, $metadata['cover'] ?? null, $metadata['poster_path'] ?? null);
-            $backdrop = $this->getFirstUsableImage($series->backdrop_path, $metadata['backdrop_path'] ?? null);
-            $this->appendImage($xml, 'thumb', $poster, useProxy: false, attrs: ['aspect' => 'poster']);
-            $this->appendImage($xml, 'fanart', $backdrop);
+            $this->appendImage($xml, 'thumb', $this->seriesPosterUrl($series), useProxy: false, attrs: ['aspect' => 'poster']);
+            $this->appendImage($xml, 'fanart', $this->seriesFanartUrl($series));
             $this->appendImage($xml, 'thumb', $metadata['clearlogo'] ?? null, useProxy: false, attrs: ['aspect' => 'clearlogo']);
 
             // Unique IDs (important for scrapers)
@@ -134,25 +134,16 @@ class NfoService
             $xml .= $this->xmlElement('episode', $episode->episode_num);
 
             $this->appendXml($xml, 'plot', $info['plot'] ?? null);
-            $this->appendXml($xml, 'aired', $info['air_date'] ?? $info['releasedate'] ?? null);
-            $this->appendXml($xml, 'rating', $info['vote_average'] ?? $info['rating'] ?? null);
+            $this->appendXml($xml, 'aired', $this->episodeAired($episode));
+            $this->appendXml($xml, 'rating', $this->episodeRating($episode));
 
             // Runtime (in minutes)
-            if (! empty($info['runtime'])) {
-                $xml .= $this->xmlElement('runtime', $info['runtime']);
-            } elseif (! empty($info['duration_secs'])) {
-                $xml .= $this->xmlElement('runtime', round($info['duration_secs'] / 60));
-            } elseif (! empty($episode->duration_secs)) {
-                $xml .= $this->xmlElement('runtime', round($episode->duration_secs / 60));
-            }
+            $this->appendXml($xml, 'runtime', $this->episodeRuntime($episode));
 
             // Thumbnail/Still
-            $stillPath = $this->getScalarValue($info['still_path'] ?? null);
-            $movieImage = $this->getScalarValue($info['movie_image'] ?? null);
-            if (! empty($stillPath) && is_string($stillPath)) {
-                $xml .= $this->xmlElement('thumb', $this->tmdbImageUrl($stillPath));
-            } elseif (! empty($movieImage) && is_string($movieImage)) {
-                $xml .= $this->xmlElement('thumb', $movieImage);
+            $thumb = $this->episodeThumbUrl($episode);
+            if ($thumb !== null) {
+                $xml .= $this->xmlElement('thumb', $thumb);
             }
 
             // Unique IDs
@@ -210,10 +201,10 @@ class NfoService
             $xml .= $this->xmlElement('originaltitle', $title);
             $xml .= $this->xmlElement('sorttitle', $title);
 
-            $plot = $info['plot'] ?? $movieData['plot'] ?? $movieData['description'] ?? null;
-            if (! empty($plot)) {
+            $plot = $this->moviePlot($channel);
+            if ($plot !== null) {
                 $xml .= $this->xmlElement('plot', $plot);
-                $xml .= $this->xmlElement('outline', mb_substr($plot, 0, 300));
+                $xml .= $this->xmlElement('outline', $this->movieOutline($channel));
             }
 
             $year = $channel->year ?? $info['year'] ?? $movieData['releasedate'] ?? null;
@@ -225,67 +216,37 @@ class NfoService
             }
 
             // Rating (with optional 5-based → 10-based conversion)
-            $rating = $info['vote_average'] ?? $info['rating'] ?? $movieData['rating'] ?? $movieData['rating_5based'] ?? null;
-            if (! empty($rating)) {
-                if (is_numeric($rating) && $rating <= 5 && isset($movieData['rating_5based'])) {
-                    $rating *= 2;
-                }
-                $xml .= $this->xmlElement('rating', $rating);
-            }
+            $this->appendXml($xml, 'rating', $this->movieRating($channel));
 
             // Runtime (in minutes)
-            $runtime = $info['runtime'] ?? $movieData['duration_secs'] ?? null;
-            if (! empty($runtime)) {
-                if ($runtime > 300) {
-                    $runtime = round($runtime / 60);
-                }
-                $xml .= $this->xmlElement('runtime', $runtime);
-            }
+            $this->appendXml($xml, 'runtime', $this->movieRuntime($channel));
 
             $this->appendXml($xml, 'mpaa', $channel->getContentRating());
             $this->appendNamedList($xml, 'studio', $info['studios'] ?? null);
 
             $this->appendGenres($xml, $info['genres'] ?? $movieData['genre'] ?? null);
-            $this->appendXml($xml, 'director', $info['director'] ?? $movieData['director'] ?? null);
+            $this->appendXml($xml, 'director', $this->movieDirector($channel));
 
             // Cast (rich actor blocks with optional role/thumb)
-            $cast = $info['cast'] ?? $movieData['cast'] ?? null;
-            if (! empty($cast)) {
-                $castList = is_string($cast) ? array_map('trim', explode(',', $cast)) : $cast;
-                foreach ($castList as $actor) {
-                    $actorName = is_array($actor) ? ($actor['name'] ?? '') : $actor;
-                    if (empty($actorName)) {
-                        continue;
-                    }
-                    $xml .= "    <actor>\n";
-                    $xml .= $this->xmlElement('name', $actorName, [], 2);
-                    if (is_array($actor) && ! empty($actor['character'])) {
-                        $xml .= $this->xmlElement('role', $actor['character'], [], 2);
-                    }
-                    if (is_array($actor) && ! empty($actor['profile_path'])) {
-                        $xml .= $this->xmlElement('thumb', 'https://image.tmdb.org/t/p/w185'.$actor['profile_path'], [], 2);
-                    }
-                    $xml .= "    </actor>\n";
+            foreach ($this->movieCast($channel) as $actor) {
+                $xml .= "    <actor>\n";
+                $xml .= $this->xmlElement('name', $actor['name'], [], 2);
+                if (! empty($actor['role'])) {
+                    $xml .= $this->xmlElement('role', $actor['role'], [], 2);
                 }
+                if (! empty($actor['thumb'])) {
+                    $xml .= $this->xmlElement('thumb', $actor['thumb'], [], 2);
+                }
+                $xml .= "    </actor>\n";
             }
 
-            $this->appendImage($xml, 'thumb', $info['poster_path'] ?? $movieData['cover_big'] ?? $movieData['movie_image'] ?? null, useProxy: false, attrs: ['aspect' => 'poster']);
-            $this->appendImage($xml, 'fanart', $info['backdrop_path'] ?? $movieData['backdrop_path'] ?? null);
+            $this->appendImage($xml, 'thumb', $this->moviePosterUrl($channel), useProxy: false, attrs: ['aspect' => 'poster']);
+            $this->appendImage($xml, 'fanart', $this->movieFanartUrl($channel));
             $this->appendImage($xml, 'thumb', $info['clearlogo'] ?? $movieData['clearlogo'] ?? null, useProxy: false, attrs: ['aspect' => 'clearlogo']);
 
             // Country (mixed string|array of strings|array of {name|iso_3166_1})
-            $country = $info['production_countries'] ?? $movieData['country'] ?? null;
-            if (! empty($country)) {
-                if (is_array($country)) {
-                    foreach ($country as $c) {
-                        $countryName = is_array($c) ? ($c['name'] ?? $c['iso_3166_1'] ?? '') : $c;
-                        if (! empty($countryName)) {
-                            $xml .= $this->xmlElement('country', $countryName);
-                        }
-                    }
-                } else {
-                    $xml .= $this->xmlElement('country', $country);
-                }
+            foreach ($this->movieCountries($channel) as $countryName) {
+                $xml .= $this->xmlElement('country', $countryName);
             }
 
             // Unique IDs
@@ -395,9 +356,18 @@ class NfoService
      */
     private function appendXml(string &$xml, string $tag, mixed $value, array $attrs = []): void
     {
-        if (! empty($value) && is_scalar($value)) {
+        if ($this->nfoScalar($value) !== null) {
             $xml .= $this->xmlElement($tag, $value, $attrs);
         }
+    }
+
+    /**
+     * Return $value when it is a non-empty scalar (the appendXml emission
+     * rule), null otherwise.
+     */
+    private function nfoScalar(mixed $value): mixed
+    {
+        return is_scalar($value) && ! empty($value) ? $value : null;
     }
 
     /**
@@ -443,15 +413,33 @@ class NfoService
      */
     private function appendNamedList(string &$xml, string $tag, mixed $items): void
     {
-        if (empty($items) || ! is_array($items)) {
-            return;
+        foreach ($this->namedListNames($items) as $name) {
+            $xml .= $this->xmlElement($tag, $name);
         }
+    }
+
+    /**
+     * Normalize a studios/networks-style value (array of {name} or scalars)
+     * into a list of non-empty string names.
+     *
+     * @return list<string>
+     */
+    private function namedListNames(mixed $items): array
+    {
+        if (empty($items) || ! is_array($items)) {
+            return [];
+        }
+
+        $names = [];
         foreach ($items as $item) {
             $name = is_array($item) ? ($item['name'] ?? '') : $item;
-            if (! empty($name)) {
-                $xml .= $this->xmlElement($tag, $name);
+
+            if (is_scalar($name) && ! empty($name)) {
+                $names[] = (string) $name;
             }
         }
+
+        return $names;
     }
 
     /**
@@ -584,6 +572,326 @@ class NfoService
         }
 
         return trim($name);
+    }
+
+    // ─────────────────────────────────────────────────────────────────────────
+    // Shared field extraction
+    //
+    // EmbyPublicationCatalogService publishes the same derived NFO fields as
+    // JSON in its catalog payload, so the extractors below are public and
+    // return the resolved value (null / empty list when data is missing).
+    // The generate* methods above and the catalog payload both call these,
+    // so .nfo files and the published catalog cannot drift apart.
+    // ─────────────────────────────────────────────────────────────────────────
+
+    /**
+     * Series plot from legacy metadata (used for both <plot> and <outline>).
+     */
+    public function seriesOutline(Series $series): ?string
+    {
+        $plot = ($series->metadata ?? [])['plot'] ?? null;
+
+        return is_string($plot) && ! empty($plot) ? $plot : null;
+    }
+
+    /**
+     * Full series release date, when the raw column holds a usable string.
+     */
+    public function seriesPremiered(Series $series): ?string
+    {
+        $releaseDate = $series->release_date;
+
+        return is_string($releaseDate) && ! empty($releaseDate) ? $releaseDate : null;
+    }
+
+    /**
+     * TMDB vote average from legacy series metadata.
+     */
+    public function seriesRating(Series $series): mixed
+    {
+        return $this->nfoScalar(($series->metadata ?? [])['vote_average'] ?? null);
+    }
+
+    /**
+     * Network names from legacy series metadata.
+     *
+     * @return list<string>
+     */
+    public function seriesStudios(Series $series): array
+    {
+        return $this->namedListNames(($series->metadata ?? [])['networks'] ?? null);
+    }
+
+    /**
+     * Absolute poster URL (prefers dedicated cover column, then metadata).
+     */
+    public function seriesPosterUrl(Series $series): ?string
+    {
+        $metadata = $series->metadata ?? [];
+        $poster = $this->getFirstUsableImage($series->cover, $metadata['cover'] ?? null, $metadata['poster_path'] ?? null);
+
+        return $poster !== null ? $this->tmdbImageUrl($poster) : null;
+    }
+
+    /**
+     * Absolute fanart/backdrop URL (prefers dedicated column, then metadata).
+     */
+    public function seriesFanartUrl(Series $series): ?string
+    {
+        $metadata = $series->metadata ?? [];
+        $backdrop = $this->getFirstUsableImage($series->backdrop_path, $metadata['backdrop_path'] ?? null);
+
+        return $backdrop !== null ? $this->tmdbImageUrl($backdrop) : null;
+    }
+
+    /**
+     * Episode air date from legacy info keys.
+     */
+    public function episodeAired(Episode $episode): mixed
+    {
+        $info = $episode->info ?? [];
+
+        return $this->nfoScalar($info['air_date'] ?? $info['releasedate'] ?? null);
+    }
+
+    /**
+     * Episode rating (TMDB vote average preferred over provider rating).
+     */
+    public function episodeRating(Episode $episode): mixed
+    {
+        $info = $episode->info ?? [];
+
+        return $this->nfoScalar($info['vote_average'] ?? $info['rating'] ?? null);
+    }
+
+    /**
+     * Episode runtime in minutes. Only info.runtime is consulted — the old
+     * duration_secs fallbacks were dead code (episodes carry no such column
+     * or info key) and were removed.
+     */
+    public function episodeRuntime(Episode $episode): mixed
+    {
+        return $this->nfoScalar(($episode->info ?? [])['runtime'] ?? null);
+    }
+
+    /**
+     * Absolute episode still/thumb URL (TMDB still path preferred, then the
+     * provider movie_image URL as-is).
+     */
+    public function episodeThumbUrl(Episode $episode): ?string
+    {
+        $info = $episode->info ?? [];
+        $stillPath = $this->getScalarValue($info['still_path'] ?? null);
+
+        if (is_string($stillPath) && ! empty($stillPath)) {
+            return $this->tmdbImageUrl($stillPath);
+        }
+
+        $movieImage = $this->getScalarValue($info['movie_image'] ?? null);
+
+        return is_string($movieImage) && ! empty($movieImage) ? $movieImage : null;
+    }
+
+    /**
+     * Movie plot (info first, then Xtream movie_data plot/description).
+     */
+    public function moviePlot(Channel $channel): ?string
+    {
+        $info = $channel->info ?? [];
+        $movieData = $channel->movie_data ?? [];
+        $plot = $info['plot'] ?? $movieData['plot'] ?? $movieData['description'] ?? null;
+
+        return is_scalar($plot) && ! empty($plot) ? (string) $plot : null;
+    }
+
+    /**
+     * Movie outline: the plot truncated to 300 characters.
+     */
+    public function movieOutline(Channel $channel): ?string
+    {
+        $plot = $this->moviePlot($channel);
+
+        return $plot !== null ? mb_substr($plot, 0, 300) : null;
+    }
+
+    /**
+     * Full movie release date. The .nfo only writes <year>; the publication
+     * catalog additionally carries the underlying date from the same
+     * provider/TMDB sources.
+     */
+    public function moviePremiered(Channel $channel): ?string
+    {
+        $info = $channel->info ?? [];
+        $movieData = $channel->movie_data ?? [];
+        $premiered = $this->nfoScalar($info['release_date'] ?? $info['releasedate'] ?? $movieData['releasedate'] ?? null);
+
+        return $premiered !== null ? (string) $premiered : null;
+    }
+
+    /**
+     * Movie rating on a 10-point scale, doubling Xtream's 5-based rating.
+     */
+    public function movieRating(Channel $channel): mixed
+    {
+        $info = $channel->info ?? [];
+        $movieData = $channel->movie_data ?? [];
+        $rating = $this->nfoScalar($info['vote_average'] ?? $info['rating'] ?? $movieData['rating'] ?? $movieData['rating_5based'] ?? null);
+
+        if ($rating === null) {
+            return null;
+        }
+
+        if (is_numeric($rating) && $rating <= 5 && isset($movieData['rating_5based'])) {
+            $rating *= 2;
+        }
+
+        return $rating;
+    }
+
+    /**
+     * Movie runtime in minutes. Xtream stores seconds in movie_data.duration_secs,
+     * so values above 300 are treated as seconds and converted.
+     */
+    public function movieRuntime(Channel $channel): mixed
+    {
+        $info = $channel->info ?? [];
+        $movieData = $channel->movie_data ?? [];
+        $runtime = $this->nfoScalar($info['runtime'] ?? $movieData['duration_secs'] ?? null);
+
+        if ($runtime === null) {
+            return null;
+        }
+
+        return $runtime > 300 ? round($runtime / 60) : $runtime;
+    }
+
+    /**
+     * Movie director (info first, then Xtream movie_data).
+     */
+    public function movieDirector(Channel $channel): ?string
+    {
+        $info = $channel->info ?? [];
+        $movieData = $channel->movie_data ?? [];
+        $director = $this->nfoScalar($info['director'] ?? $movieData['director'] ?? null);
+
+        return $director !== null ? (string) $director : null;
+    }
+
+    /**
+     * Normalized movie cast. Accepts a comma-separated string, a list of
+     * names, or a list of TMDB-shaped {name, character, profile_path} rows.
+     *
+     * @return list<array{name: string, role: ?string, thumb: ?string}>
+     */
+    public function movieCast(Channel $channel): array
+    {
+        $info = $channel->info ?? [];
+        $movieData = $channel->movie_data ?? [];
+        $cast = $info['cast'] ?? $movieData['cast'] ?? null;
+
+        if (empty($cast) || (! is_string($cast) && ! is_array($cast))) {
+            return [];
+        }
+
+        $castList = is_string($cast) ? array_map('trim', explode(',', $cast)) : $cast;
+        $actors = [];
+
+        foreach ($castList as $actor) {
+            $name = is_array($actor) ? ($actor['name'] ?? '') : $actor;
+
+            if (! is_scalar($name) || empty($name)) {
+                continue;
+            }
+
+            $role = is_array($actor) && ! empty($actor['character']) && is_scalar($actor['character'])
+                ? (string) $actor['character']
+                : null;
+            $thumb = is_array($actor) && ! empty($actor['profile_path']) && is_scalar($actor['profile_path'])
+                ? 'https://image.tmdb.org/t/p/w185'.$actor['profile_path']
+                : null;
+
+            $actors[] = ['name' => (string) $name, 'role' => $role, 'thumb' => $thumb];
+        }
+
+        return $actors;
+    }
+
+    /**
+     * Movie studio names (TMDB info.studios list).
+     *
+     * @return list<string>
+     */
+    public function movieStudios(Channel $channel): array
+    {
+        return $this->namedListNames(($channel->info ?? [])['studios'] ?? null);
+    }
+
+    /**
+     * Movie production countries as names (handles the string, list-of-string
+     * and list-of-{name|iso_3166_1} shapes providers store).
+     *
+     * @return list<string>
+     */
+    public function movieCountries(Channel $channel): array
+    {
+        $info = $channel->info ?? [];
+        $movieData = $channel->movie_data ?? [];
+        $country = $info['production_countries'] ?? $movieData['country'] ?? null;
+
+        if (empty($country)) {
+            return [];
+        }
+
+        if (! is_array($country)) {
+            return is_scalar($country) ? [(string) $country] : [];
+        }
+
+        $names = [];
+        foreach ($country as $entry) {
+            $name = is_array($entry) ? ($entry['name'] ?? $entry['iso_3166_1'] ?? '') : $entry;
+
+            if (is_scalar($name) && ! empty($name)) {
+                $names[] = (string) $name;
+            }
+        }
+
+        return $names;
+    }
+
+    /**
+     * Movie tagline when the provider/TMDB payload carried one.
+     */
+    public function movieTagline(Channel $channel): ?string
+    {
+        $info = $channel->info ?? [];
+        $movieData = $channel->movie_data ?? [];
+        $tagline = $this->nfoScalar($info['tagline'] ?? $movieData['tagline'] ?? null);
+
+        return $tagline !== null ? (string) $tagline : null;
+    }
+
+    /**
+     * Absolute movie poster URL (info poster path, then Xtream cover_big/movie_image).
+     */
+    public function moviePosterUrl(Channel $channel): ?string
+    {
+        $info = $channel->info ?? [];
+        $movieData = $channel->movie_data ?? [];
+        $poster = $this->getScalarValue($info['poster_path'] ?? $movieData['cover_big'] ?? $movieData['movie_image'] ?? null);
+
+        return is_string($poster) && ! empty($poster) ? $this->tmdbImageUrl($poster) : null;
+    }
+
+    /**
+     * Absolute movie fanart/backdrop URL (info path first, then Xtream movie_data).
+     */
+    public function movieFanartUrl(Channel $channel): ?string
+    {
+        $info = $channel->info ?? [];
+        $movieData = $channel->movie_data ?? [];
+        $backdrop = $this->getScalarValue($info['backdrop_path'] ?? $movieData['backdrop_path'] ?? null);
+
+        return is_string($backdrop) && ! empty($backdrop) ? $this->tmdbImageUrl($backdrop) : null;
     }
 
     // ─────────────────────────────────────────────────────────────────────────
