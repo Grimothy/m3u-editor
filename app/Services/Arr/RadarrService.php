@@ -131,7 +131,6 @@ class RadarrService extends BaseArrService
                     'fileQuality' => isset($item['movieFile']) ? ($item['movieFile']['quality']['quality']['name'] ?? null) : null,
                     'fileSize' => isset($item['movieFile']) ? ($item['movieFile']['size'] ?? null) : null,
                     'images' => $item['images'] ?? [],
-                    'tags' => array_map('intval', $item['tags'] ?? []),
                 ];
             })
             ->all();
@@ -164,7 +163,6 @@ class RadarrService extends BaseArrService
             'rootFolderPath' => $rootFolderPath,
             'minimumAvailability' => $payload['minimumAvailability'] ?? 'released',
             'monitored' => true,
-            'tags' => array_map('intval', $payload['tags'] ?? []),
             'addOptions' => [
                 'searchForMovie' => $payload['searchForMovie'] ?? true,
             ],
@@ -286,41 +284,6 @@ class RadarrService extends BaseArrService
     }
 
     /**
-     * Id of the tag that marks movies dynamic-group auto-cache added for
-     * cleanup. One tag per integration, so two users sharing a Radarr never
-     * clean up each other's movies. Null when it doesn't exist and
-     * `$create` is false. Throws when Radarr can't be reached.
-     */
-    public function cacheCleanupTagId(bool $create): ?int
-    {
-        $label = 'm3u-editor-cache-'.$this->integration->id;
-
-        $tag = collect($this->client()->get('/tag')->throw()->json() ?? [])
-            ->first(fn (array $tag): bool => strtolower((string) ($tag['label'] ?? '')) === $label);
-
-        if ($tag !== null) {
-            return (int) $tag['id'];
-        }
-
-        if (! $create) {
-            return null;
-        }
-
-        return (int) $this->client()->post('/tag', ['label' => $label])->throw()->json('id');
-    }
-
-    /**
-     * Library ids of the movies carrying a tag. Throws when Radarr can't be
-     * reached.
-     *
-     * @return array<int, int>
-     */
-    public function taggedMovieIds(int $tagId): array
-    {
-        return array_map('intval', $this->client()->get('/tag/detail/'.$tagId)->throw()->json('movieIds') ?? []);
-    }
-
-    /**
      * One library movie, or null when it's gone. Throws when Radarr can't be
      * reached.
      *
@@ -337,25 +300,6 @@ class RadarrService extends BaseArrService
 
             throw $e;
         }
-    }
-
-    /**
-     * Take a tag off a library movie.
-     *
-     * @return array{ok: bool, error?: string}
-     */
-    public function removeTag(int $movieId, int $tagId): array
-    {
-        return $this->safeCall(
-            function () use ($movieId, $tagId) {
-                $this->client()
-                    ->put('/movie/editor', ['movieIds' => [$movieId], 'tags' => [$tagId], 'applyTags' => 'remove'])
-                    ->throw();
-
-                return true;
-            },
-            'remove movie tag'
-        );
     }
 
     /**

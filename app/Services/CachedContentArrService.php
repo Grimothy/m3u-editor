@@ -3,13 +3,13 @@
 namespace App\Services;
 
 use App\Enums\CacheDispatchResult;
+use App\Models\ArrCacheMovie;
 use App\Models\ArrIntegration;
 use App\Models\Channel;
 use App\Models\Episode;
 use App\Models\Playlist;
 use App\Models\Series;
 use App\Services\Arr\ArrService;
-use App\Services\Arr\RadarrService;
 use App\Services\Arr\SonarrService;
 use Illuminate\Support\Facades\Log;
 use Throwable;
@@ -20,11 +20,15 @@ use Throwable;
  * the arr downloads the title and playback picks it up from the media
  * server. Only integrations with "Use for caching" on are used.
  *
- * Only titles the arr doesn't have yet are sent, and nothing in its library
- * is changed or removed. A title it already has counts as cached when the
- * file is there. Without a file, Cache Now downloads it from the provider
- * (so running Cache Now again gets past an arr that can't find it), while
- * dynamic-group auto-cache leaves it to the arr.
+ * Only titles the arr doesn't have yet are sent, and nothing already in its
+ * library is changed or removed. A title it already has counts as cached
+ * when the file is there. Without a file, Cache Now downloads it from the
+ * provider (so running Cache Now again gets past an arr that can't find
+ * it), while dynamic-group auto-cache leaves it to the arr.
+ *
+ * Movies a dynamic-group rule with "Remove from Radarr after leaving" adds
+ * are recorded (ArrCacheMovie) for ArrCacheCleanupService to remove later.
+ * Cache Now on one stops tracking it.
  *
  * Methods return null (or false) when the provider should be used instead,
  * including when the arr is unreachable or rejects the title.
@@ -36,9 +40,6 @@ class CachedContentArrService
 
     /** @var array<int, true> integration ids that failed during this run */
     private array $unreachable = [];
-
-    /** @var array<int, int|null> cleanup tag id per Radarr integration id */
-    private array $cleanupTagIds = [];
 
     /** @var array<int, Playlist> playlists reloaded with the columns routing reads */
     private array $routablePlaylists = [];
@@ -54,15 +55,13 @@ class CachedContentArrService
     /**
      * Send one movie (Radarr) or episode (Sonarr). An automatic episode adds
      * its series with only that season monitored; a manual one asks Sonarr
-     * for that episode alone. `$cleanup` tags a movie Radarr didn't have
+     * for that episode alone. `$cleanup` records a movie Radarr didn't have
      * so ArrCacheCleanupService can remove it after it leaves its groups.
-     * Cache Now and `$keep` (a Never expire rule) take that tag off a movie
-     * Radarr already has, so cleanup never removes it.
      */
-    public function request(Channel|Episode $item, bool $automatic, bool $cleanup = false, bool $keep = false): ?CacheDispatchResult
+    public function request(Channel|Episode $item, bool $automatic, bool $cleanup = false): ?CacheDispatchResult
     {
         return $item instanceof Channel
-            ? $this->requestMovie($item, $automatic, $automatic && $cleanup, ! $automatic || $keep)
+            ? $this->requestMovie($item, $automatic, $cleanup)
             : $this->requestEpisode($item, $automatic);
     }
 
@@ -78,12 +77,16 @@ class CachedContentArrService
         return $this->seriesState($series, $series->playlist, $seasons)['added'] ?? false;
     }
 
-    private function requestMovie(Channel $channel, bool $automatic, bool $cleanup, bool $keep): ?CacheDispatchResult
+    private function requestMovie(Channel $channel, bool $automatic, bool $cleanup): ?CacheDispatchResult
     {
         $radarr = $this->integration($channel->playlist, 'radarr');
         $tmdbId = (int) $channel->getTmdbId();
         if (! $radarr || $tmdbId <= 0) {
             return null;
+        }
+
+        if (! $automatic) {
+            ArrCacheMovie::keep($radarr->id, $tmdbId);
         }
 
         $movie = $this->lookup($radarr, $tmdbId);
@@ -92,22 +95,27 @@ class CachedContentArrService
         }
 
         if ($movie['existsInLibrary']) {
-            if ($keep && ($movie['tags'] ?? []) !== []) {
-                $this->keepFromCleanup($radarr, (int) $movie['libraryId'], $movie['tags']);
-            }
-
             return $movie['hasFile'] || $automatic ? CacheDispatchResult::InArrLibrary : null;
         }
 
-        $cleanupTagId = $cleanup ? $this->cleanupTagId($radarr) : null;
-
-        return $this->add($radarr, $tmdbId, [
+        $added = $this->add($radarr, $tmdbId, [
             'tmdbId' => $tmdbId,
             'title' => $movie['title'],
             'titleSlug' => $movie['titleSlug'],
             'images' => $movie['images'],
-            'tags' => $cleanupTagId !== null ? [$cleanupTagId] : [],
-        ]) ? CacheDispatchResult::SentToArr : null;
+        ]);
+        if ($added === null) {
+            return null;
+        }
+
+        if ($cleanup && isset($added['id'])) {
+            ArrCacheMovie::query()->updateOrCreate(
+                ['arr_integration_id' => $radarr->id, 'tmdb_id' => $tmdbId],
+                ['arr_movie_id' => (int) $added['id'], 'left_at' => null],
+            );
+        }
+
+        return CacheDispatchResult::SentToArr;
     }
 
     private function requestEpisode(Episode $episode, bool $automatic): ?CacheDispatchResult
@@ -182,7 +190,7 @@ class CachedContentArrService
                 'title' => $lookup['title'],
                 'titleSlug' => $lookup['titleSlug'],
                 'seasons' => $seasons->values()->all(),
-            ]);
+            ]) !== null;
 
             $state = $added ? [...$state, 'added' => true] : null;
         }
@@ -235,70 +243,6 @@ class CachedContentArrService
     }
 
     /**
-     * Take the cleanup tag off a movie a Never expire rule holds, when it's
-     * already in Radarr. Used for members already on the media server,
-     * which skip `request()`.
-     */
-    public function keep(Channel $channel): void
-    {
-        $radarr = $this->integration($channel->playlist, 'radarr');
-        $tmdbId = (int) $channel->getTmdbId();
-        if (! $radarr || $tmdbId <= 0 || $this->cleanupTagId($radarr, create: false) === null) {
-            return;
-        }
-
-        $movie = $this->lookup($radarr, $tmdbId);
-        if ($movie !== null && $movie['existsInLibrary']) {
-            $this->keepFromCleanup($radarr, (int) $movie['libraryId'], $movie['tags'] ?? []);
-        }
-    }
-
-    /**
-     * Take the integration's cleanup tag off a library movie so cleanup
-     * never removes it. A failure only means cleanup may still remove it.
-     *
-     * @param  array<int, int>  $tags
-     */
-    private function keepFromCleanup(ArrIntegration $radarr, int $movieId, array $tags): void
-    {
-        $tagId = $this->cleanupTagId($radarr, create: false);
-        if ($tagId === null || ! in_array($tagId, $tags, true)) {
-            return;
-        }
-
-        /** @var RadarrService $service */
-        $service = ArrService::make($radarr);
-        $service->removeTag($movieId, $tagId);
-    }
-
-    /**
-     * The integration's cleanup tag, created on first use when `$create`.
-     * Null when it doesn't exist (or Radarr won't create it); a movie is
-     * then added untagged, so it's never cleaned up.
-     */
-    private function cleanupTagId(ArrIntegration $radarr, bool $create = true): ?int
-    {
-        if (array_key_exists($radarr->id, $this->cleanupTagIds)
-            && ($this->cleanupTagIds[$radarr->id] !== null || ! $create)) {
-            return $this->cleanupTagIds[$radarr->id];
-        }
-
-        try {
-            /** @var RadarrService $service */
-            $service = ArrService::make($radarr);
-            $tagId = $service->cacheCleanupTagId($create);
-        } catch (Throwable $e) {
-            Log::warning('Cache cleanup tag unavailable', [
-                'integration_id' => $radarr->id,
-                'error' => $e->getMessage(),
-            ]);
-            $tagId = null;
-        }
-
-        return $this->cleanupTagIds[$radarr->id] = $tagId;
-    }
-
-    /**
      * The arr's lookup entry for a TMDB (Radarr) or TVDB (Sonarr) id, or
      * null when it doesn't know the title. An unreachable arr is skipped for
      * the rest of the run.
@@ -325,16 +269,23 @@ class CachedContentArrService
     }
 
     /**
-     * Add a title. A rejected add still counts when the title is in the
-     * library now: two dynamic groups sharing a member can race to add it.
+     * Add a title, returning what the arr created, or null when it couldn't
+     * be added. A rejected add still counts (as an empty array) when the
+     * title is in the library now: two dynamic groups sharing a member can
+     * race to add it.
      *
      * @param  array<string, mixed>  $payload
+     * @return array<string, mixed>|null
      */
-    private function add(ArrIntegration $integration, int $externalId, array $payload): bool
+    private function add(ArrIntegration $integration, int $externalId, array $payload): ?array
     {
         $result = ArrService::make($integration)->add($payload);
-        if ($result['ok'] || ($this->lookup($integration, $externalId)['existsInLibrary'] ?? false)) {
-            return true;
+        if ($result['ok']) {
+            return (array) ($result['data'] ?? []);
+        }
+
+        if ($this->lookup($integration, $externalId)['existsInLibrary'] ?? false) {
+            return [];
         }
 
         Log::warning('Cache request could not be added, using the provider', [
@@ -342,7 +293,7 @@ class CachedContentArrService
             'error' => $result['error'] ?? null,
         ]);
 
-        return false;
+        return null;
     }
 
     /**

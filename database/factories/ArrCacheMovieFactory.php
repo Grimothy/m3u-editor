@@ -2,16 +2,16 @@
 
 namespace Database\Factories;
 
-use App\Models\ArrCacheDeparture;
+use App\Models\ArrCacheMovie;
 use App\Models\ArrIntegration;
 use Illuminate\Database\Eloquent\Factories\Factory;
 
 /**
- * @extends Factory<ArrCacheDeparture>
+ * @extends Factory<ArrCacheMovie>
  */
-class ArrCacheDepartureFactory extends Factory
+class ArrCacheMovieFactory extends Factory
 {
-    protected $model = ArrCacheDeparture::class;
+    protected $model = ArrCacheMovie::class;
 
     /**
      * @return array<string, mixed>
@@ -20,9 +20,9 @@ class ArrCacheDepartureFactory extends Factory
     {
         return [
             'arr_integration_id' => ArrIntegration::factory()->radarr(),
-            'arr_movie_id' => fake()->unique()->numberBetween(1, 100000),
             'tmdb_id' => fake()->unique()->numberBetween(1, 1000000),
-            'left_at' => now(),
+            'arr_movie_id' => fake()->unique()->numberBetween(1, 100000),
+            'left_at' => null,
         ];
     }
 }

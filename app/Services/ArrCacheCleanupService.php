@@ -2,7 +2,7 @@
 
 namespace App\Services;
 
-use App\Models\ArrCacheDeparture;
+use App\Models\ArrCacheMovie;
 use App\Models\ArrIntegration;
 use App\Models\Channel;
 use App\Models\DynamicGroup;
@@ -16,21 +16,20 @@ use Throwable;
  * they've been out of every group for the rule's "Keep after leaving
  * (days)". Opt-in per rule ("Remove from Radarr after leaving").
  *
- * Only movies carrying the integration's cleanup tag are considered, and
- * the tag is only added to movies auto-cache added itself, so titles added
- * by hand or already in the library are never touched. Removing the tag in
- * Radarr opts a movie out.
+ * Only movies recorded in `arr_cache_movies` are considered, and a movie is
+ * only recorded when auto-cache added it for a rule with the option on, so
+ * titles added by hand or already in the library are never touched. Cache
+ * Now on a movie, or a Never expire rule holding it, stops tracking it.
  *
- * A movie stays while any of the owner's cache-enabled groups holds it,
- * cleanup or not. Departures are recorded in `arr_cache_departures` so keep
- * days survive between runs, with a one-day minimum so a single bad
- * membership refresh can't delete anything.
+ * A movie stays while any of the owner's cache-enabled movie groups holds
+ * it, cleanup or not. `left_at` keeps the keep days across runs, with a
+ * one-day minimum so a single bad membership refresh can't delete anything.
  */
 class ArrCacheCleanupService
 {
     /**
-     * Run cleanup for every enabled Radarr. With `$dryRun`, nothing is
-     * recorded or removed.
+     * Run cleanup for every enabled Radarr with tracked movies. With
+     * `$dryRun`, nothing is changed.
      *
      * @return array<int, array{integration: string, movie_id: int, tmdb_id: int, title: string}> movies removed (or that would be)
      */
@@ -39,7 +38,7 @@ class ArrCacheCleanupService
         $removed = [];
 
         $integrations = ArrIntegration::query()
-            ->where('type', 'radarr')
+            ->whereIn('id', ArrCacheMovie::query()->select('arr_integration_id'))
             ->enabled()
             ->cursor();
 
@@ -56,88 +55,80 @@ class ArrCacheCleanupService
     private function sweepIntegration(ArrIntegration $integration, bool $dryRun): array
     {
         $scope = $this->ownerScope((int) $integration->user_id);
-        if ($scope['keep_days'] === null) {
+        if ($scope === null) {
             // No rule asks for cleanup: turning the option off stops it.
             return [];
         }
 
         $removed = [];
+        $removeLeftBefore = now()->subDays(max(1, $scope['keep_days']));
+
+        /** @var RadarrService $radarr */
+        $radarr = ArrService::make($integration);
 
         try {
-            /** @var RadarrService $radarr */
-            $radarr = ArrService::make($integration);
+            $tracked = ArrCacheMovie::query()
+                ->where('arr_integration_id', $integration->id)
+                ->lazyById();
 
-            $tagId = $radarr->cacheCleanupTagId(create: false);
-            $movieIds = $tagId !== null ? $radarr->taggedMovieIds($tagId) : [];
-
-            if (! $dryRun) {
-                // Movies that lost the tag, or left Radarr, aren't tracked.
-                ArrCacheDeparture::query()
-                    ->where('arr_integration_id', $integration->id)
-                    ->whereNotIn('arr_movie_id', $movieIds)
-                    ->delete();
-            }
-
-            foreach ($movieIds as $movieId) {
-                $movie = $radarr->fetchMovie($movieId);
-                if ($movie === null || ! in_array($tagId, array_map('intval', $movie['tags'] ?? []), true)) {
-                    continue;
-                }
-
-                $tmdbId = (int) ($movie['tmdbId'] ?? 0);
-                $departure = ArrCacheDeparture::query()
-                    ->where('arr_integration_id', $integration->id)
-                    ->where('arr_movie_id', $movieId)
-                    ->first();
-
-                if (isset($scope['tmdb_ids'][$tmdbId])) {
+            foreach ($tracked as $movie) {
+                if (isset($scope['kept'][$movie->tmdb_id])) {
+                    // A Never expire rule holds it, so it's kept for good.
                     if (! $dryRun) {
-                        $departure?->delete();
+                        $movie->delete();
                     }
 
                     continue;
                 }
 
-                if ($departure === null) {
+                if (isset($scope['held'][$movie->tmdb_id])) {
                     if (! $dryRun) {
-                        ArrCacheDeparture::query()->create([
-                            'arr_integration_id' => $integration->id,
-                            'arr_movie_id' => $movieId,
-                            'tmdb_id' => $tmdbId,
-                            'left_at' => now(),
-                        ]);
+                        $movie->update(['left_at' => null]);
                     }
 
                     continue;
                 }
 
-                if ($departure->left_at->gt(now()->subDays(max(1, $scope['keep_days'])))) {
+                if ($movie->left_at === null) {
+                    if (! $dryRun) {
+                        $movie->update(['left_at' => now()]);
+                    }
+
                     continue;
                 }
 
-                $entry = [
+                if ($movie->left_at->gt($removeLeftBefore)) {
+                    continue;
+                }
+
+                // Gone from Radarr, or the id now belongs to another movie.
+                $library = $radarr->fetchMovie($movie->arr_movie_id);
+                if ((int) ($library['tmdbId'] ?? 0) !== $movie->tmdb_id) {
+                    if (! $dryRun) {
+                        $movie->delete();
+                    }
+
+                    continue;
+                }
+
+                if (! $dryRun) {
+                    if (! $radarr->deleteMovie($movie->arr_movie_id)['ok']) {
+                        // Kept; the next run tries again.
+                        continue;
+                    }
+
+                    $movie->delete();
+                }
+
+                $removed[] = [
                     'integration' => $integration->name,
-                    'movie_id' => $movieId,
-                    'tmdb_id' => $tmdbId,
-                    'title' => (string) ($movie['title'] ?? ''),
+                    'movie_id' => $movie->arr_movie_id,
+                    'tmdb_id' => $movie->tmdb_id,
+                    'title' => (string) ($library['title'] ?? ''),
                 ];
-
-                if ($dryRun) {
-                    $removed[] = $entry;
-
-                    continue;
-                }
-
-                if (! $radarr->deleteMovie($movieId)['ok']) {
-                    // Kept; the next run tries again.
-                    continue;
-                }
-
-                $departure->delete();
-                $removed[] = $entry;
             }
         } catch (Throwable $e) {
-            // Unreachable Radarr: change nothing, try again next run.
+            // Unreachable Radarr: try again next run.
             Log::warning('ArrCacheCleanup: Radarr unavailable, skipping cleanup', [
                 'integration_id' => $integration->id,
                 'error' => $e->getMessage(),
@@ -154,43 +145,50 @@ class ArrCacheCleanupService
     }
 
     /**
-     * TMDB ids every cache-enabled movie group of the user holds (as a set),
-     * and the longest keep days among its rules with cleanup on (null when
-     * none has it on).
+     * TMDB ids the user's cache-enabled movie groups hold, and those a
+     * Never expire rule holds (as sets), with the longest keep days among
+     * its rules with cleanup on. Null when no rule has cleanup on.
      *
-     * @return array{tmdb_ids: array<int, true>, keep_days: int|null}
+     * @return array{held: array<int, true>, kept: array<int, true>, keep_days: int}|null
      */
-    private function ownerScope(int $userId): array
+    private function ownerScope(int $userId): ?array
     {
-        $tmdbIds = [];
-        $keepDays = null;
-
         $groups = DynamicGroup::query()
             ->where('user_id', $userId)
-            ->where('type', '!=', 'series')
+            ->where('type', 'vod')
             ->with('playlist')
-            ->cursor();
+            ->get()
+            ->map(fn (DynamicGroup $group): array => [$group, $group->cacheSettings()])
+            ->filter(fn (array $pair): bool => $pair[1]['enabled'] ?? false);
 
-        foreach ($groups as $group) {
-            $settings = $group->cacheSettings();
-            if (! ($settings['enabled'] ?? false)) {
-                continue;
-            }
+        $cleanupRules = $groups->filter(fn (array $pair): bool => $pair[1]['arr_cleanup']);
+        if ($cleanupRules->isEmpty()) {
+            return null;
+        }
 
-            if ($settings['arr_cleanup']) {
-                $keepDays = max($keepDays ?? 0, $settings['keep_days']);
-            }
+        $held = [];
+        $kept = [];
 
+        foreach ($groups as [$group, $settings]) {
             // getTmdbId() is how the movie was looked up when it was added.
             foreach ($group->cacheMembers($settings['max_items'])->cursor() as $member) {
                 /** @var Channel $member */
                 $tmdbId = (int) $member->getTmdbId();
-                if ($tmdbId > 0) {
-                    $tmdbIds[$tmdbId] = true;
+                if ($tmdbId <= 0) {
+                    continue;
+                }
+
+                $held[$tmdbId] = true;
+                if ($settings['never_expire']) {
+                    $kept[$tmdbId] = true;
                 }
             }
         }
 
-        return ['tmdb_ids' => $tmdbIds, 'keep_days' => $keepDays];
+        return [
+            'held' => $held,
+            'kept' => $kept,
+            'keep_days' => $cleanupRules->max(fn (array $pair): int => $pair[1]['keep_days']),
+        ];
     }
 }

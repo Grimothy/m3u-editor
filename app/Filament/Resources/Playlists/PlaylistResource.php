@@ -3840,7 +3840,7 @@ class PlaylistResource extends Resource implements CopilotResource
                         ->label(__('Remove from Radarr after leaving'))
                         ->hintIcon(
                             'heroicon-m-question-mark-circle',
-                            tooltip: __('Movies this rule sends to Radarr are removed from Radarr, files included, once they have been out of every dynamic group for the keep days (at least 1). Only movies added while this is on are removed, never ones already in Radarr. Remove the m3u-editor-cache tag from a movie in Radarr to keep it.'),
+                            tooltip: __('Movies this rule sends to Radarr are removed from Radarr, files included, once they have been out of every dynamic group for the keep days (at least 1). Only movies added while this is on are removed, never ones already in Radarr. Use Cache Now on a movie to keep it.'),
                         )
                         ->default(false)
                         ->inline(false)

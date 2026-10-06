@@ -1,15 +1,13 @@
 <?php
 
-use App\Models\ArrCacheDeparture;
+use App\Models\ArrCacheMovie;
 use App\Models\ArrIntegration;
 use App\Models\CachedContentFile;
 use App\Models\Channel;
 use App\Models\DynamicGroup;
-use App\Models\MediaServerIntegration;
 use App\Models\Playlist;
 use App\Services\ArrCacheCleanupService;
 use App\Services\CachedContentDispatchService;
-use App\Services\MediaSourceMatchService;
 use App\Settings\GeneralSettings;
 use Illuminate\Foundation\Testing\RefreshDatabase;
 use Illuminate\Http\Client\ConnectionException;
@@ -81,29 +79,38 @@ function accGroup(Playlist $playlist, string $name, array $members, array $rule 
 }
 
 /**
- * Fake a Radarr whose cleanup tag (id 5) is on `$movies` (library id =>
- * tmdb id). Every other request succeeds.
+ * Track Radarr movie 7 (TMDB 550) for the integration.
+ *
+ * @param  array<string, mixed>  $attributes
+ */
+function accTracked(ArrIntegration $radarr, array $attributes = []): ArrCacheMovie
+{
+    return ArrCacheMovie::factory()->create([
+        'arr_integration_id' => $radarr->id,
+        'tmdb_id' => 550,
+        'arr_movie_id' => 7,
+        ...$attributes,
+    ]);
+}
+
+/**
+ * Fake a Radarr library of `$movies` (library id => tmdb id). Any other
+ * movie is gone (404); deletes succeed.
  *
  * @param  array<int, int>  $movies
- * @param  array<int, int>  $tags  tag ids per library id; defaults to [5]
  */
-function accFakeRadarr(ArrIntegration $radarr, array $movies, array $tags = []): void
+function accFakeRadarr(array $movies): void
 {
-    $responses = [
-        'radarr.test/api/v3/tag' => Http::response([['id' => 5, 'label' => 'm3u-editor-cache-'.$radarr->id]]),
-        'radarr.test/api/v3/tag/detail/5' => Http::response(['id' => 5, 'movieIds' => array_keys($movies)]),
-    ];
-
+    $responses = [];
     foreach ($movies as $movieId => $tmdbId) {
         $responses["radarr.test/api/v3/movie/{$movieId}*"] = Http::response([
             'id' => $movieId,
             'tmdbId' => $tmdbId,
             'title' => "Movie {$tmdbId}",
-            'tags' => $tags[$movieId] ?? [5],
         ]);
     }
 
-    Http::fake($responses);
+    Http::fake([...$responses, 'radarr.test/*' => Http::response([], 404)]);
 }
 
 function accDeletes(): int
@@ -132,41 +139,46 @@ beforeEach(function () {
     $this->radarr = accRadarr($this->playlist);
 });
 
-// --- Tagging ---
+// --- Tracking ---
 
-it('tags a movie a cleanup rule sends to Radarr, creating the tag', function () {
+it('records a movie a cleanup rule sends to Radarr', function () {
     $group = accGroup($this->playlist, 'Trending', [accChannel($this->playlist, 550)], ['cache_arr_cleanup' => true]);
     Http::fake([
         'radarr.test/api/v3/movie/lookup*' => Http::response([['tmdbId' => 550, 'title' => 'Fight Club', 'titleSlug' => 'fight-club', 'images' => []]]),
-        'radarr.test/api/v3/tag' => Http::sequence()->push([])->push(['id' => 5, 'label' => 'm3u-editor-cache-'.$this->radarr->id]),
         'radarr.test/api/v3/movie' => Http::response(['id' => 7]),
     ]);
 
     app(CachedContentDispatchService::class)->dispatchForDynamicGroup($group);
 
-    Http::assertSent(fn (Request $request): bool => $request->method() === 'POST'
-        && str_ends_with($request->url(), '/api/v3/tag')
-        && $request['label'] === 'm3u-editor-cache-'.$this->radarr->id);
-    Http::assertSent(fn (Request $request): bool => $request->method() === 'POST'
-        && str_ends_with($request->url(), '/api/v3/movie')
-        && $request['tags'] === [5]);
+    $tracked = ArrCacheMovie::query()->sole();
+    expect($tracked->arr_integration_id)->toBe($this->radarr->id)
+        ->and($tracked->tmdb_id)->toBe(550)
+        ->and($tracked->arr_movie_id)->toBe(7)
+        ->and($tracked->left_at)->toBeNull();
 });
 
-it('does not tag movies from rules without cleanup or from Cache Now', function () {
-    $channel = accChannel($this->playlist, 550);
-    $group = accGroup($this->playlist, 'Trending', [$channel]);
+it('does not record movies from rules without cleanup or from Cache Now', function () {
+    $group = accGroup($this->playlist, 'Trending', [accChannel($this->playlist, 550)]);
     Http::fake([
         'radarr.test/api/v3/movie/lookup*' => Http::response([['tmdbId' => 550, 'title' => 'Fight Club', 'titleSlug' => 'fight-club', 'images' => []]]),
         'radarr.test/api/v3/movie' => Http::response(['id' => 7]),
     ]);
 
     app(CachedContentDispatchService::class)->dispatchForDynamicGroup($group);
-    app(CachedContentDispatchService::class)->dispatch(accChannel($this->playlist, 551), arrCleanup: true);
+    app(CachedContentDispatchService::class)->dispatch(accChannel($this->playlist, 550));
 
-    Http::assertNotSent(fn (Request $request): bool => str_contains($request->url(), '/api/v3/tag'));
-    expect(Http::recorded(fn (Request $request): bool => $request->method() === 'POST')->every(
-        fn (array $pair): bool => $pair[0]['tags'] === []
-    ))->toBeTrue();
+    expect(ArrCacheMovie::query()->count())->toBe(0);
+});
+
+it('does not record a movie Radarr already has', function () {
+    $group = accGroup($this->playlist, 'Trending', [accChannel($this->playlist, 550)], ['cache_arr_cleanup' => true]);
+    Http::fake([
+        'radarr.test/api/v3/movie/lookup*' => Http::response([['id' => 7, 'tmdbId' => 550, 'title' => 'Fight Club', 'hasFile' => true]]),
+    ]);
+
+    app(CachedContentDispatchService::class)->dispatchForDynamicGroup($group);
+
+    expect(ArrCacheMovie::query()->count())->toBe(0);
 });
 
 it('turns cleanup off for Never expire rules', function () {
@@ -175,111 +187,48 @@ it('turns cleanup off for Never expire rules', function () {
     expect($group->cacheSettings()['arr_cleanup'])->toBeFalse();
 });
 
-/**
- * Fake a Radarr that already has movie 7 (TMDB 550) with a file and the
- * cleanup tag (id 5).
- */
-function accFakeTaggedLibraryMovie(ArrIntegration $radarr): void
-{
+it('stops tracking a movie on Cache Now so cleanup keeps it', function () {
+    accTracked($this->radarr);
     Http::fake([
-        'radarr.test/api/v3/movie/lookup*' => Http::response([[
-            'id' => 7, 'tmdbId' => 550, 'title' => 'Fight Club', 'titleSlug' => 'fight-club',
-            'images' => [], 'hasFile' => true, 'tags' => [5],
-        ]]),
-        'radarr.test/api/v3/tag' => Http::response([['id' => 5, 'label' => 'm3u-editor-cache-'.$radarr->id]]),
-        'radarr.test/api/v3/movie/editor' => Http::response([]),
+        'radarr.test/api/v3/movie/lookup*' => Http::response([['id' => 7, 'tmdbId' => 550, 'title' => 'Fight Club', 'hasFile' => true]]),
     ]);
-}
-
-function accTagRemoved(): bool
-{
-    return Http::recorded(fn (Request $request): bool => $request->method() === 'PUT'
-        && str_ends_with($request->url(), '/api/v3/movie/editor')
-        && $request['movieIds'] === [7]
-        && $request['tags'] === [5]
-        && $request['applyTags'] === 'remove')->count() === 1;
-}
-
-it('takes the cleanup tag off a movie on Cache Now so cleanup keeps it', function () {
-    accFakeTaggedLibraryMovie($this->radarr);
 
     app(CachedContentDispatchService::class)->dispatch(accChannel($this->playlist, 550));
 
-    expect(accTagRemoved())->toBeTrue();
-});
-
-it('takes the cleanup tag off a movie a Never expire rule holds', function () {
-    $group = accGroup($this->playlist, 'Trending', [accChannel($this->playlist, 550)], ['cache_never_expire' => true]);
-    accFakeTaggedLibraryMovie($this->radarr);
-
-    app(CachedContentDispatchService::class)->dispatchForDynamicGroup($group);
-
-    expect(accTagRemoved())->toBeTrue();
-});
-
-it('takes the cleanup tag off a Never expire member already on the media server', function () {
-    $channel = accChannel($this->playlist, 550);
-    $group = accGroup($this->playlist, 'Trending', [$channel], ['cache_never_expire' => true]);
-
-    $media = Playlist::factory()->for($this->playlist->user)->create();
-    Channel::factory()->for($media)->for($this->playlist->user)->create([
-        'enabled' => true,
-        'is_vod' => true,
-        'tmdb_id' => 550,
-        'url' => 'https://media.example.com/local/550.mkv',
-    ]);
-    MediaServerIntegration::factory()->for($this->playlist->user)->create([
-        'type' => 'emby',
-        'enabled' => true,
-        'playlist_id' => $media->id,
-    ]);
-    app(MediaSourceMatchService::class)->rebuildForPlaylist($this->playlist->refresh());
-    accFakeTaggedLibraryMovie($this->radarr);
-
-    app(CachedContentDispatchService::class)->dispatchForDynamicGroup($group->fresh());
-
-    expect(accTagRemoved())->toBeTrue()
-        ->and(Http::recorded(fn (Request $request): bool => $request->method() === 'POST'))->toBeEmpty();
-});
-
-it('leaves the tag on a movie a cleanup rule holds', function () {
-    $group = accGroup($this->playlist, 'Trending', [accChannel($this->playlist, 550)], ['cache_arr_cleanup' => true]);
-    accFakeTaggedLibraryMovie($this->radarr);
-
-    app(CachedContentDispatchService::class)->dispatchForDynamicGroup($group);
-
-    Http::assertNotSent(fn (Request $request): bool => $request->method() === 'PUT');
+    expect(ArrCacheMovie::query()->count())->toBe(0);
 });
 
 // --- Cleanup ---
 
-it('removes a tagged movie once it has been out of every group for the keep days', function () {
+it('removes a tracked movie once it has been out of every group for the keep days', function () {
     accGroup($this->playlist, 'Trending', [accChannel($this->playlist, 999)], ['cache_arr_cleanup' => true, 'cache_keep_days' => 3]);
-    accFakeRadarr($this->radarr, [7 => 550]);
+    $tracked = accTracked($this->radarr);
+    accFakeRadarr([7 => 550]);
 
-    // First run records the departure; nothing is removed yet.
+    // First run records when it left; nothing is removed yet.
     expect(accSweep())->toBe([])
-        ->and(accDeletes())->toBe(0);
-    $departure = ArrCacheDeparture::query()->sole();
-    expect($departure->arr_movie_id)->toBe(7)
-        ->and($departure->tmdb_id)->toBe(550);
+        ->and($tracked->fresh()->left_at)->not->toBeNull();
 
     $this->travel(2)->days();
     expect(accSweep())->toBe([])
         ->and(accDeletes())->toBe(0);
 
     $this->travel(2)->days();
-    expect(accSweep())->toHaveCount(1)
-        ->and(ArrCacheDeparture::query()->count())->toBe(0);
+    expect(accSweep())->toBe([[
+        'integration' => $this->radarr->name,
+        'movie_id' => 7,
+        'tmdb_id' => 550,
+        'title' => 'Movie 550',
+    ]])->and($tracked->fresh())->toBeNull();
 
     Http::assertSent(fn (Request $request): bool => $request->method() === 'DELETE'
-        && str_contains($request->url(), '/api/v3/movie/7')
         && $request->url() === 'http://radarr.test/api/v3/movie/7?deleteFiles=true&addImportExclusion=false');
 });
 
 it('waits at least a day even when keep days is 0', function () {
     accGroup($this->playlist, 'Trending', [], ['cache_arr_cleanup' => true]);
-    accFakeRadarr($this->radarr, [7 => 550]);
+    accTracked($this->radarr);
+    accFakeRadarr([7 => 550]);
 
     accSweep();
     $this->travel(12)->hours();
@@ -294,82 +243,76 @@ it('waits at least a day even when keep days is 0', function () {
 it('keeps a movie another cache group still holds, even one without cleanup', function () {
     accGroup($this->playlist, 'Trending', [], ['cache_arr_cleanup' => true]);
     accGroup($this->playlist, 'Popular', [accChannel($this->playlist, 550)]);
-    ArrCacheDeparture::factory()->create([
-        'arr_integration_id' => $this->radarr->id,
-        'arr_movie_id' => 7,
-        'tmdb_id' => 550,
-        'left_at' => now()->subDays(30),
-    ]);
-    accFakeRadarr($this->radarr, [7 => 550]);
-
-    accSweep();
-
-    expect(accDeletes())->toBe(0)
-        ->and(ArrCacheDeparture::query()->count())->toBe(0);
-});
-
-it('never removes a movie without the cleanup tag', function () {
-    accGroup($this->playlist, 'Trending', [], ['cache_arr_cleanup' => true]);
-    // Listed under the tag but the movie itself no longer carries it.
-    accFakeRadarr($this->radarr, [7 => 550], tags: [7 => [3]]);
-    ArrCacheDeparture::factory()->create([
-        'arr_integration_id' => $this->radarr->id,
-        'arr_movie_id' => 7,
-        'tmdb_id' => 550,
-        'left_at' => now()->subDays(30),
-    ]);
-
-    accSweep();
-
-    expect(accDeletes())->toBe(0);
-});
-
-it('ignores tags that belong to another integration', function () {
-    accGroup($this->playlist, 'Trending', [], ['cache_arr_cleanup' => true]);
-    Http::fake([
-        'radarr.test/api/v3/tag' => Http::response([['id' => 5, 'label' => 'm3u-editor-cache-999']]),
-    ]);
-
-    accSweep();
-
-    Http::assertNotSent(fn (Request $request): bool => str_contains($request->url(), '/tag/detail'));
-    expect(accDeletes())->toBe(0)
-        ->and(ArrCacheDeparture::query()->count())->toBe(0);
-});
-
-it('does nothing when no rule has cleanup on', function () {
-    accGroup($this->playlist, 'Trending', []);
+    $tracked = accTracked($this->radarr, ['left_at' => now()->subDays(30)]);
+    Http::fake();
 
     accSweep();
 
     Http::assertNothingSent();
+    expect($tracked->fresh()->left_at)->toBeNull();
+});
+
+it('stops tracking a movie a Never expire rule holds', function () {
+    accGroup($this->playlist, 'Trending', [], ['cache_arr_cleanup' => true]);
+    accGroup($this->playlist, 'Favorites', [accChannel($this->playlist, 550)], ['cache_never_expire' => true]);
+    accTracked($this->radarr);
+    Http::fake();
+
+    accSweep();
+
+    Http::assertNothingSent();
+    expect(ArrCacheMovie::query()->count())->toBe(0);
+});
+
+it('stops tracking a movie that is gone from Radarr or whose id was reused', function () {
+    accGroup($this->playlist, 'Trending', [], ['cache_arr_cleanup' => true]);
+    accTracked($this->radarr, ['left_at' => now()->subDays(30)]);
+    accTracked($this->radarr, ['tmdb_id' => 551, 'arr_movie_id' => 8, 'left_at' => now()->subDays(30)]);
+    // Movie 7 is gone; id 8 now belongs to a different movie.
+    accFakeRadarr([8 => 999]);
+
+    expect(accSweep())->toBe([])
+        ->and(accDeletes())->toBe(0)
+        ->and(ArrCacheMovie::query()->count())->toBe(0);
+});
+
+it('does nothing when no rule has cleanup on', function () {
+    accGroup($this->playlist, 'Trending', []);
+    $tracked = accTracked($this->radarr, ['left_at' => now()->subDays(30)]);
+    Http::fake();
+
+    accSweep();
+
+    Http::assertNothingSent();
+    expect($tracked->fresh())->not->toBeNull();
 });
 
 it('changes nothing when Radarr is unreachable', function () {
     accGroup($this->playlist, 'Trending', [], ['cache_arr_cleanup' => true]);
-    $departure = ArrCacheDeparture::factory()->create([
-        'arr_integration_id' => $this->radarr->id,
-        'arr_movie_id' => 7,
-        'tmdb_id' => 550,
-        'left_at' => now()->subDays(30),
-    ]);
+    $tracked = accTracked($this->radarr, ['left_at' => now()->subDays(30)]);
     Http::fake(fn () => throw new ConnectionException('Connection refused'));
 
-    expect(accSweep())->toBe([]);
+    expect(accSweep())->toBe([])
+        ->and(accDeletes())->toBe(0)
+        ->and($tracked->fresh())->not->toBeNull();
+});
 
-    expect(accDeletes())->toBe(0)
-        ->and($departure->fresh())->not->toBeNull();
+it('keeps tracking a movie Radarr fails to delete so the next run retries', function () {
+    accGroup($this->playlist, 'Trending', [], ['cache_arr_cleanup' => true]);
+    $tracked = accTracked($this->radarr, ['left_at' => now()->subDays(30)]);
+    Http::fake(fn (Request $request) => $request->method() === 'DELETE'
+        ? Http::response(['message' => 'Database locked'], 500)
+        : Http::response(['id' => 7, 'tmdbId' => 550, 'title' => 'Fight Club']));
+
+    expect(accSweep())->toBe([])
+        ->and($tracked->fresh())->not->toBeNull();
 });
 
 it('lists movies on a dry run without removing or recording anything', function () {
     accGroup($this->playlist, 'Trending', [], ['cache_arr_cleanup' => true]);
-    ArrCacheDeparture::factory()->create([
-        'arr_integration_id' => $this->radarr->id,
-        'arr_movie_id' => 7,
-        'tmdb_id' => 550,
-        'left_at' => now()->subDays(30),
-    ]);
-    accFakeRadarr($this->radarr, [7 => 550, 8 => 551]);
+    accTracked($this->radarr, ['left_at' => now()->subDays(30)]);
+    $justLeft = accTracked($this->radarr, ['tmdb_id' => 551, 'arr_movie_id' => 8]);
+    accFakeRadarr([7 => 550, 8 => 551]);
 
     $this->artisan('cache:cleanup', ['--dry-run' => true])
         ->expectsOutputToContain('Movie 550 (TMDB 550)')
@@ -377,5 +320,6 @@ it('lists movies on a dry run without removing or recording anything', function 
         ->assertSuccessful();
 
     expect(accDeletes())->toBe(0)
-        ->and(ArrCacheDeparture::query()->pluck('arr_movie_id')->all())->toBe([7]);
+        ->and(ArrCacheMovie::query()->count())->toBe(2)
+        ->and($justLeft->fresh()->left_at)->toBeNull();
 });
