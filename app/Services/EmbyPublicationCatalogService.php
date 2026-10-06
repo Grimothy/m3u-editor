@@ -13,6 +13,8 @@ use Illuminate\Support\Str;
 
 class EmbyPublicationCatalogService
 {
+    public function __construct(private readonly NfoService $nfoService) {}
+
     /**
      * @return array<string, mixed>
      */
@@ -429,6 +431,14 @@ class EmbyPublicationCatalogService
                 'plot' => $series->plot,
                 'genres' => array_values(array_filter(array_map('trim', explode(',', (string) $series->genre)))),
                 'ids' => $ids,
+                // Enriched fields mirror the tvshow.nfo NfoService derives.
+                'outline' => $this->nfoService->seriesOutline($series),
+                'premiered' => $this->nfoService->seriesPremiered($series),
+                'rating' => $this->nfoService->seriesRating($series),
+                'mpaa' => $series->getContentRating(),
+                'studio' => $this->nfoService->seriesStudios($series),
+                'poster' => $this->nfoService->seriesPosterUrl($series),
+                'fanart' => $this->nfoService->seriesFanartUrl($series),
             ],
             'episodes' => [],
         ];
@@ -506,6 +516,12 @@ class EmbyPublicationCatalogService
                 'season_number' => $seasonNumber,
                 'episode_number' => $episodeNumber,
                 'ids' => $ids,
+                // Enriched fields mirror the episodedetails.nfo NfoService derives.
+                'showtitle' => $series->name,
+                'aired' => $this->nfoService->episodeAired($episode),
+                'rating' => $this->nfoService->episodeRating($episode),
+                'runtime' => $this->nfoService->episodeRuntime($episode),
+                'thumb' => $this->nfoService->episodeThumbUrl($episode),
             ],
             'variants' => $this->formatVariants($variants),
         ];
@@ -593,6 +609,19 @@ class EmbyPublicationCatalogService
                 'plot' => $info['plot'] ?? $movieData['plot'] ?? $movieData['description'] ?? null,
                 'genres' => $info['genres'] ?? $movieData['genre'] ?? [],
                 'ids' => $ids,
+                // Enriched fields mirror the movie.nfo NfoService derives.
+                'outline' => $this->nfoService->movieOutline($channel),
+                'premiered' => $this->nfoService->moviePremiered($channel),
+                'rating' => $this->nfoService->movieRating($channel),
+                'runtime' => $this->nfoService->movieRuntime($channel),
+                'mpaa' => $channel->getContentRating(),
+                'director' => $this->nfoService->movieDirector($channel),
+                'cast' => $this->nfoService->movieCast($channel),
+                'studio' => $this->nfoService->movieStudios($channel),
+                'country' => $this->nfoService->movieCountries($channel),
+                'tagline' => $this->nfoService->movieTagline($channel),
+                'poster' => $this->nfoService->moviePosterUrl($channel),
+                'fanart' => $this->nfoService->movieFanartUrl($channel),
             ],
             'variants' => [],
         ];

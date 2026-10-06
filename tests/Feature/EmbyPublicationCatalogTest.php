@@ -39,6 +39,28 @@ it('builds a deterministic managed movie catalog with safe metadata and playback
             'original_title' => 'John Wick: Chapter 4',
             'plot' => 'John Wick uncovers a path to defeating The High Table.',
             'genres' => ['Action', 'Thriller'],
+            'release_date' => '2023-03-24',
+            'vote_average' => 7.7,
+            'runtime' => 170,
+            'mpaa_rating' => 'R',
+            'director' => 'Chad Stahelski',
+            'cast' => [
+                ['name' => 'Keanu Reeves', 'character' => 'John Wick', 'profile_path' => '/x1MKxQkWwHB5WmpjY9uMwW7D7Ck.jpg'],
+                ['name' => 'Donnie Yen', 'character' => 'Caine'],
+            ],
+            'studios' => [
+                ['id' => 923, 'name' => 'Lionsgate'],
+                ['id' => 5, 'name' => 'Thunder Road Pictures'],
+            ],
+            'production_countries' => [
+                ['iso_3166_1' => 'US', 'name' => 'United States of America'],
+            ],
+            'tagline' => 'No way back. One way out.',
+            'poster_path' => '/vZloFAK7NmvMGKE7VkF5UHaz0I.jpg',
+            'backdrop_path' => '/7I6VUdPj6tQECNHdviJkUHi2vwb.jpg',
+        ],
+        'movie_data' => [
+            'releasedate' => '2023-03-24 00:00:00',
         ],
         'stream_stats' => [
             ['stream' => [
@@ -94,6 +116,25 @@ it('builds a deterministic managed movie catalog with safe metadata and playback
         ->and($item['relative_folder'])->toBe('john-wick-chapter-4-2023')
         ->and($item['base_filename'])->toBe('john-wick-chapter-4-2023')
         ->and($item['nfo']['plot'])->toContain('High Table')
+        ->and($item['nfo']['outline'])->toBe('John Wick uncovers a path to defeating The High Table.')
+        ->and($item['nfo']['premiered'])->toBe('2023-03-24')
+        ->and($item['nfo']['rating'])->toBe(7.7)
+        ->and($item['nfo']['runtime'])->toBe(170)
+        ->and($item['nfo']['mpaa'])->toBe('R')
+        ->and($item['nfo']['director'])->toBe('Chad Stahelski')
+        ->and($item['nfo']['cast'])->toBe([
+            [
+                'name' => 'Keanu Reeves',
+                'role' => 'John Wick',
+                'thumb' => 'https://image.tmdb.org/t/p/w185/x1MKxQkWwHB5WmpjY9uMwW7D7Ck.jpg',
+            ],
+            ['name' => 'Donnie Yen', 'role' => 'Caine', 'thumb' => null],
+        ])
+        ->and($item['nfo']['studio'])->toBe(['Lionsgate', 'Thunder Road Pictures'])
+        ->and($item['nfo']['country'])->toBe(['United States of America'])
+        ->and($item['nfo']['tagline'])->toBe('No way back. One way out.')
+        ->and($item['nfo']['poster'])->toBe('https://image.tmdb.org/t/p/original/vZloFAK7NmvMGKE7VkF5UHaz0I.jpg')
+        ->and($item['nfo']['fanart'])->toBe('https://image.tmdb.org/t/p/original/7I6VUdPj6tQECNHdviJkUHi2vwb.jpg')
         ->and($variant['key'])->toBe('2160p-hdr-hevc-eac3-eng-theatrical')
         ->and($variant['preferred']['playback_url'])->toBe(
             "https://m3u-editor.test/movie/tuner/secret/{$channel->id}.mkv?proxy=true"
@@ -159,6 +200,18 @@ it('keeps uncertain movie identities separate and excludes disabled or foreign s
         ->and($item['relative_folder'])->toBe('untitled-film')
         ->and($item['base_filename'])->toBe('untitled-film')
         ->and($item['ids'])->toBe(['tmdb' => null, 'tvdb' => null, 'imdb' => null])
+        ->and($item['nfo']['outline'])->toBeNull()
+        ->and($item['nfo']['premiered'])->toBeNull()
+        ->and($item['nfo']['rating'])->toBeNull()
+        ->and($item['nfo']['runtime'])->toBeNull()
+        ->and($item['nfo']['mpaa'])->toBeNull()
+        ->and($item['nfo']['director'])->toBeNull()
+        ->and($item['nfo']['cast'])->toBe([])
+        ->and($item['nfo']['studio'])->toBe([])
+        ->and($item['nfo']['country'])->toBe([])
+        ->and($item['nfo']['tagline'])->toBeNull()
+        ->and($item['nfo']['poster'])->toBeNull()
+        ->and($item['nfo']['fanart'])->toBeNull()
         ->and($item['variants'][0]['key'])->toBe('unknown-unknown-unknown-unknown-unknown-unknown')
         ->and(json_encode($catalog))->not->toContain('Disabled Movie')
         ->and(json_encode($catalog))->not->toContain('Foreign Movie')
@@ -304,7 +357,16 @@ it('builds canonical series and episode catalog shapes with local NFO data', fun
         'release_date' => '2017-12-01',
         'plot' => 'A missing child sets four families on a frantic hunt for answers.',
         'genre' => 'Drama, Mystery',
-        'metadata' => ['original_name' => 'Dark'],
+        'cover' => 'https://image.tmdb.org/t/p/w500/apbrbWs8M9lyOpJYU5WXrpFbk1Z.jpg',
+        'backdrop_path' => [],
+        'metadata' => [
+            'original_name' => 'Dark',
+            'plot' => 'A missing child sets four families on a frantic hunt for answers.',
+            'vote_average' => 8.4,
+            'content_rating' => 'TV-MA',
+            'networks' => [['id' => 213, 'name' => 'Netflix']],
+            'backdrop_path' => '/xwxPQivGupvHTwJn3FpbXdLyJpf.jpg',
+        ],
     ]);
     $season = Season::factory()->for($user)->for($playlist)->for($category)->for($series)->createQuietly([
         'name' => 'Season 1',
@@ -323,6 +385,10 @@ it('builds canonical series and episode catalog shapes with local NFO data', fun
             'plot' => 'The disappearance exposes old secrets.',
             'tvdb_id' => 654321,
             'imdb_id' => 'tt7315158',
+            'air_date' => '2017-12-01',
+            'vote_average' => 8.1,
+            'runtime' => 52,
+            'still_path' => '/mL6q4p2YSxYbEgm4sZsQt3ZeSoh.jpg',
         ],
         'stream_stats' => [
             ['stream' => ['codec_type' => 'video', 'codec_name' => 'h264', 'height' => 1080, 'color_transfer' => 'bt709']],
@@ -356,6 +422,13 @@ it('builds canonical series and episode catalog shapes with local NFO data', fun
         ])
         ->and($seriesItem['relative_folder'])->toBe('dark-2017')
         ->and($seriesItem['nfo']['plot'])->toContain('missing child')
+        ->and($seriesItem['nfo']['outline'])->toContain('missing child')
+        ->and($seriesItem['nfo']['premiered'])->toBe('2017-12-01')
+        ->and($seriesItem['nfo']['rating'])->toBe(8.4)
+        ->and($seriesItem['nfo']['mpaa'])->toBe('TV-MA')
+        ->and($seriesItem['nfo']['studio'])->toBe(['Netflix'])
+        ->and($seriesItem['nfo']['poster'])->toBe('https://image.tmdb.org/t/p/w500/apbrbWs8M9lyOpJYU5WXrpFbk1Z.jpg')
+        ->and($seriesItem['nfo']['fanart'])->toBe('https://image.tmdb.org/t/p/original/xwxPQivGupvHTwJn3FpbXdLyJpf.jpg')
         ->and($episodeItem['canonical_id'])->toBe('episode:tmdb:123456')
         ->and($episodeItem['series_canonical_id'])->toBe('series:tvdb:334824')
         ->and($episodeItem['media_type'])->toBe('episode')
@@ -370,10 +443,104 @@ it('builds canonical series and episode catalog shapes with local NFO data', fun
             'tvdb' => 654321,
             'imdb' => 'tt7315158',
         ])
+        ->and($episodeItem['nfo']['showtitle'])->toBe('Dark')
+        ->and($episodeItem['nfo']['aired'])->toBe('2017-12-01')
+        ->and($episodeItem['nfo']['rating'])->toBe(8.1)
+        ->and($episodeItem['nfo']['runtime'])->toBe(52)
+        ->and($episodeItem['nfo']['thumb'])->toBe('https://image.tmdb.org/t/p/original/mL6q4p2YSxYbEgm4sZsQt3ZeSoh.jpg')
         ->and($episodeItem['variants'][0]['preferred']['playback_url'])->toBe(
             "https://m3u-editor.test/series/tuner/secret/{$episode->id}.mkv?proxy=true"
         )
         ->and(json_encode($catalog))->not->toContain('provider.invalid');
+});
+
+it('normalizes xtream movie ratings, runtimes and string cast data in the nfo payload', function () {
+    config(['app.url' => 'https://m3u-editor.test', 'app.port' => null]);
+    $user = User::factory()->create();
+    $playlist = Playlist::factory()->for($user)->createQuietly();
+    $group = Group::factory()->for($user)->for($playlist)->create(['name' => 'Movies', 'type' => 'vod']);
+    Channel::factory()->for($user)->for($playlist)->for($group)->createQuietly([
+        'enabled' => true,
+        'is_vod' => true,
+        'title' => 'Xtream Movie',
+        'tmdb_id' => 42,
+        'info' => [
+            'cast' => 'First Actor, Second Actor',
+        ],
+        'movie_data' => [
+            'rating_5based' => 4,
+            'duration_secs' => 7500,
+            'country' => 'France',
+            'movie_image' => 'https://provider.invalid/poster.jpg',
+        ],
+    ]);
+    $integration = MediaServerIntegration::factory()->for($user)->createQuietly(['type' => 'emby']);
+    $mapping = EmbyLibraryMapping::factory()->for($user)->for($integration, 'integration')->create([
+        'source_kind' => 'vod_group',
+        'source_identifier' => (string) $group->id,
+        'source_label' => $group->name,
+    ]);
+
+    $nfo = app(EmbyPublicationCatalogService::class)->buildMapping($mapping, 'tuner', 'secret')['items'][0]['nfo'];
+
+    expect($nfo['rating'])->toBe(8)
+        ->and($nfo['runtime'])->toBe(125.0)
+        ->and($nfo['cast'])->toBe([
+            ['name' => 'First Actor', 'role' => null, 'thumb' => null],
+            ['name' => 'Second Actor', 'role' => null, 'thumb' => null],
+        ])
+        ->and($nfo['country'])->toBe(['France'])
+        ->and($nfo['poster'])->toBe('https://provider.invalid/poster.jpg');
+});
+
+it('nulls enriched series and episode nfo keys when metadata is missing', function () {
+    $user = User::factory()->create();
+    $playlist = Playlist::factory()->for($user)->createQuietly();
+    $category = Category::factory()->for($user)->for($playlist)->create(['name' => 'Sparse']);
+    $series = Series::factory()->for($user)->for($playlist)->for($category)->createQuietly([
+        'name' => 'Sparse Show',
+        'enabled' => true,
+        'tmdb_id' => 777,
+        'release_date' => null,
+        'plot' => null,
+        'genre' => '',
+        'cover' => null,
+        'backdrop_path' => null,
+        'metadata' => null,
+    ]);
+    $season = Season::factory()->for($user)->for($playlist)->for($category)->for($series)->createQuietly([
+        'season_number' => 1,
+    ]);
+    Episode::factory()->for($user)->for($playlist)->for($series)->for($season)->createQuietly([
+        'enabled' => true,
+        'title' => 'Sparse Episode',
+        'season' => 1,
+        'episode_num' => 1,
+        'info' => null,
+    ]);
+    $integration = MediaServerIntegration::factory()->for($user)->createQuietly(['type' => 'emby']);
+    $mapping = EmbyLibraryMapping::factory()->for($user)->for($integration, 'integration')->create([
+        'source_kind' => 'series_category',
+        'source_identifier' => (string) $category->id,
+        'source_label' => $category->name,
+        'collection_type' => 'tvshows',
+    ]);
+
+    $seriesItem = app(EmbyPublicationCatalogService::class)->buildMapping($mapping, 'tuner', 'secret')['items'][0];
+    $episodeNfo = $seriesItem['episodes'][0]['nfo'];
+
+    expect($seriesItem['nfo']['outline'])->toBeNull()
+        ->and($seriesItem['nfo']['premiered'])->toBeNull()
+        ->and($seriesItem['nfo']['rating'])->toBeNull()
+        ->and($seriesItem['nfo']['mpaa'])->toBeNull()
+        ->and($seriesItem['nfo']['studio'])->toBe([])
+        ->and($seriesItem['nfo']['poster'])->toBeNull()
+        ->and($seriesItem['nfo']['fanart'])->toBeNull()
+        ->and($episodeNfo['showtitle'])->toBe('Sparse Show')
+        ->and($episodeNfo['aired'])->toBeNull()
+        ->and($episodeNfo['rating'])->toBeNull()
+        ->and($episodeNfo['runtime'])->toBeNull()
+        ->and($episodeNfo['thumb'])->toBeNull();
 });
 
 it('merges episodes from duplicate provider series identities', function () {
