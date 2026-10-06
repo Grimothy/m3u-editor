@@ -420,7 +420,17 @@ class XtreamStreamController extends Controller
                 return $cacheRedirect;
             }
 
-            if (($playlist->enable_proxy || $request->input('proxy') === 'true') && $playlist->user->canUseProxy()) {
+            // Same rule as handleVod(). Episodes have no per-item proxy override, but
+            // pooled-provider source playlists must still take the proxy path.
+            $needsProxy = Channel::needsProxy(
+                channelEnableProxy: false,
+                playlistEnableProxy: (bool) $playlist->enable_proxy,
+                requestProxyFlag: $request->input('proxy') === 'true',
+                sourcePlaylistProfilesEnabled: $episode->playlist instanceof Playlist && $episode->playlist->profiles_enabled,
+                userCanUseProxy: $playlist->user->canUseProxy(),
+            );
+
+            if ($needsProxy) {
                 // Add username and PlaylistAuth ID to request for proxy traceability and per-auth enforcement
                 $request->merge(['username' => $username]);
                 if ($playlistAuth instanceof PlaylistAuth) {

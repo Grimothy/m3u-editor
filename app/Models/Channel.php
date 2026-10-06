@@ -141,7 +141,7 @@ class Channel extends Model
     }
 
     /**
-     * Shared proxy-eligibility rule used by both live streaming (XtreamStreamController)
+     * Shared proxy-eligibility rule used by both live/VOD/series streaming (XtreamStreamController)
      * and static output generation (PlaylistGenerateController::generate*), so the two
      * stay in sync instead of maintaining separate copies of the same rule.
      *
