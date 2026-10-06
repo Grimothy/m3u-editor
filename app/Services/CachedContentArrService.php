@@ -56,11 +56,13 @@ class CachedContentArrService
      * its series with only that season monitored; a manual one asks Sonarr
      * for that episode alone. `$cleanup` tags a movie Radarr didn't have
      * so ArrCacheCleanupService can remove it after it leaves its groups.
+     * Cache Now and `$keep` (a Never expire rule) take that tag off a movie
+     * Radarr already has, so cleanup never removes it.
      */
-    public function request(Channel|Episode $item, bool $automatic, bool $cleanup = false): ?CacheDispatchResult
+    public function request(Channel|Episode $item, bool $automatic, bool $cleanup = false, bool $keep = false): ?CacheDispatchResult
     {
         return $item instanceof Channel
-            ? $this->requestMovie($item, $automatic, $automatic && $cleanup)
+            ? $this->requestMovie($item, $automatic, $automatic && $cleanup, ! $automatic || $keep)
             : $this->requestEpisode($item, $automatic);
     }
 
@@ -76,7 +78,7 @@ class CachedContentArrService
         return $this->seriesState($series, $series->playlist, $seasons)['added'] ?? false;
     }
 
-    private function requestMovie(Channel $channel, bool $automatic, bool $cleanup): ?CacheDispatchResult
+    private function requestMovie(Channel $channel, bool $automatic, bool $cleanup, bool $keep): ?CacheDispatchResult
     {
         $radarr = $this->integration($channel->playlist, 'radarr');
         $tmdbId = (int) $channel->getTmdbId();
@@ -90,6 +92,10 @@ class CachedContentArrService
         }
 
         if ($movie['existsInLibrary']) {
+            if ($keep && ($movie['tags'] ?? []) !== []) {
+                $this->keepFromCleanup($radarr, (int) $movie['libraryId'], $movie['tags']);
+            }
+
             return $movie['hasFile'] || $automatic ? CacheDispatchResult::InArrLibrary : null;
         }
 
@@ -229,22 +235,60 @@ class CachedContentArrService
     }
 
     /**
-     * The integration's cleanup tag, created on first use. Null when Radarr
-     * won't create it; the movie is then added untagged, so it's never
-     * cleaned up.
+     * Take the cleanup tag off a movie a Never expire rule holds, when it's
+     * already in Radarr. Used for members already on the media server,
+     * which skip `request()`.
      */
-    private function cleanupTagId(ArrIntegration $radarr): ?int
+    public function keep(Channel $channel): void
     {
-        if (array_key_exists($radarr->id, $this->cleanupTagIds)) {
+        $radarr = $this->integration($channel->playlist, 'radarr');
+        $tmdbId = (int) $channel->getTmdbId();
+        if (! $radarr || $tmdbId <= 0 || $this->cleanupTagId($radarr, create: false) === null) {
+            return;
+        }
+
+        $movie = $this->lookup($radarr, $tmdbId);
+        if ($movie !== null && $movie['existsInLibrary']) {
+            $this->keepFromCleanup($radarr, (int) $movie['libraryId'], $movie['tags'] ?? []);
+        }
+    }
+
+    /**
+     * Take the integration's cleanup tag off a library movie so cleanup
+     * never removes it. A failure only means cleanup may still remove it.
+     *
+     * @param  array<int, int>  $tags
+     */
+    private function keepFromCleanup(ArrIntegration $radarr, int $movieId, array $tags): void
+    {
+        $tagId = $this->cleanupTagId($radarr, create: false);
+        if ($tagId === null || ! in_array($tagId, $tags, true)) {
+            return;
+        }
+
+        /** @var RadarrService $service */
+        $service = ArrService::make($radarr);
+        $service->removeTag($movieId, $tagId);
+    }
+
+    /**
+     * The integration's cleanup tag, created on first use when `$create`.
+     * Null when it doesn't exist (or Radarr won't create it); a movie is
+     * then added untagged, so it's never cleaned up.
+     */
+    private function cleanupTagId(ArrIntegration $radarr, bool $create = true): ?int
+    {
+        if (array_key_exists($radarr->id, $this->cleanupTagIds)
+            && ($this->cleanupTagIds[$radarr->id] !== null || ! $create)) {
             return $this->cleanupTagIds[$radarr->id];
         }
 
         try {
             /** @var RadarrService $service */
             $service = ArrService::make($radarr);
-            $tagId = $service->cacheCleanupTagId(create: true);
+            $tagId = $service->cacheCleanupTagId($create);
         } catch (Throwable $e) {
-            Log::warning('Cache cleanup tag unavailable, adding the movie untagged', [
+            Log::warning('Cache cleanup tag unavailable', [
                 'integration_id' => $radarr->id,
                 'error' => $e->getMessage(),
             ]);

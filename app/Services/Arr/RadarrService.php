@@ -131,6 +131,7 @@ class RadarrService extends BaseArrService
                     'fileQuality' => isset($item['movieFile']) ? ($item['movieFile']['quality']['quality']['name'] ?? null) : null,
                     'fileSize' => isset($item['movieFile']) ? ($item['movieFile']['size'] ?? null) : null,
                     'images' => $item['images'] ?? [],
+                    'tags' => array_map('intval', $item['tags'] ?? []),
                 ];
             })
             ->all();
@@ -336,6 +337,25 @@ class RadarrService extends BaseArrService
 
             throw $e;
         }
+    }
+
+    /**
+     * Take a tag off a library movie.
+     *
+     * @return array{ok: bool, error?: string}
+     */
+    public function removeTag(int $movieId, int $tagId): array
+    {
+        return $this->safeCall(
+            function () use ($movieId, $tagId) {
+                $this->client()
+                    ->put('/movie/editor', ['movieIds' => [$movieId], 'tags' => [$tagId], 'applyTags' => 'remove'])
+                    ->throw();
+
+                return true;
+            },
+            'remove movie tag'
+        );
     }
 
     /**

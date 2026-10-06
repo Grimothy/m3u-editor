@@ -78,9 +78,10 @@ class CachedContentDispatchService
      *
      * `$viaArr` false keeps the provider even when a caching Radarr/Sonarr
      * is set up. `$arrCleanup` tags a movie added to Radarr so cleanup can
-     * remove it after it leaves its dynamic group.
+     * remove it after it leaves its dynamic group; `$arrKeep` (Never expire)
+     * takes that tag off again, like Cache Now does.
      */
-    public function dispatch(Channel|Episode $item, bool $automatic = false, bool $viaArr = true, bool $arrCleanup = false): CacheDispatchResult
+    public function dispatch(Channel|Episode $item, bool $automatic = false, bool $viaArr = true, bool $arrCleanup = false, bool $arrKeep = false): CacheDispatchResult
     {
         if (! $this->isEnabled()) {
             return CacheDispatchResult::Disabled;
@@ -118,7 +119,7 @@ class CachedContentDispatchService
             return CacheDispatchResult::AlreadyCached;
         }
 
-        $sent = $viaArr ? $this->arr->request($item, $automatic, $arrCleanup) : null;
+        $sent = $viaArr ? $this->arr->request($item, $automatic, $arrCleanup, $arrKeep) : null;
         if ($sent !== null) {
             return $sent;
         }
@@ -292,10 +293,14 @@ class CachedContentDispatchService
                 ->wherePivotNull('dropped_at')
                 ->updateExistingPivot($group->id, ['dropped_at' => now()]);
 
+            if ($neverExpire && $item instanceof Channel) {
+                $this->arr->keep($item);
+            }
+
             return;
         }
 
-        $counts[$this->dispatch($item, automatic: true, arrCleanup: $arrCleanup)->value]++;
+        $counts[$this->dispatch($item, automatic: true, arrCleanup: $arrCleanup, arrKeep: $neverExpire)->value]++;
 
         $file = $item->cachedContentFile()->first();
         if ($file?->managed_by !== CachedContentManagedBy::DynamicGroup) {

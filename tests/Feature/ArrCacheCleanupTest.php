@@ -5,9 +5,11 @@ use App\Models\ArrIntegration;
 use App\Models\CachedContentFile;
 use App\Models\Channel;
 use App\Models\DynamicGroup;
+use App\Models\MediaServerIntegration;
 use App\Models\Playlist;
 use App\Services\ArrCacheCleanupService;
 use App\Services\CachedContentDispatchService;
+use App\Services\MediaSourceMatchService;
 use App\Settings\GeneralSettings;
 use Illuminate\Foundation\Testing\RefreshDatabase;
 use Illuminate\Http\Client\ConnectionException;
@@ -171,6 +173,82 @@ it('turns cleanup off for Never expire rules', function () {
     $group = accGroup($this->playlist, 'Trending', [], ['cache_arr_cleanup' => true, 'cache_never_expire' => true]);
 
     expect($group->cacheSettings()['arr_cleanup'])->toBeFalse();
+});
+
+/**
+ * Fake a Radarr that already has movie 7 (TMDB 550) with a file and the
+ * cleanup tag (id 5).
+ */
+function accFakeTaggedLibraryMovie(ArrIntegration $radarr): void
+{
+    Http::fake([
+        'radarr.test/api/v3/movie/lookup*' => Http::response([[
+            'id' => 7, 'tmdbId' => 550, 'title' => 'Fight Club', 'titleSlug' => 'fight-club',
+            'images' => [], 'hasFile' => true, 'tags' => [5],
+        ]]),
+        'radarr.test/api/v3/tag' => Http::response([['id' => 5, 'label' => 'm3u-editor-cache-'.$radarr->id]]),
+        'radarr.test/api/v3/movie/editor' => Http::response([]),
+    ]);
+}
+
+function accTagRemoved(): bool
+{
+    return Http::recorded(fn (Request $request): bool => $request->method() === 'PUT'
+        && str_ends_with($request->url(), '/api/v3/movie/editor')
+        && $request['movieIds'] === [7]
+        && $request['tags'] === [5]
+        && $request['applyTags'] === 'remove')->count() === 1;
+}
+
+it('takes the cleanup tag off a movie on Cache Now so cleanup keeps it', function () {
+    accFakeTaggedLibraryMovie($this->radarr);
+
+    app(CachedContentDispatchService::class)->dispatch(accChannel($this->playlist, 550));
+
+    expect(accTagRemoved())->toBeTrue();
+});
+
+it('takes the cleanup tag off a movie a Never expire rule holds', function () {
+    $group = accGroup($this->playlist, 'Trending', [accChannel($this->playlist, 550)], ['cache_never_expire' => true]);
+    accFakeTaggedLibraryMovie($this->radarr);
+
+    app(CachedContentDispatchService::class)->dispatchForDynamicGroup($group);
+
+    expect(accTagRemoved())->toBeTrue();
+});
+
+it('takes the cleanup tag off a Never expire member already on the media server', function () {
+    $channel = accChannel($this->playlist, 550);
+    $group = accGroup($this->playlist, 'Trending', [$channel], ['cache_never_expire' => true]);
+
+    $media = Playlist::factory()->for($this->playlist->user)->create();
+    Channel::factory()->for($media)->for($this->playlist->user)->create([
+        'enabled' => true,
+        'is_vod' => true,
+        'tmdb_id' => 550,
+        'url' => 'https://media.example.com/local/550.mkv',
+    ]);
+    MediaServerIntegration::factory()->for($this->playlist->user)->create([
+        'type' => 'emby',
+        'enabled' => true,
+        'playlist_id' => $media->id,
+    ]);
+    app(MediaSourceMatchService::class)->rebuildForPlaylist($this->playlist->refresh());
+    accFakeTaggedLibraryMovie($this->radarr);
+
+    app(CachedContentDispatchService::class)->dispatchForDynamicGroup($group->fresh());
+
+    expect(accTagRemoved())->toBeTrue()
+        ->and(Http::recorded(fn (Request $request): bool => $request->method() === 'POST'))->toBeEmpty();
+});
+
+it('leaves the tag on a movie a cleanup rule holds', function () {
+    $group = accGroup($this->playlist, 'Trending', [accChannel($this->playlist, 550)], ['cache_arr_cleanup' => true]);
+    accFakeTaggedLibraryMovie($this->radarr);
+
+    app(CachedContentDispatchService::class)->dispatchForDynamicGroup($group);
+
+    Http::assertNotSent(fn (Request $request): bool => $request->method() === 'PUT');
 });
 
 // --- Cleanup ---
