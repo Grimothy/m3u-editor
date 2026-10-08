@@ -492,8 +492,30 @@ it('tracks a movie sent to Radarr on integrations with failback on', function ()
     expect($row->source)->toBe('arr')
         ->and($row->arr_integration_id)->not->toBeNull()
         ->and($row->arr_requested_at)->not->toBeNull()
-        ->and($row->status)->toBe(CachedContentFileStatus::Pending)
-        ->and($row->fallback_dispatched_at)->toBeNull();
+        ->and($row->status)->toBe(CachedContentFileStatus::Pending);
+});
+
+it('falls back to the provider on Cache Now for a title waiting on the arr', function () {
+    $playlist = cvaPlaylist();
+    cvaArr($playlist, 'radarr', ['cache_failback' => true]);
+    Http::fake([
+        'radarr.test/api/v3/movie/lookup*' => Http::response(cvaMovieLookup()),
+        'radarr.test/api/v3/movie?tmdbId=550' => Http::response([['id' => 7, 'tmdbId' => 550, 'hasFile' => false]]),
+        'radarr.test/api/v3/movie/7' => Http::response(['id' => 7, 'monitored' => true]),
+        'radarr.test/api/v3/movie' => Http::response(['id' => 7]),
+    ]);
+
+    $channel = cvaChannel($playlist);
+
+    expect(cvaService()->dispatch($channel, automatic: true))->toBe(CacheDispatchResult::SentToArr)
+        // Auto-cache leaves it to the arr.
+        ->and(cvaService()->dispatch($channel, automatic: true))->toBe(CacheDispatchResult::AlreadyQueued);
+    Bus::assertNotDispatched(DownloadCachedContentFile::class);
+
+    expect(cvaService()->dispatch($channel))->toBe(CacheDispatchResult::Queued)
+        ->and(CachedContentFile::query()->sole()->source)->toBe('provider')
+        ->and(cvaSentTo('PUT', '/movie/7'))->toBe(1);
+    Bus::assertDispatched(DownloadCachedContentFile::class);
 });
 
 it('does not track arr requests without the failback flag', function () {

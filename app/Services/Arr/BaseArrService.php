@@ -8,7 +8,6 @@ use Exception;
 use Illuminate\Http\Client\PendingRequest;
 use Illuminate\Http\Client\RequestException;
 use Illuminate\Http\Client\Response;
-use Illuminate\Support\Carbon;
 use Illuminate\Support\Facades\Http;
 use Illuminate\Support\Facades\Log;
 
@@ -115,53 +114,6 @@ abstract class BaseArrService implements ArrIntegrationInterface
             '/notification/test',
             $this->webhookResource($client, $url, $this->findWebhook($client, $url)),
         ));
-    }
-
-    /**
-     * Recent history records across the whole arr, paging back until records
-     * predate `$since` (or the page cap). Normalized to the fields failback
-     * matching needs — the arrs only expose internal ids here, never the
-     * TMDB/TVDB ids, so callers join through a library list.
-     *
-     * @return array<int, array<string, mixed>>
-     */
-    public function fetchHistoryPages(?Carbon $since = null, int $pageSize = 250, int $maxPages = 5): array
-    {
-        $records = [];
-
-        for ($page = 1; $page <= $maxPages; $page++) {
-            try {
-                $response = $this->queueClient()
-                    ->get('/history', ['pageSize' => $pageSize, 'page' => $page]);
-            } catch (Exception) {
-                break; // Unreachable; the caller treats the sweep as skipped.
-            }
-
-            if (! $response->successful()) {
-                break;
-            }
-
-            $pageRecords = $response->json('records') ?? [];
-
-            foreach ($pageRecords as $record) {
-                $records[] = [
-                    'eventType' => (string) ($record['eventType'] ?? ''),
-                    'occurred_at' => (string) ($record['date'] ?? ''),
-                    'movieId' => isset($record['movieId']) ? (int) $record['movieId'] : null,
-                    'seriesId' => isset($record['seriesId']) ? (int) $record['seriesId'] : null,
-                    'episodeId' => isset($record['episodeId']) ? (int) $record['episodeId'] : null,
-                ];
-            }
-
-            $oldest = collect($pageRecords)->pluck('date')->filter()->sort()->first();
-
-            if (count($pageRecords) < $pageSize
-                || ($since !== null && $oldest !== null && Carbon::parse($oldest)->lt($since))) {
-                break;
-            }
-        }
-
-        return $records;
     }
 
     /**

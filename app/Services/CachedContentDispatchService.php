@@ -35,7 +35,10 @@ use Illuminate\Database\UniqueConstraintViolationException;
  */
 class CachedContentDispatchService
 {
-    public function __construct(private CachedContentArrService $arr) {}
+    public function __construct(
+        private CachedContentArrService $arr,
+        private ArrCacheFailbackService $failback,
+    ) {}
 
     /**
      * Whether the global `enable_cache` toggle is on.
@@ -95,6 +98,12 @@ class CachedContentDispatchService
         if ($existing) {
             if (! $automatic) {
                 $existing->keep();
+
+                // Cache Now on a title still waiting on the arr uses the
+                // provider now, like Cache Now on an arr title without a file.
+                if ($existing->source === 'arr') {
+                    return $this->failback->fallBack($existing) ? CacheDispatchResult::Queued : CacheDispatchResult::AlreadyQueued;
+                }
             }
 
             if (in_array($existing->status, [CachedContentFileStatus::Pending, CachedContentFileStatus::Downloading], true)) {

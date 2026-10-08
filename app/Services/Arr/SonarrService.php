@@ -450,23 +450,6 @@ class SonarrService extends BaseArrService
     }
 
     /**
-     * One library series by its TVDB id, or null when Sonarr doesn't have
-     * it. Gives the library id without a monitored-title change.
-     *
-     * @return array<string, mixed>|null
-     */
-    public function fetchSeriesByTvdbId(int $tvdbId): ?array
-    {
-        $items = $this->client()
-            ->get('/series/lookup', ['term' => 'tvdb:'.$tvdbId])
-            ->json() ?? [];
-
-        $first = $items[0] ?? null;
-
-        return isset($first['id']) ? $first : null;
-    }
-
-    /**
      * Unmonitor a single episode without touching its file. Unlike deleting
      * the series (which Sonarr can do with deleteFiles), this only stops
      * Sonarr looking for that one episode.
@@ -559,54 +542,6 @@ class SonarrService extends BaseArrService
     public function supportsEpisodes(): bool
     {
         return true;
-    }
-
-    /**
-     * Every library series, reduced to the fields failback matching needs.
-     *
-     * @return array<int, array{id: int, tvdbId: int}>
-     */
-    public function fetchAllSeries(): array
-    {
-        $response = $this->queueClient()->get('/series');
-
-        if (! $response->successful()) {
-            return [];
-        }
-
-        return collect($response->json() ?? [])
-            ->filter(fn ($series): bool => isset($series['id'], $series['tvdbId']))
-            ->map(fn ($series): array => [
-                'id' => (int) $series['id'],
-                'tvdbId' => (int) $series['tvdbId'],
-            ])
-            ->values()
-            ->all();
-    }
-
-    /**
-     * Every indexed episode of one series, with library ids and file state.
-     *
-     * @return array<int, array{id: int, seasonNumber: int, episodeNumber: int, hasFile: bool}>
-     */
-    public function fetchSeriesEpisodes(int $seriesId): array
-    {
-        $response = $this->queueClient()->get('/episode', ['seriesId' => $seriesId]);
-
-        if (! $response->successful()) {
-            return [];
-        }
-
-        return collect($response->json() ?? [])
-            ->filter(fn ($episode): bool => isset($episode['id']))
-            ->map(fn ($episode): array => [
-                'id' => (int) $episode['id'],
-                'seasonNumber' => (int) ($episode['seasonNumber'] ?? 0),
-                'episodeNumber' => (int) ($episode['episodeNumber'] ?? 0),
-                'hasFile' => ($episode['hasFile'] ?? false) === true,
-            ])
-            ->values()
-            ->all();
     }
 
     /**

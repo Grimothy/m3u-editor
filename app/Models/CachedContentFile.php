@@ -52,8 +52,6 @@ use Illuminate\Support\Str;
  * @property string $source
  * @property int|null $arr_integration_id
  * @property Carbon|null $arr_requested_at
- * @property Carbon|null $fallback_dispatched_at
- * @property Carbon|null $fallback_notified_at
  * @property Carbon $created_at
  * @property Carbon $updated_at
  *
@@ -99,8 +97,6 @@ class CachedContentFile extends Model
         'source',
         'arr_integration_id',
         'arr_requested_at',
-        'fallback_dispatched_at',
-        'fallback_notified_at',
     ];
 
     /**
@@ -130,8 +126,6 @@ class CachedContentFile extends Model
             'managed_by' => CachedContentManagedBy::class,
             'arr_integration_id' => 'integer',
             'arr_requested_at' => 'datetime',
-            'fallback_dispatched_at' => 'datetime',
-            'fallback_notified_at' => 'datetime',
         ];
     }
 
@@ -229,14 +223,14 @@ class CachedContentFile extends Model
 
     /**
      * Rows requested through an arr (failback tracking) that haven't fallen
-     * back to the provider yet.
+     * back to the provider yet. Falling back flips `source` to 'provider'.
      *
      * @param  Builder<static>  $query
      * @return Builder<static>
      */
     public function scopeArrTracked(Builder $query): Builder
     {
-        return $query->where('source', 'arr')->whereNull('fallback_dispatched_at');
+        return $query->where('source', 'arr');
     }
 
     /**

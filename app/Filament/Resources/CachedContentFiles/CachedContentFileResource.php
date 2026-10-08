@@ -262,10 +262,12 @@ class CachedContentFileResource extends Resource
             ->defaultPaginationPageOption(25)
             ->paginated([10, 25, 50, 100])
             // 5s while anything visible is in flight, otherwise 60s so newly
-            // queued downloads still show up without a reload.
+            // queued downloads still show up without a reload. Rows waiting
+            // on Radarr/Sonarr can sit for a day, so they don't count.
             ->poll(
                 fn (): string => static::getEloquentQuery()
                     ->whereIn('status', [CachedContentFileStatus::Pending, CachedContentFileStatus::Downloading])
+                    ->where('source', '!=', 'arr')
                     ->exists() ? '5s' : '60s',
             )
             ->columns([
@@ -744,15 +746,10 @@ class CachedContentFileResource extends Resource
             return;
         }
 
-        // An arr-sourced row still waiting on the arr: canceling also stops
-        // the arr looking for the title (unmonitor only — its library files
-        // are never touched). Failures are logged, never fatal.
-        if ($record->source === 'arr' && $record->fallback_dispatched_at === null) {
-            try {
-                app(ArrCacheFailbackService::class)->cancelArrRequest($record);
-            } catch (\Throwable) {
-                // The row is deleted either way.
-            }
+        // A row still waiting on the arr: canceling also stops the arr
+        // looking for the title (unmonitor only, its files are never touched).
+        if ($record->source === 'arr') {
+            app(ArrCacheFailbackService::class)->unmonitor($record);
         }
 
         if (in_array($record->status, [CachedContentFileStatus::Pending, CachedContentFileStatus::Downloading], true)) {

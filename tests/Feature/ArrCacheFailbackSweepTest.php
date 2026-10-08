@@ -1,44 +1,44 @@
 <?php
 
 use App\Enums\CachedContentFileStatus;
+use App\Filament\Resources\CachedContentFiles\CachedContentFileResource;
 use App\Jobs\DownloadCachedContentFile;
 use App\Models\ArrIntegration;
-use App\Models\ArrQueueEvent;
 use App\Models\CachedContentFile;
 use App\Models\Channel;
 use App\Models\Episode;
 use App\Models\Playlist;
 use App\Models\Series;
-use App\Models\User;
 use App\Services\ArrCacheFailbackService;
 use App\Settings\GeneralSettings;
-use Filament\Notifications\DatabaseNotification;
 use Illuminate\Foundation\Testing\RefreshDatabase;
 use Illuminate\Http\Client\ConnectionException;
 use Illuminate\Http\Client\Request;
 use Illuminate\Support\Facades\Bus;
 use Illuminate\Support\Facades\Http;
-use Illuminate\Support\Facades\Notification as NotificationFacade;
 use Illuminate\Support\Facades\Storage;
 use Illuminate\Support\Sleep;
 
 uses(RefreshDatabase::class);
 
 /**
- * Row helpers prefixed acf* (arr cache failback) — CacheViaArrTest owns the
- * cva* ones; don't reuse them here so the suites stay independently
- * runnable.
+ * Helpers are prefixed acf* (arr cache failback); CacheViaArrTest owns the
+ * cva* ones, so the suites stay independently runnable.
  */
 function acfPlaylist(): Playlist
 {
     return Playlist::factory()->create(['prefer_media_server_sources' => true]);
 }
 
+/**
+ * @param  array<string, mixed>  $attributes
+ */
 function acfArr(Playlist $playlist, string $type, array $attributes = []): ArrIntegration
 {
     return ArrIntegration::factory()->{$type}()->cacheEnabled()->cacheFailback()->create([
         'user_id' => $playlist->user_id,
         'url' => "http://{$type}.test",
+        ...$attributes,
     ]);
 }
 
@@ -54,13 +54,13 @@ function acfChannel(Playlist $playlist, int $tmdbId = 550): Channel
     ]);
 }
 
-function acfEpisode(Playlist $playlist, int $tvdbId = 81189, int $season = 2, int $episodeNum = 3): Episode
+function acfEpisode(Playlist $playlist, int $season = 2, int $episodeNum = 3, ?Series $series = null): Episode
 {
-    $series = Series::factory()->create([
+    $series ??= Series::factory()->create([
         'user_id' => $playlist->user_id,
         'playlist_id' => $playlist->id,
         'enabled' => true,
-        'tvdb_id' => $tvdbId,
+        'tvdb_id' => 81189,
     ]);
 
     return Episode::factory()->create([
@@ -74,11 +74,16 @@ function acfEpisode(Playlist $playlist, int $tvdbId = 81189, int $season = 2, in
     ]);
 }
 
-function acfRow(Channel|Episode $item, ArrIntegration $arr, array $overrides = []): CachedContentFile
+/**
+ * @param  array<string, mixed>  $overrides
+ */
+function acfRow(Channel|Episode $item, ?ArrIntegration $arr, array $overrides = []): CachedContentFile
 {
     return CachedContentFile::factory()->forItem($item)->create([
+        ...CachedContentFile::buildAttributes($item),
+        'status' => CachedContentFileStatus::Pending,
         'source' => 'arr',
-        'arr_integration_id' => $arr->id,
+        'arr_integration_id' => $arr?->id,
         'arr_requested_at' => now()->subMinutes(5),
         ...$overrides,
     ]);
@@ -90,38 +95,43 @@ function acfService(): ArrCacheFailbackService
 }
 
 /**
- * Radarr fake routing by path: status / queue / history / movie list /
- * single movie (unmonitor PUT). Anything else fails loudly.
+ * @return array<string, mixed>
+ */
+function acfMovieQueue(string $status, string $state, int $tmdbId = 550): array
+{
+    return ['status' => $status, 'trackedDownloadState' => $state, 'movie' => ['tmdbId' => $tmdbId, 'title' => 'Fight Club']];
+}
+
+/**
+ * Radarr fake: status, queue, library lookup (/movie?tmdbId=) and the
+ * unmonitor GET/PUT on /movie/{id}. `$library` maps TMDB id => hasFile.
  *
  * @param  array<int, array<string, mixed>>  $queue
- * @param  array<int, array<string, mixed>>  $history
- * @param  array<int, array<string, mixed>>  $movies
+ * @param  array<int, bool>  $library
  */
-function acfRadarrFake(array $queue = [], array $history = [], array $movies = [], bool $healthy = true): void
+function acfRadarrFake(array $queue = [], array $library = [550 => false], bool $healthy = true): void
 {
-    Http::fake(function (Request $request) use ($queue, $history, $movies, $healthy) {
+    Http::fake(function (Request $request) use ($queue, $library, $healthy) {
         $url = $request->url();
 
         if (str_contains($url, '/system/status')) {
-            return $healthy
-                ? Http::response(['version' => '5.0'])
-                : Http::response(['error' => 'boom'], 500);
+            return $healthy ? Http::response(['version' => '5.0']) : Http::response(['error' => 'boom'], 500);
         }
 
         if (str_contains($url, '/queue')) {
-            return Http::response(['page' => 1, 'totalRecords' => count($queue), 'records' => $queue]);
+            return Http::response(['records' => $queue]);
         }
 
-        if (str_contains($url, '/history')) {
-            return Http::response(['page' => 1, 'totalRecords' => count($history), 'records' => $history]);
+        if (preg_match('#/movie/(\d+)$#', $url, $match)) {
+            return Http::response(['id' => (int) $match[1], 'monitored' => true]);
         }
 
-        if (preg_match('#/movie/\d+$#', $url)) {
-            return Http::response(['id' => 7, 'tmdbId' => 550, 'hasFile' => false, 'monitored' => true]);
-        }
+        if (preg_match('#/movie\?tmdbId=(\d+)#', $url, $match)) {
+            $tmdbId = (int) $match[1];
 
-        if (str_contains($url, '/movie')) {
-            return Http::response($movies);
+            return Http::response(array_key_exists($tmdbId, $library)
+                ? [['id' => $tmdbId + 1000, 'tmdbId' => $tmdbId, 'hasFile' => $library[$tmdbId]]]
+                : []);
         }
 
         throw new ConnectionException('unexpected arr request: '.$url);
@@ -129,33 +139,25 @@ function acfRadarrFake(array $queue = [], array $history = [], array $movies = [
 }
 
 /**
- * Sonarr fake routing by path: status / queue / history / series list /
- * series lookup / episodes / episode monitor (unmonitor PUT).
+ * Sonarr fake: status, queue, series lookup (series 9), episodes and the
+ * episode monitor PUT. `$episodes` maps "season:episode" => hasFile.
  *
  * @param  array<int, array<string, mixed>>  $queue
- * @param  array<int, array<string, mixed>>  $history
- * @param  array<int, array<string, mixed>>  $series
- * @param  array<int, array<string, mixed>>  $episodes
+ * @param  array<string, bool>  $episodes
  */
-function acfSonarrFake(array $queue = [], array $history = [], array $series = [], array $episodes = [], bool $healthy = true): void
+function acfSonarrFake(array $queue = [], array $episodes = ['2:3' => false]): void
 {
-    Http::fake(function (Request $request) use ($queue, $history, $series, $episodes, $healthy) {
+    Http::fake(function (Request $request) use ($queue, $episodes) {
         $url = $request->url();
 
         if (str_contains($url, '/system/status')) {
-            return $healthy
-                ? Http::response(['version' => '4.0'])
-                : Http::response(['error' => 'boom'], 500);
+            return Http::response(['version' => '4.0']);
         }
 
-        // /queue before /episode: the queue URL's includeEpisode=true query
-        // would otherwise match the episodes branch.
+        // /queue before /episode: the queue URL's includeEpisode=true would
+        // otherwise match the episodes branch.
         if (str_contains($url, '/queue')) {
-            return Http::response(['page' => 1, 'totalRecords' => count($queue), 'records' => $queue]);
-        }
-
-        if (str_contains($url, '/history')) {
-            return Http::response(['page' => 1, 'totalRecords' => count($history), 'records' => $history]);
+            return Http::response(['records' => $queue]);
         }
 
         if (str_contains($url, '/episode/monitor')) {
@@ -163,30 +165,25 @@ function acfSonarrFake(array $queue = [], array $history = [], array $series = [
         }
 
         if (str_contains($url, '/episode')) {
-            return Http::response($episodes);
+            return Http::response(collect($episodes)->map(function (bool $hasFile, string $key): array {
+                [$season, $episode] = array_map('intval', explode(':', $key));
+
+                return ['id' => $season * 100 + $episode, 'seasonNumber' => $season, 'episodeNumber' => $episode, 'hasFile' => $hasFile];
+            })->values()->all());
         }
 
         if (str_contains($url, '/series/lookup')) {
-            return Http::response($series);
-        }
-
-        if (str_contains($url, '/series')) {
-            return Http::response($series);
+            return Http::response([['id' => 9, 'tvdbId' => 81189]]);
         }
 
         throw new ConnectionException('unexpected arr request: '.$url);
     });
 }
 
-function acfHistoryEvent(string $eventType, string $when, ?int $movieId = null, ?int $episodeId = null, ?int $seriesId = null): array
+function acfSent(string $method, string $pattern): int
 {
-    return array_filter([
-        'eventType' => $eventType,
-        'date' => $when,
-        'movieId' => $movieId,
-        'episodeId' => $episodeId,
-        'seriesId' => $seriesId,
-    ], fn ($value): bool => $value !== null);
+    return Http::recorded(fn (Request $request): bool => $request->method() === $method
+        && preg_match($pattern, $request->url()) === 1)->count();
 }
 
 beforeEach(function () {
@@ -195,168 +192,86 @@ beforeEach(function () {
     Storage::fake(CachedContentFile::DISK);
     Http::preventStrayRequests();
     Sleep::fake();
-    NotificationFacade::fake();
 });
 
 // --- Movies (Radarr) ---
 
-it('fails back on a terminal queue failure and unmonitors the movie', function () {
+it('falls back on a failed download and unmonitors the movie', function () {
     $playlist = acfPlaylist();
-    $arr = acfArr($playlist, 'radarr');
-    $row = acfRow(acfChannel($playlist), $arr);
+    $row = acfRow(acfChannel($playlist), acfArr($playlist, 'radarr'));
 
-    acfRadarrFake(
-        queue: [[
-            'status' => 'failed',
-            'trackedDownloadState' => 'failedPending',
-            'trackedDownloadStatus' => 'warning',
-            'movie' => ['tmdbId' => 550, 'title' => 'Fight Club'],
-        ]],
-        movies: [['id' => 7, 'tmdbId' => 550, 'hasFile' => false, 'monitored' => true]],
-    );
+    acfRadarrFake(queue: [acfMovieQueue('failed', 'failedPending')]);
 
     acfService()->sweep();
 
-    $row->refresh();
-
-    expect($row->source)->toBe('provider')
-        ->and($row->fallback_dispatched_at)->not->toBeNull()
+    expect($row->refresh()->source)->toBe('provider')
         ->and($row->status)->toBe(CachedContentFileStatus::Pending);
     Bus::assertDispatched(DownloadCachedContentFile::class, fn (DownloadCachedContentFile $job): bool => $job->cachedContentFileId === $row->id);
 
     // Unmonitor, never delete.
-    expect(Http::recorded(fn (Request $request): bool => $request->method() === 'PUT'
-        && str_contains($request->url(), '/movie/7'))->count())->toBe(1)
-        ->and(Http::recorded(fn (Request $request): bool => $request->method() === 'DELETE')->count())->toBe(0)
-        ->and(Http::recorded(fn (Request $request): bool => $request->method() === 'PUT'
-            && ($request['deleteFiles'] ?? null) !== null)->count())->toBe(0);
+    expect(acfSent('PUT', '#/movie/1550$#'))->toBe(1)
+        ->and(acfSent('DELETE', '#.#'))->toBe(0);
 });
 
-it('fails back on a downloadFailed history event after the request', function () {
+it('falls back once the deadline passes without a download', function () {
     $playlist = acfPlaylist();
-    $arr = acfArr($playlist, 'radarr');
-    $row = acfRow(acfChannel($playlist, 550), $arr);
+    $fresh = acfRow(acfChannel($playlist, 550), $arr = acfArr($playlist, 'radarr'));
+    $late = acfRow(acfChannel($playlist, 551), $arr, ['arr_requested_at' => now()->subHours(25)]);
 
-    acfRadarrFake(
-        history: [acfHistoryEvent('downloadFailed', now()->addMinutes(30)->toIso8601String(), movieId: 7)],
-        movies: [['id' => 7, 'tmdbId' => 550, 'hasFile' => false, 'monitored' => true]],
-    );
+    acfRadarrFake(library: [550 => false, 551 => false]);
 
     acfService()->sweep();
 
-    expect($row->refresh()->fallback_dispatched_at)->not->toBeNull();
-    Bus::assertDispatched(DownloadCachedContentFile::class);
+    expect($fresh->refresh()->source)->toBe('arr')
+        ->and($late->refresh()->source)->toBe('provider');
+    Bus::assertDispatchedTimes(DownloadCachedContentFile::class, 1);
 });
 
-it('fails back after 24 hours of never being grabbed', function () {
+it('falls back when the movie is no longer in the arr after the deadline', function () {
     $playlist = acfPlaylist();
-    $arr = acfArr($playlist, 'radarr');
-    $row = acfRow(acfChannel($playlist, 550), $arr, ['arr_requested_at' => now()->subHours(30)]);
+    $row = acfRow(acfChannel($playlist), acfArr($playlist, 'radarr'), ['arr_requested_at' => now()->subHours(25)]);
 
-    // Not in the queue, nothing in history, no file in the library.
-    acfRadarrFake(movies: [['id' => 7, 'tmdbId' => 550, 'hasFile' => false, 'monitored' => true]]);
+    acfRadarrFake(library: []);
 
     acfService()->sweep();
 
-    expect($row->refresh()->fallback_dispatched_at)->not->toBeNull();
-    Bus::assertDispatched(DownloadCachedContentFile::class);
+    expect($row->refresh()->source)->toBe('provider');
 });
 
-it('leaves a movie alone while the arr is still downloading it', function () {
+it('waits on an active download however long it takes', function () {
     $playlist = acfPlaylist();
-    $arr = acfArr($playlist, 'radarr');
-    $row = acfRow(acfChannel($playlist, 550), $arr, ['arr_requested_at' => now()->subHours(30)]);
+    $row = acfRow(acfChannel($playlist), acfArr($playlist, 'radarr'), ['arr_requested_at' => now()->subHours(30)]);
 
-    acfRadarrFake(
-        queue: [[
-            'status' => 'downloading',
-            'trackedDownloadState' => 'downloading',
-            'trackedDownloadStatus' => 'ok',
-            'movie' => ['tmdbId' => 550, 'title' => 'Fight Club'],
-        ]],
-        movies: [['id' => 7, 'tmdbId' => 550, 'hasFile' => false, 'monitored' => true]],
-    );
+    acfRadarrFake(queue: [acfMovieQueue('warning', 'downloading')]);
 
     acfService()->sweep();
 
-    expect($row->refresh()->source)->toBe('arr')
-        ->and($row->fallback_dispatched_at)->toBeNull();
+    expect($row->refresh()->source)->toBe('arr');
     Bus::assertNotDispatched(DownloadCachedContentFile::class);
 });
 
-it('leaves a movie alone when a grab happened after the request', function () {
+it('waits on a stuck import until the deadline, then falls back', function () {
     $playlist = acfPlaylist();
     $arr = acfArr($playlist, 'radarr');
-    $row = acfRow(acfChannel($playlist, 550), $arr, ['arr_requested_at' => now()->subHours(30)]);
+    $fresh = acfRow(acfChannel($playlist, 550), $arr);
+    $late = acfRow(acfChannel($playlist, 551), $arr, ['arr_requested_at' => now()->subHours(25)]);
 
-    acfRadarrFake(
-        history: [acfHistoryEvent('grabbed', now()->subHours(29)->toIso8601String(), movieId: 7)],
-        movies: [['id' => 7, 'tmdbId' => 550, 'hasFile' => false, 'monitored' => true]],
-    );
+    acfRadarrFake(queue: [
+        acfMovieQueue('completed', 'importBlocked', 550),
+        acfMovieQueue('completed', 'importBlocked', 551),
+    ], library: [550 => false, 551 => false]);
 
     acfService()->sweep();
 
-    expect($row->refresh()->source)->toBe('arr')
-        ->and($row->fallback_dispatched_at)->toBeNull();
-    Bus::assertNotDispatched(DownloadCachedContentFile::class);
+    expect($fresh->refresh()->source)->toBe('arr')
+        ->and($late->refresh()->source)->toBe('provider');
 });
 
-it('notifies once instead of failing back when the arr import failed', function () {
+it('drops the row once the arr has the file', function () {
     $playlist = acfPlaylist();
-    $arr = acfArr($playlist, 'radarr');
-    $row = acfRow(acfChannel($playlist, 550), $arr);
+    acfRow(acfChannel($playlist), acfArr($playlist, 'radarr'), ['arr_requested_at' => now()->subHours(30)]);
 
-    acfRadarrFake(
-        queue: [[
-            'status' => 'completed',
-            'trackedDownloadState' => 'importFailed',
-            'trackedDownloadStatus' => 'warning',
-            'movie' => ['tmdbId' => 550, 'title' => 'Fight Club'],
-        ]],
-        movies: [['id' => 7, 'tmdbId' => 550, 'hasFile' => false, 'monitored' => true]],
-    );
-
-    acfService()->sweep();
-    acfService()->sweep();
-
-    $user = User::find($row->user_id);
-
-    expect($row->refresh()->source)->toBe('arr')
-        ->and($row->fallback_dispatched_at)->toBeNull()
-        ->and($row->fallback_notified_at)->not->toBeNull();
-    NotificationFacade::assertSentTo($user, DatabaseNotification::class, 1);
-    Bus::assertNotDispatched(DownloadCachedContentFile::class);
-});
-
-it('notifies once on a ManualInteractionRequired webhook event', function () {
-    $playlist = acfPlaylist();
-    $arr = acfArr($playlist, 'radarr');
-    $row = acfRow(acfChannel($playlist, 550), $arr);
-
-    ArrQueueEvent::factory()->create([
-        'arr_integration_id' => $arr->id,
-        'user_id' => $playlist->user_id,
-        'external_id' => '550',
-        'status' => 'manual_required',
-        'last_event_at' => now(),
-    ]);
-
-    acfRadarrFake(movies: [['id' => 7, 'tmdbId' => 550, 'hasFile' => false, 'monitored' => true]]);
-
-    acfService()->sweep();
-
-    expect($row->refresh()->source)->toBe('arr')
-        ->and($row->fallback_dispatched_at)->toBeNull()
-        ->and($row->fallback_notified_at)->not->toBeNull();
-    Bus::assertNotDispatched(DownloadCachedContentFile::class);
-});
-
-it('drops the tracking row when the arr has the file', function () {
-    $playlist = acfPlaylist();
-    $arr = acfArr($playlist, 'radarr');
-    $row = acfRow(acfChannel($playlist, 550), $arr);
-
-    acfRadarrFake(movies: [['id' => 7, 'tmdbId' => 550, 'hasFile' => true, 'monitored' => true]]);
+    acfRadarrFake(library: [550 => true]);
 
     acfService()->sweep();
 
@@ -366,269 +281,153 @@ it('drops the tracking row when the arr has the file', function () {
 
 // --- Episodes (Sonarr) ---
 
-it('fails back a single episode on a queue failure and unmonitors it', function () {
+it('falls back a failed episode and unmonitors just that episode', function () {
     $playlist = acfPlaylist();
-    $arr = acfArr($playlist, 'sonarr');
-    $row = acfRow(acfEpisode($playlist), $arr);
+    $row = acfRow(acfEpisode($playlist), acfArr($playlist, 'sonarr'));
 
-    acfSonarrFake(
-        queue: [[
-            'status' => 'failed',
-            'trackedDownloadState' => 'failedPending',
-            'trackedDownloadStatus' => 'warning',
-            'series' => ['tvdbId' => 81189, 'title' => 'Breaking Bad'],
-            'episode' => ['seasonNumber' => 2, 'episodeNumber' => 3, 'title' => '...And the Bag\'s in the River'],
-        ]],
-        series: [['id' => 9, 'tvdbId' => 81189]],
-        episodes: [['id' => 88, 'seasonNumber' => 2, 'episodeNumber' => 3, 'hasFile' => false]],
-    );
+    acfSonarrFake(queue: [[
+        'status' => 'failed',
+        'trackedDownloadState' => 'failedPending',
+        'series' => ['tvdbId' => 81189, 'title' => 'Breaking Bad'],
+        'episode' => ['seasonNumber' => 2, 'episodeNumber' => 3, 'title' => 'Bit by a Dead Bee'],
+    ]]);
 
     acfService()->sweep();
 
-    expect($row->refresh()->source)->toBe('provider')
-        ->and($row->fallback_dispatched_at)->not->toBeNull();
+    expect($row->refresh()->source)->toBe('provider');
     Bus::assertDispatched(DownloadCachedContentFile::class);
     expect(Http::recorded(fn (Request $request): bool => $request->method() === 'PUT'
         && str_contains($request->url(), '/episode/monitor')
-        && in_array(88, $request['episodeIds'] ?? []))->count())->toBe(1)
-        ->and(Http::recorded(fn (Request $request): bool => $request->method() === 'DELETE')->count())->toBe(0);
+        && $request['episodeIds'] === [203])->count())->toBe(1);
 });
 
-it('drops the tracking row when Sonarr already has the episode file', function () {
+it('judges each episode of a series against one episode list', function () {
     $playlist = acfPlaylist();
     $arr = acfArr($playlist, 'sonarr');
-    $row = acfRow(acfEpisode($playlist), $arr);
+    $delivered = acfEpisode($playlist, 2, 3);
+    $missing = acfEpisode($playlist, 2, 4, $delivered->series);
+    acfRow($delivered, $arr);
+    $late = acfRow($missing, $arr, ['arr_requested_at' => now()->subHours(25)]);
 
-    acfSonarrFake(
-        series: [['id' => 9, 'tvdbId' => 81189]],
-        episodes: [['id' => 88, 'seasonNumber' => 2, 'episodeNumber' => 3, 'hasFile' => true]],
-    );
+    acfSonarrFake(episodes: ['2:3' => true, '2:4' => false]);
 
     acfService()->sweep();
 
-    expect(CachedContentFile::query()->count())->toBe(0);
+    expect(CachedContentFile::query()->pluck('id')->all())->toBe([$late->id])
+        ->and($late->refresh()->source)->toBe('provider')
+        // One series lookup and one episode list for both rows, plus the
+        // unmonitor's own lookups.
+        ->and(acfSent('GET', '#/series/lookup#'))->toBe(2)
+        ->and(acfSent('GET', '#/episode\?#'))->toBe(2);
 });
 
 // --- Guards ---
 
-it('skips the whole sweep when the arr is unreachable', function () {
+it('skips the sweep when the arr is unreachable', function () {
     $playlist = acfPlaylist();
-    $arr = acfArr($playlist, 'radarr');
-    $row = acfRow(acfChannel($playlist, 550), $arr, ['arr_requested_at' => now()->subHours(30)]);
+    $row = acfRow(acfChannel($playlist), acfArr($playlist, 'radarr'), ['arr_requested_at' => now()->subHours(30)]);
 
     acfRadarrFake(healthy: false);
 
     acfService()->sweep();
 
-    expect($row->refresh()->source)->toBe('arr')
-        ->and($row->fallback_dispatched_at)->toBeNull();
+    expect($row->refresh()->source)->toBe('arr');
     Bus::assertNotDispatched(DownloadCachedContentFile::class);
 });
 
-it('dispatches the provider even when the unmonitor call fails', function () {
+it('still queues the provider when the unmonitor call fails', function () {
     $playlist = acfPlaylist();
-    $arr = acfArr($playlist, 'radarr');
-    $row = acfRow(acfChannel($playlist, 550), $arr);
+    $row = acfRow(acfChannel($playlist), acfArr($playlist, 'radarr'));
 
-    Http::fake(function (Request $request) {
-        $url = $request->url();
-
-        // Healthy everywhere except the unmonitor lookups, which the
-        // failback must survive.
-        if (str_contains($url, '/system/status')) {
-            return Http::response(['version' => '5.0']);
-        }
-
-        if (str_contains($url, '/queue')) {
-            return Http::response(['records' => [[
-                'status' => 'failed',
-                'trackedDownloadState' => 'failedPending',
-                'trackedDownloadStatus' => 'warning',
-                'movie' => ['tmdbId' => 550, 'title' => 'Fight Club'],
-            ]]]);
-        }
-
-        if (str_contains($url, '/history')) {
-            return Http::response(['records' => []]);
-        }
-
-        if (str_contains($url, '/movie') && ! str_contains($url, 'tmdbId=') && ! preg_match('#/movie/\d+$#', $url)) {
-            return Http::response([['id' => 7, 'tmdbId' => 550, 'hasFile' => false, 'monitored' => true]]);
-        }
-
-        throw new ConnectionException('radarr went away');
+    Http::fake(fn (Request $request) => match (true) {
+        str_contains($request->url(), '/system/status') => Http::response(['version' => '5.0']),
+        str_contains($request->url(), '/queue') => Http::response(['records' => [acfMovieQueue('failed', 'failed')]]),
+        default => throw new ConnectionException('radarr went away'),
     });
 
     acfService()->sweep();
 
-    expect($row->refresh()->source)->toBe('provider')
-        ->and($row->fallback_dispatched_at)->not->toBeNull();
+    expect($row->refresh()->source)->toBe('provider');
     Bus::assertDispatched(DownloadCachedContentFile::class);
 });
 
-it('never dispatches the provider twice for the same row', function () {
+it('never queues the provider twice for the same row', function () {
     $playlist = acfPlaylist();
-    $arr = acfArr($playlist, 'radarr');
-    $row = acfRow(acfChannel($playlist, 550), $arr);
+    $row = acfRow(acfChannel($playlist), acfArr($playlist, 'radarr'));
 
-    acfRadarrFake(
-        queue: [[
-            'status' => 'failed',
-            'trackedDownloadState' => 'failedPending',
-            'trackedDownloadStatus' => 'warning',
-            'movie' => ['tmdbId' => 550, 'title' => 'Fight Club'],
-        ]],
-        movies: [['id' => 7, 'tmdbId' => 550, 'hasFile' => false, 'monitored' => true]],
-    );
+    acfRadarrFake(queue: [acfMovieQueue('failed', 'failedPending')]);
 
-    // Two overlapping sweeps: the second must find nothing to do.
     acfService()->sweep();
     acfService()->sweep();
 
+    expect(acfService()->fallBack($row))->toBeFalse();
     Bus::assertDispatchedTimes(DownloadCachedContentFile::class, 1);
-    expect($row->refresh()->source)->toBe('provider');
 });
 
 it('keeps sweeping when one row cannot be judged', function () {
     $playlist = acfPlaylist();
     $arr = acfArr($playlist, 'radarr');
-    $bad = acfRow(acfChannel($playlist, 550), $arr, ['arr_requested_at' => null]);
+    $bad = acfRow(acfChannel($playlist, 550), $arr, ['arr_requested_at' => now()->subHours(30)]);
     $good = acfRow(acfChannel($playlist, 551), $arr, ['arr_requested_at' => now()->subHours(30)]);
 
-    acfRadarrFake(movies: [
-        ['id' => 7, 'tmdbId' => 550, 'hasFile' => false, 'monitored' => true],
-        ['id' => 8, 'tmdbId' => 551, 'hasFile' => false, 'monitored' => true],
-    ]);
+    Http::fake(fn (Request $request) => match (true) {
+        str_contains($request->url(), '/system/status') => Http::response(['version' => '5.0']),
+        str_contains($request->url(), '/queue') => Http::response(['records' => []]),
+        str_contains($request->url(), 'tmdbId=550') => throw new ConnectionException('timeout'),
+        str_contains($request->url(), 'tmdbId=551') => Http::response([['id' => 8, 'tmdbId' => 551, 'hasFile' => false]]),
+        default => Http::response(['id' => 8]),
+    });
 
     acfService()->sweep();
 
     expect($bad->refresh()->source)->toBe('arr')
         ->and($good->refresh()->source)->toBe('provider');
-    Bus::assertDispatched(DownloadCachedContentFile::class, fn (DownloadCachedContentFile $job): bool => $job->cachedContentFileId === $good->id);
+});
+
+it('stops tracking rows whose integration no longer fails back', function (?array $changes) {
+    $playlist = acfPlaylist();
+    $arr = acfArr($playlist, 'radarr');
+    acfRow(acfChannel($playlist), $arr, ['arr_requested_at' => now()->subHours(30)]);
+
+    $changes === null ? $arr->delete() : $arr->update($changes);
+
+    acfService()->sweep();
+
+    expect(CachedContentFile::query()->count())->toBe(0);
+    Bus::assertNotDispatched(DownloadCachedContentFile::class);
+    Http::assertNothingSent();
+})->with([
+    'failback turned off' => [['cache_failback' => false]],
+    'caching turned off' => [['cache_enabled' => false]],
+    'integration disabled' => [['enabled' => false]],
+    'integration deleted' => [null],
+]);
+
+it('unmonitors the title when an arr row is canceled', function () {
+    $playlist = acfPlaylist();
+    $row = acfRow(acfChannel($playlist), acfArr($playlist, 'radarr'));
+    $this->actingAs($playlist->user);
+
+    acfRadarrFake();
+
+    CachedContentFileResource::deleteCachedFile($row);
+
+    expect(CachedContentFile::query()->count())->toBe(0)
+        ->and(acfSent('PUT', '#/movie/1550$#'))->toBe(1)
+        ->and(acfSent('DELETE', '#.#'))->toBe(0);
 });
 
 it('does not serve an arr tracking row to playback', function () {
     $playlist = acfPlaylist();
-    $arr = acfArr($playlist, 'radarr');
-    $channel = acfChannel($playlist, 550);
-    acfRow($channel, $arr);
+    $channel = acfChannel($playlist);
+    acfRow($channel, acfArr($playlist, 'radarr'));
 
     expect(CachedContentFile::findServableFor($channel))->toBeNull();
 });
 
-it('does nothing when the integration has failback off', function () {
-    $playlist = acfPlaylist();
-    $arr = ArrIntegration::factory()->radarr()->cacheEnabled()->create([
-        'user_id' => $playlist->user_id,
-        'url' => 'http://radarr.test',
-        'cache_failback' => false,
-    ]);
-    acfRow(acfChannel($playlist, 550), $arr, ['arr_requested_at' => now()->subHours(30)]);
-
-    acfRadarrFake(movies: [['id' => 7, 'tmdbId' => 550, 'hasFile' => false, 'monitored' => true]]);
-
-    acfService()->sweep();
-
-    expect(CachedContentFile::query()->where('source', 'arr')->count())->toBe(1);
-    Bus::assertNotDispatched(DownloadCachedContentFile::class);
-    Http::assertNothingSent();
-});
-
-it('fetches the arr library once however many rows are tracked', function () {
-    $playlist = acfPlaylist();
-    $arr = acfArr($playlist, 'radarr');
-
-    foreach ([550, 551, 552] as $tmdbId) {
-        acfRow(acfChannel($playlist, $tmdbId), $arr);
-    }
-
-    acfRadarrFake(movies: [
-        ['id' => 7, 'tmdbId' => 550, 'hasFile' => false, 'monitored' => true],
-        ['id' => 8, 'tmdbId' => 551, 'hasFile' => false, 'monitored' => true],
-        ['id' => 9, 'tmdbId' => 552, 'hasFile' => false, 'monitored' => true],
-    ]);
-
-    acfService()->sweep();
-
-    $libraryCalls = Http::recorded(fn (Request $request): bool => $request->method() === 'GET'
-        && preg_match('#/movie$#', $request->url()) === 1);
-
-    expect($libraryCalls->count())->toBe(1);
-});
-
-it('still falls back a manual-attention title once the deadline passes', function () {
-    $playlist = acfPlaylist();
-    $arr = acfArr($playlist, 'radarr');
-    $row = acfRow(acfChannel($playlist, 550), $arr, ['arr_requested_at' => now()->subHours(30)]);
-
-    ArrQueueEvent::factory()->create([
-        'arr_integration_id' => $arr->id,
-        'user_id' => $playlist->user_id,
-        'external_id' => '550',
-        'status' => 'manual_required',
-        'last_event_at' => now()->subHours(29),
-    ]);
-
-    acfRadarrFake(movies: [['id' => 7, 'tmdbId' => 550, 'hasFile' => false, 'monitored' => true]]);
-
-    acfService()->sweep();
-
-    expect($row->refresh()->source)->toBe('provider')
-        ->and($row->fallback_dispatched_at)->not->toBeNull()
-        ->and($row->fallback_notified_at)->not->toBeNull();
-    Bus::assertDispatched(DownloadCachedContentFile::class);
-});
-
-it('still falls back a stuck import-failed queue entry once the deadline passes', function () {
-    $playlist = acfPlaylist();
-    $arr = acfArr($playlist, 'radarr');
-    $row = acfRow(acfChannel($playlist, 550), $arr, ['arr_requested_at' => now()->subHours(30)]);
-
-    acfRadarrFake(
-        queue: [[
-            'status' => 'completed',
-            'trackedDownloadState' => 'importFailed',
-            'trackedDownloadStatus' => 'warning',
-            'movie' => ['tmdbId' => 550, 'title' => 'Fight Club'],
-        ]],
-        movies: [['id' => 7, 'tmdbId' => 550, 'hasFile' => false, 'monitored' => true]],
-    );
-
-    acfService()->sweep();
-
-    expect($row->refresh()->source)->toBe('provider')
-        ->and($row->fallback_dispatched_at)->not->toBeNull();
-    Bus::assertDispatched(DownloadCachedContentFile::class);
-});
-
-it('fails back on a download failure even after a manual-attention warning', function () {
-    $playlist = acfPlaylist();
-    $arr = acfArr($playlist, 'radarr');
-    $row = acfRow(acfChannel($playlist, 550), $arr);
-
-    ArrQueueEvent::factory()->create([
-        'arr_integration_id' => $arr->id,
-        'user_id' => $playlist->user_id,
-        'external_id' => '550',
-        'status' => 'manual_required',
-        'last_event_at' => now(),
-    ]);
-
-    acfRadarrFake(
-        history: [acfHistoryEvent('downloadFailed', now()->addMinutes(30)->toIso8601String(), movieId: 7)],
-        movies: [['id' => 7, 'tmdbId' => 550, 'hasFile' => false, 'monitored' => true]],
-    );
-
-    acfService()->sweep();
-
-    expect($row->refresh()->fallback_dispatched_at)->not->toBeNull();
-    Bus::assertDispatched(DownloadCachedContentFile::class);
-});
-
 it('never lets the downloader claim an arr-tracked row', function () {
     $playlist = acfPlaylist();
-    $arr = acfArr($playlist, 'radarr');
-    $row = acfRow(acfChannel($playlist, 550), $arr, ['status' => CachedContentFileStatus::Pending]);
+    $row = acfRow(acfChannel($playlist), acfArr($playlist, 'radarr'));
 
     $settings = Mockery::mock(GeneralSettings::class);
     $settings->enable_cache = true;

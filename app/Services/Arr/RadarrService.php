@@ -175,7 +175,7 @@ class RadarrService extends BaseArrService
     }
 
     /**
-     * @return array{exists: bool, id?: int}
+     * @return array{exists: bool, id?: int, hasFile?: bool}
      */
     public function checkExists(int $externalId): array
     {
@@ -192,7 +192,7 @@ class RadarrService extends BaseArrService
             return ['exists' => false];
         }
 
-        return ['exists' => true, 'id' => (int) $first['id']];
+        return ['exists' => true, 'id' => (int) $first['id'], 'hasFile' => ($first['hasFile'] ?? false) === true];
     }
 
     /**
@@ -303,20 +303,6 @@ class RadarrService extends BaseArrService
     }
 
     /**
-     * One library movie by its TMDB id, or null when Radarr doesn't have it.
-     * Gives the library id and hasFile state without a lookup search.
-     *
-     * @return array<string, mixed>|null
-     */
-    public function fetchMovieByTmdbId(int $tmdbId): ?array
-    {
-        $items = $this->client()->get('/movie', ['tmdbId' => $tmdbId])->json() ?? [];
-        $first = $items[0] ?? null;
-
-        return isset($first['id']) ? $first : null;
-    }
-
-    /**
      * Unmonitor a movie without touching its files. Unlike deleteMovie(),
      * this never deletes anything from disk.
      *
@@ -357,31 +343,6 @@ class RadarrService extends BaseArrService
             },
             'delete movie'
         );
-    }
-
-    /**
-     * Every library movie, reduced to the fields failback matching needs.
-     *
-     * @return array<int, array{id: int, tmdbId: int, hasFile: bool, monitored: bool}>
-     */
-    public function fetchAllMovies(): array
-    {
-        $response = $this->queueClient()->get('/movie');
-
-        if (! $response->successful()) {
-            return [];
-        }
-
-        return collect($response->json() ?? [])
-            ->filter(fn ($movie): bool => isset($movie['id'], $movie['tmdbId']))
-            ->map(fn ($movie): array => [
-                'id' => (int) $movie['id'],
-                'tmdbId' => (int) $movie['tmdbId'],
-                'hasFile' => ($movie['hasFile'] ?? false) === true,
-                'monitored' => ($movie['monitored'] ?? false) === true,
-            ])
-            ->values()
-            ->all();
     }
 
     /**

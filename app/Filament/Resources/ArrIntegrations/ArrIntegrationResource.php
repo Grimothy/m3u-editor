@@ -220,7 +220,7 @@ class ArrIntegrationResource extends Resource
 
                                 Toggle::make('cache_failback')
                                     ->label(__('Fail back to the provider'))
-                                    ->helperText(__('When a title sent here can\'t be downloaded (the download fails, or nothing is grabbed within 24 hours), it is downloaded from the playlist provider instead. Titles that need manual attention in the arr notify you once, and fall back after 24 hours if still unresolved. Nothing is ever deleted from the arr.'))
+                                    ->helperText(__('When a movie or episode sent here fails to download, or still isn\'t downloaded or downloading after 24 hours, it is downloaded from the playlist provider instead and unmonitored here. Nothing is ever deleted from the arr.'))
                                     ->visible(fn (Get $get): bool => (bool) $get('cache_enabled'))
                                     ->default(false),
                             ]),

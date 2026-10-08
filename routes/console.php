@@ -78,7 +78,7 @@ Schedule::command('cache:cleanup-orphans')
     ->withoutOverlapping();
 
 // Arr cache failback: hand arr-sourced cache requests the arr can't deliver
-// (terminal download failure, or never grabbed within 24h) to the provider.
+// (failed download, or not downloaded or downloading within 24h) to the provider.
 Schedule::job(new SweepArrCacheFailback)
     ->everyTenMinutes()
     ->withoutOverlapping();
