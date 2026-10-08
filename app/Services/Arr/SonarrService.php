@@ -450,6 +450,47 @@ class SonarrService extends BaseArrService
     }
 
     /**
+     * One library series by its TVDB id, or null when Sonarr doesn't have
+     * it. Gives the library id without a monitored-title change.
+     *
+     * @return array<string, mixed>|null
+     */
+    public function fetchSeriesByTvdbId(int $tvdbId): ?array
+    {
+        $items = $this->client()
+            ->get('/series/lookup', ['term' => 'tvdb:'.$tvdbId])
+            ->json() ?? [];
+
+        $first = $items[0] ?? null;
+
+        return isset($first['id']) ? $first : null;
+    }
+
+    /**
+     * Unmonitor a single episode without touching its file. Unlike deleting
+     * the series (which Sonarr can do with deleteFiles), this only stops
+     * Sonarr looking for that one episode.
+     *
+     * @return array{ok: bool, error?: string}
+     */
+    public function unmonitorEpisode(int $seriesId, int $seasonNumber, int $episodeNumber): array
+    {
+        return $this->safeCall(function () use ($seriesId, $seasonNumber, $episodeNumber) {
+            $episodeId = $this->resolveEpisodeId($seriesId, $seasonNumber, $episodeNumber);
+
+            if ($episodeId === null) {
+                return true; // Not indexed (yet); nothing to unmonitor.
+            }
+
+            $this->client()
+                ->put('/episode/monitor', ['episodeIds' => [$episodeId], 'monitored' => false])
+                ->throw();
+
+            return true;
+        }, 'unmonitor episode');
+    }
+
+    /**
      * Fetch releases for a specific episode via Sonarr's indexer search.
      *
      * @return array<int, array<string, mixed>>
@@ -521,6 +562,54 @@ class SonarrService extends BaseArrService
     }
 
     /**
+     * Every library series, reduced to the fields failback matching needs.
+     *
+     * @return array<int, array{id: int, tvdbId: int}>
+     */
+    public function fetchAllSeries(): array
+    {
+        $response = $this->queueClient()->get('/series');
+
+        if (! $response->successful()) {
+            return [];
+        }
+
+        return collect($response->json() ?? [])
+            ->filter(fn ($series): bool => isset($series['id'], $series['tvdbId']))
+            ->map(fn ($series): array => [
+                'id' => (int) $series['id'],
+                'tvdbId' => (int) $series['tvdbId'],
+            ])
+            ->values()
+            ->all();
+    }
+
+    /**
+     * Every indexed episode of one series, with library ids and file state.
+     *
+     * @return array<int, array{id: int, seasonNumber: int, episodeNumber: int, hasFile: bool}>
+     */
+    public function fetchSeriesEpisodes(int $seriesId): array
+    {
+        $response = $this->queueClient()->get('/episode', ['seriesId' => $seriesId]);
+
+        if (! $response->successful()) {
+            return [];
+        }
+
+        return collect($response->json() ?? [])
+            ->filter(fn ($episode): bool => isset($episode['id']))
+            ->map(fn ($episode): array => [
+                'id' => (int) $episode['id'],
+                'seasonNumber' => (int) ($episode['seasonNumber'] ?? 0),
+                'episodeNumber' => (int) ($episode['episodeNumber'] ?? 0),
+                'hasFile' => ($episode['hasFile'] ?? false) === true,
+            ])
+            ->values()
+            ->all();
+    }
+
+    /**
      * @return array<int, array<string, mixed>>
      */
     public function fetchQueue(): array
@@ -569,6 +658,8 @@ class SonarrService extends BaseArrService
                     'protocol' => $item['protocol'] ?? null,
                     'indexer' => $item['indexer'] ?? null,
                     'episode' => $episodeLabel,
+                    'seasonNumber' => isset($episode['seasonNumber']) ? (int) $episode['seasonNumber'] : null,
+                    'episodeNumber' => isset($episode['episodeNumber']) ? (int) $episode['episodeNumber'] : null,
                     'trackedDownloadState' => $item['trackedDownloadState'] ?? null,
                 ];
             })

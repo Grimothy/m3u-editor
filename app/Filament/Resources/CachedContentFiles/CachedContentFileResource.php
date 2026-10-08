@@ -7,6 +7,7 @@ use App\Filament\Resources\CachedContentFiles\Pages\ListCachedContentFiles;
 use App\Filament\Resources\CachedContentFiles\Widgets\CachedContentStatsOverview;
 use App\Livewire\ArrQueueMonitor;
 use App\Models\CachedContentFile;
+use App\Services\ArrCacheFailbackService;
 use App\Services\CachedContentDispatchService;
 use App\Settings\GeneralSettings;
 use App\Tables\Columns\ProgressColumn;
@@ -580,7 +581,7 @@ class CachedContentFileResource extends Resource
         $status = $record->status;
 
         if ($status === CachedContentFileStatus::Pending) {
-            return $status->getLabel();
+            return $record->source === 'arr' ? __('Waiting on Radarr/Sonarr') : $status->getLabel();
         }
 
         if ($status === CachedContentFileStatus::Downloading) {
@@ -741,6 +742,17 @@ class CachedContentFileResource extends Resource
     {
         if (! self::canActOnRecord($record)) {
             return;
+        }
+
+        // An arr-sourced row still waiting on the arr: canceling also stops
+        // the arr looking for the title (unmonitor only — its library files
+        // are never touched). Failures are logged, never fatal.
+        if ($record->source === 'arr' && $record->fallback_dispatched_at === null) {
+            try {
+                app(ArrCacheFailbackService::class)->cancelArrRequest($record);
+            } catch (\Throwable) {
+                // The row is deleted either way.
+            }
         }
 
         if (in_array($record->status, [CachedContentFileStatus::Pending, CachedContentFileStatus::Downloading], true)) {
