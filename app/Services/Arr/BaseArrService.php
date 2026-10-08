@@ -107,7 +107,7 @@ abstract class BaseArrService implements ArrIntegrationInterface
     }
 
     /**
-     * @return array<int, array<string, mixed>>
+     * @return array{ok: bool, error?: string}
      */
     public function testWebhook(string $url): array
     {
