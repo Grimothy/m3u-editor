@@ -35,3 +35,25 @@ it('saves prefer_media_server_sources on the playlist edit form', function () {
 
     expect($playlist->refresh()->prefer_media_server_sources)->toBeTrue();
 });
+
+it('shows include_unmatched_media_server_sources only while prefer is on and saves it', function () {
+    $playlist = Playlist::factory()->for($this->user)->create([
+        'prefer_media_server_sources' => true,
+        'include_unmatched_media_server_sources' => false,
+    ]);
+
+    Livewire::test(EditPlaylist::class, ['record' => $playlist->id])
+        ->assertFormFieldVisible('include_unmatched_media_server_sources')
+        ->fillForm([
+            'user_agent' => 'test-agent',
+            'include_unmatched_media_server_sources' => true,
+        ])
+        ->call('save')
+        ->assertHasNoFormErrors();
+
+    expect($playlist->refresh()->include_unmatched_media_server_sources)->toBeTrue();
+
+    Livewire::test(EditPlaylist::class, ['record' => $playlist->id])
+        ->fillForm(['prefer_media_server_sources' => false])
+        ->assertFormFieldHidden('include_unmatched_media_server_sources');
+});

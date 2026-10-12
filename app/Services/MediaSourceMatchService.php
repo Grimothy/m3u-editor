@@ -77,7 +77,7 @@ class MediaSourceMatchService
      *
      * @return array<int, int>
      */
-    private function eligibleIntegrationPlaylists(Playlist $playlist): array
+    public function eligibleIntegrationPlaylists(Playlist $playlist): array
     {
         return MediaServerIntegration::query()
             ->where('user_id', $playlist->user_id)

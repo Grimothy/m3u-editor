@@ -2374,8 +2374,19 @@ class PlaylistResource extends Resource implements CopilotResource
                             'heroicon-m-question-mark-circle',
                             tooltip: __('When a VOD movie or series episode matches an item in your Emby, Jellyfin, Plex, or local media integrations (by TMDB/TVDB/IMDB ID), stream the integration\'s file instead of the provider\'s. Falls back to the provider if the media source is unavailable.')
                         )
+                        ->live()
                         ->default(false)
                         ->helperText(__('Requires TMDB IDs on this playlist (enable TMDB lookup or metadata fetch).')),
+                    Toggle::make('include_unmatched_media_server_sources')
+                        ->label(__('Include unmatched media server sources'))
+                        ->inline(false)
+                        ->hintIcon(
+                            'heroicon-m-question-mark-circle',
+                            tooltip: __('Also list the VOD movies and series from your media server integrations that this playlist does not already carry, so local-only titles show up in your M3U and Xtream output. Titles the provider already lists are not duplicated; they keep playing from the media server.')
+                        )
+                        ->visible(fn (Get $get): bool => (bool) $get('prefer_media_server_sources'))
+                        ->default(false)
+                        ->helperText(__('Local items that match a provider title are never listed twice.')),
                 ])->hidden(fn (?Playlist $record): bool => $record !== null && $record->isMediaServerPlaylist()),
 
             Section::make(__('Auto-Merge Processing'))

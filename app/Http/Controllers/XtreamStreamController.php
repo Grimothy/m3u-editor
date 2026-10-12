@@ -12,6 +12,7 @@ use App\Models\Network;
 use App\Models\Playlist;
 use App\Models\PlaylistAlias;
 use App\Models\PlaylistAuth;
+use App\Services\MediaSourceOutputService;
 use App\Services\MediaSourcePreferenceService;
 use App\Services\PlaylistCredentialResolver;
 use App\Services\PlaylistService;
@@ -133,9 +134,11 @@ class XtreamStreamController extends Controller
         // Live and VOD streams are handled the same
         if ($streamType === 'live' || $streamType === 'vod' || $streamType === 'timeshift') {
             // Assuming all playlist types have a 'channels' relationship defined.
-            $channel = $playlist->channels()
+            // Only VOD can be a local extra; live and timeshift keep the plain relation.
+            $channelQuery = $streamType === 'vod' ? MediaSourceOutputService::channels($playlist) : $playlist->channels();
+            $channel = $channelQuery
                 ->where('channels.id', $streamId) // Qualify column name if pivot table involved
-                ->where('enabled', true)
+                ->where('channels.enabled', true)
                 ->first();
 
             // Intentionally does not log the channel's URL - for M3U-sourced channels
@@ -170,7 +173,7 @@ class XtreamStreamController extends Controller
             // Validate series membership in the playlist.
             // This assumes all playlist types (Playlist, MergedPlaylist, CustomPlaylist)
             // have a 'series' relationship defined that correctly links to App\Models\Series.
-            $isMember = $playlist->series()
+            $isMember = MediaSourceOutputService::series($playlist)
                 ->where('series.id', $series->id) // Qualify column name
                 ->exists();
 
@@ -314,6 +317,12 @@ class XtreamStreamController extends Controller
         $format = $format ?? 'ts'; // Default to 'ts' if no format provided
         [$playlist, $channel, $playlistAuth] = $this->findAuthenticatedPlaylistAndStreamModel($username, $password, $streamId, 'vod');
         if ($channel instanceof Channel) {
+            // A local title listed through "Include unmatched media server sources" plays
+            // with its own playlist's settings, like a matched swap does below.
+            if (MediaSourceOutputService::isLocalExtra($playlist, $channel)) {
+                $playlist = $channel->getEffectivePlaylist();
+            }
+
             // Serve a locally cached copy when one is available (see resolveCacheHit()).
             if ($cacheRedirect = $this->resolveCacheHit($channel, $playlist, $username, $password, $format)) {
                 return $cacheRedirect;
@@ -376,6 +385,11 @@ class XtreamStreamController extends Controller
         $format = $format ?? 'mp4'; // Default to 'mp4' if no format provided
         [$playlist, $episode, $playlistAuth] = $this->findAuthenticatedPlaylistAndStreamModel($username, $password, $streamId, 'episode');
         if ($episode instanceof Episode) {
+            // See handleVod(): a local extra plays with its own playlist's settings.
+            if (MediaSourceOutputService::isLocalExtra($playlist, $episode)) {
+                $playlist = $episode->playlist;
+            }
+
             // Serve a locally cached copy when one is available (see resolveCacheHit()).
             if ($cacheRedirect = $this->resolveCacheHit($episode, $playlist, $username, $password, $format)) {
                 return $cacheRedirect;

@@ -10,6 +10,7 @@ use App\Models\TvDevice;
 use App\Models\TvDeviceLog;
 use App\Models\TvNotification;
 use App\Services\M3uProxyService;
+use App\Services\MediaSourceOutputService;
 use App\Settings\GeneralSettings;
 use Illuminate\Database\Eloquent\Builder;
 use Illuminate\Database\Eloquent\Model;
@@ -339,8 +340,8 @@ class TvApiController extends Controller
         $id = $isSeries ? $data['episode_id'] : $data['stream_id'];
 
         $belongsToPlaylist = $isSeries
-            ? (method_exists($playlist, 'episodes') && $playlist->episodes()->whereKey($id)->exists())
-            : (method_exists($playlist, 'channels') && $playlist->channels()->whereKey($id)->exists());
+            ? (method_exists($playlist, 'episodes') && MediaSourceOutputService::episodes($playlist)->whereKey($id)->exists())
+            : (method_exists($playlist, 'channels') && MediaSourceOutputService::channels($playlist)->whereKey($id)->exists());
 
         if ($belongsToPlaylist) {
             M3uProxyService::stopStreamSafely($field, (string) $id, $data['client_id'], 'Failed to stop TV player stream');

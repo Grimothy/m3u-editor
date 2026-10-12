@@ -14,6 +14,7 @@ use App\Models\Network;
 use App\Models\Playlist;
 use App\Models\PlaylistAlias;
 use App\Services\ChannelNumberSequence;
+use App\Services\MediaSourceOutputService;
 use App\Services\PlaylistUrlService;
 use Illuminate\Http\Request;
 use Illuminate\Support\LazyCollection;
@@ -292,7 +293,7 @@ class PlaylistGenerateController extends Controller
                 // If the playlist includes series in M3U, include the series episodes
                 if ($playlist->include_series_in_m3u) {
                     // Get the seasons
-                    $seriesQuery = $playlist->series()
+                    $seriesQuery = MediaSourceOutputService::series($playlist)
                         ->where('series.enabled', true)
                         ->with([
                             'category.parent',
@@ -766,7 +767,7 @@ class PlaylistGenerateController extends Controller
         $playlistUuid = ($playlist instanceof PlaylistAlias && $playlist->custom_playlist_id)
             ? ($playlist->customPlaylist?->uuid ?? $playlist->uuid)
             : $playlist->uuid;
-        $query = $playlist->channels()
+        $query = ($isVod === false ? $playlist->channels() : MediaSourceOutputService::channels($playlist))
             ->leftJoin('groups', 'channels.group_id', '=', 'groups.id')
             // A group folded into a merged group defers its displayed name and sort
             // order to that parent. Resolved here in SQL so output and ordering stay

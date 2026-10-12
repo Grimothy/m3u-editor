@@ -52,14 +52,17 @@ class XtreamCategoryService
      */
     public static function groupCategories($playlist, bool $isVod, array $aliasGroupFilter = []): array
     {
-        $channelConstraint = function ($query) use ($isVod, $aliasGroupFilter): void {
+        $channelConstraint = function ($query) use ($playlist, $isVod, $aliasGroupFilter): void {
             $query->where('enabled', true)->where('is_vod', $isVod);
             if (! empty($aliasGroupFilter)) {
                 $query->whereIn('group_internal', $aliasGroupFilter);
             }
+            if ($isVod) {
+                MediaSourceOutputService::scopeVisibleChannels($query, $playlist);
+            }
         };
 
-        $groups = $playlist->groups()
+        $groups = ($isVod ? MediaSourceOutputService::vodGroups($playlist) : $playlist->groups())
             ->with('parent')
             ->where(function ($query) use ($channelConstraint): void {
                 $query->whereHas('channels', $channelConstraint)
@@ -106,8 +109,8 @@ class XtreamCategoryService
      */
     public static function seriesCategories($playlist): array
     {
-        $categories = $playlist->series()
-            ->where('enabled', true)
+        $categories = MediaSourceOutputService::series($playlist)
+            ->where('series.enabled', true)
             ->with('category.parent')
             ->get()
             ->pluck('category')

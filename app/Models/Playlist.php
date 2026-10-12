@@ -78,6 +78,7 @@ class Playlist extends Model
         'reclassify_vod_groups_to_tmdb_genres' => 'boolean',
         'reclassify_series_categories_to_tmdb_genres' => 'boolean',
         'prefer_media_server_sources' => 'boolean',
+        'include_unmatched_media_server_sources' => 'boolean',
         'auto_probe_streams_only_unprobed' => 'boolean',
         'auto_probe_streams_include_disabled' => 'boolean',
         'auto_probe_vod_streams' => 'boolean',

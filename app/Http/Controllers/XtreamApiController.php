@@ -49,6 +49,7 @@ use App\Services\EmbyPublicationCatalogService;
 use App\Services\EpgCacheService;
 use App\Services\LogoCacheService;
 use App\Services\M3uProxyService;
+use App\Services\MediaSourceOutputService;
 use App\Services\TmdbService;
 use App\Services\VodFileNameService;
 use App\Services\WatchProgressLinker;
@@ -881,7 +882,7 @@ class XtreamApiController extends Controller
             // whether a category filter was actually applied.
             $dynamicGroupId = null;
 
-            $seriesQuery = $playlist->series()
+            $seriesQuery = MediaSourceOutputService::series($playlist)
                 ->where('series.enabled', true)
                 ->orderBy('series.sort', 'asc')
                 ->with(['tags', 'category.parent']);
@@ -1062,8 +1063,8 @@ class XtreamApiController extends Controller
                 return response()->json(['error' => 'series_id parameter is required for get_series_info action'], 400);
             }
 
-            $seriesItem = $playlist->series()
-                ->where('enabled', true)
+            $seriesItem = MediaSourceOutputService::series($playlist)
+                ->where('series.enabled', true)
                 ->where('series.id', $seriesId)
                 ->with(['seasons.episodes', 'category'])
                 ->first();
@@ -1625,10 +1626,10 @@ class XtreamApiController extends Controller
             $channelId = (int) $channelId;
 
             // Find the channel
-            $channel = $playlist->channels()
-                ->where('enabled', true)
+            $channel = MediaSourceOutputService::channels($playlist)
+                ->where('channels.enabled', true)
                 ->where('channels.id', $channelId)
-                ->where('is_vod', true)
+                ->where('channels.is_vod', true)
                 ->first();
 
             if (! $channel) {
@@ -3869,7 +3870,7 @@ class XtreamApiController extends Controller
 
         $seriesByTmdbId = collect();
         if (! empty($seriesTmdbIds)) {
-            $seriesByTmdbId = $playlist->series()
+            $seriesByTmdbId = MediaSourceOutputService::series($playlist)
                 ->where('enabled', true)
                 ->whereIn('series.tmdb_id', array_keys($seriesTmdbIds))
                 ->get(['id', 'tmdb_id', 'name', 'cover'])
@@ -3955,7 +3956,7 @@ class XtreamApiController extends Controller
 
         $seriesIdsByTmdbId = collect();
         if (! empty($seriesTmdbIds)) {
-            $seriesIdsByTmdbId = $playlist->series()
+            $seriesIdsByTmdbId = MediaSourceOutputService::series($playlist)
                 ->where('enabled', true)
                 ->whereIn('series.tmdb_id', array_keys($seriesTmdbIds))
                 ->get(['id', 'tmdb_id'])
