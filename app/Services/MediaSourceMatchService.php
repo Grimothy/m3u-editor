@@ -5,11 +5,13 @@ namespace App\Services;
 use App\Models\Channel;
 use App\Models\MediaServerIntegration;
 use App\Models\MediaSourceMatch;
+use App\Models\MergedPlaylist;
 use App\Models\Playlist;
 use Illuminate\Database\Eloquent\Builder;
 use Illuminate\Database\Query\Builder as QueryBuilder;
 use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Facades\Log;
+use Illuminate\Support\Str;
 
 /**
  * Builds the media_source_matches table for one provider playlist: provider
@@ -71,13 +73,44 @@ class MediaSourceMatchService
     }
 
     /**
+     * Create a merged playlist of the provider plus its eligible media-server playlists,
+     * with each media-server source set to only_unmatched so titles the provider already
+     * carries (and streams from local media via prefer-local) are not listed twice.
+     * Returns null when the owner has no eligible integration.
+     */
+    public function createMergedWithLocalMedia(Playlist $provider): ?MergedPlaylist
+    {
+        $mediaPlaylistIds = array_keys($this->eligibleIntegrationPlaylists($provider));
+
+        if ($mediaPlaylistIds === []) {
+            return null;
+        }
+
+        return DB::transaction(function () use ($provider, $mediaPlaylistIds): MergedPlaylist {
+            $merged = MergedPlaylist::create([
+                'name' => __(':name + Local Media', ['name' => $provider->name]),
+                'uuid' => Str::orderedUuid()->toString(),
+                'user_id' => $provider->user_id,
+                'id_channel_by' => 'stream_id',
+            ]);
+
+            $merged->playlists()->attach($provider->id);
+            foreach ($mediaPlaylistIds as $mediaPlaylistId) {
+                $merged->playlists()->attach($mediaPlaylistId, ['only_unmatched' => true]);
+            }
+
+            return $merged;
+        });
+    }
+
+    /**
      * Eligible integrations of the playlist owner: enabled, supported type,
      * with a synced playlist, excluding the provider playlist itself.
      * Returns [playlist_id => integration_id].
      *
      * @return array<int, int>
      */
-    private function eligibleIntegrationPlaylists(Playlist $playlist): array
+    public function eligibleIntegrationPlaylists(Playlist $playlist): array
     {
         return MediaServerIntegration::query()
             ->where('user_id', $playlist->user_id)

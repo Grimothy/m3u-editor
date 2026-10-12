@@ -6,6 +6,7 @@ use App\Enums\PlaylistChannelId;
 use App\Pivots\MergedPlaylistPivot;
 use App\Traits\HasDefaultAuth;
 use App\Traits\ShortUrlTrait;
+use Closure;
 use Illuminate\Database\Eloquent\Casts\Attribute;
 use Illuminate\Database\Eloquent\Factories\HasFactory;
 use Illuminate\Database\Eloquent\Model;
@@ -15,6 +16,7 @@ use Illuminate\Database\Eloquent\Relations\HasManyThrough;
 use Illuminate\Database\Eloquent\Relations\HasOne;
 use Illuminate\Database\Eloquent\Relations\MorphMany;
 use Illuminate\Database\Eloquent\Relations\MorphToMany;
+use Illuminate\Database\Query\Builder as QueryBuilder;
 
 class MergedPlaylist extends Model
 {
@@ -90,7 +92,7 @@ class MergedPlaylist extends Model
     {
         return $this->belongsToMany(Playlist::class, 'merged_playlist_playlist')
             ->using(MergedPlaylistPivot::class)
-            ->withPivot(['include_live', 'include_vod', 'include_series']);
+            ->withPivot(['include_live', 'include_vod', 'include_series', 'only_unmatched']);
     }
 
     /**
@@ -157,7 +159,42 @@ class MergedPlaylist extends Model
             })->orWhere(function ($q) {
                 $q->where('channels.is_vod', true)->where('merged_playlist_playlist.include_vod', true);
             });
-        });
+        })->where(fn ($query) => $query
+            ->where('merged_playlist_playlist.only_unmatched', false)
+            ->orWhereNotExists(fn ($matches) => $this->scopeToMergeProviders(
+                $matches->selectRaw('1')
+                    ->from('media_source_matches')
+                    ->whereColumn('media_source_matches.media_channel_id', 'channels.id')
+            )));
+    }
+
+    /**
+     * Narrow a media_source_matches query to matches made by the playlists attached to this
+     * merge, so a local item is only hidden when a source in the same merge already serves it.
+     */
+    private function scopeToMergeProviders(QueryBuilder $matches): QueryBuilder
+    {
+        return $matches->whereIn('media_source_matches.playlist_id', fn ($sources) => $sources
+            ->select('merge_sources.playlist_id')
+            ->from('merged_playlist_playlist as merge_sources')
+            ->whereColumn('merge_sources.merged_playlist_id', 'merged_playlist_playlist.merged_playlist_id'));
+    }
+
+    /**
+     * Series-level rule for only_unmatched sources: a local series is hidden once any of its
+     * episodes is already provided by another source in the merge, so the same show is never
+     * listed twice (the provider's entry plays the local episodes it matched).
+     */
+    private function onlyUnmatchedSeries(string $seriesIdColumn): Closure
+    {
+        return fn ($query) => $query
+            ->where('merged_playlist_playlist.only_unmatched', false)
+            ->orWhereNotExists(fn ($matches) => $this->scopeToMergeProviders(
+                $matches->selectRaw('1')
+                    ->from('episodes as matched_episodes')
+                    ->join('media_source_matches', 'media_source_matches.media_episode_id', '=', 'matched_episodes.id')
+                    ->whereColumn('matched_episodes.series_id', $seriesIdColumn)
+            ));
     }
 
     public function groups(): HasManyThrough
@@ -186,7 +223,8 @@ class MergedPlaylist extends Model
             'playlist_id',
             'id',
             'playlist_id'
-        )->where('merged_playlist_playlist.include_series', true);
+        )->where('merged_playlist_playlist.include_series', true)
+            ->where($this->onlyUnmatchedSeries('series.id'));
     }
 
     public function enabled_series(): HasManyThrough
@@ -203,7 +241,8 @@ class MergedPlaylist extends Model
             'playlist_id',
             'id',
             'playlist_id'
-        )->where('merged_playlist_playlist.include_series', true);
+        )->where('merged_playlist_playlist.include_series', true)
+            ->where($this->onlyUnmatchedSeries('seasons.series_id'));
     }
 
     public function episodes(): HasManyThrough
@@ -215,7 +254,8 @@ class MergedPlaylist extends Model
             'playlist_id',
             'id',
             'playlist_id'
-        )->where('merged_playlist_playlist.include_series', true);
+        )->where('merged_playlist_playlist.include_series', true)
+            ->where($this->onlyUnmatchedSeries('episodes.series_id'));
     }
 
     public function live_channels(): HasManyThrough

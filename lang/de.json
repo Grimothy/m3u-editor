@@ -5890,5 +5890,14 @@
     "yt-dlp format selector followed by optional flags. Example: bestvideo+bestaudio/best --no-playlist": "yt-dlp-Formatauswahl, gefolgt von optionalen Flags. Beispiel: bestvideo+bestaudio/best --no-playlist",
     "{1}:matched of :total channel matched. Review and apply below.|[2,*]:matched of :total channels matched. Review and apply below.": "{1}:matched of :total channel matched. Review and apply below.|[2,*]:matched of :total channels matched. Review and apply below.",
     "{1}:name was already pointing at that replacement channel and has been unset.|[2,*]:count source channels were pointing at that replacement channel and have been unset.": "{1}:name was already pointing at that replacement channel and has been unset.|[2,*]:count source channels were pointing at that replacement channel and have been unset.",
-    "⚠️ IPTV WARNING: This will analyze each stream to determine resolution, which may cause rate limiting or blocking with IPTV providers.": "⚠️ IPTV-WARNUNG: Dadurch wird jeder Stream analysiert, um die Auflösung zu bestimmen, was zu Ratenbegrenzung oder Blockierung bei IPTV-Anbietern führen kann."
+    "⚠️ IPTV WARNING: This will analyze each stream to determine resolution, which may cause rate limiting or blocking with IPTV providers.": "⚠️ IPTV-WARNUNG: Dadurch wird jeder Stream analysiert, um die Auflösung zu bestimmen, was zu Ratenbegrenzung oder Blockierung bei IPTV-Anbietern führen kann.",
+    ":name + Local Media": ":name + Lokale Medien",
+    "Create Merged Playlist with Local Media": "Zusammengeführte Playlist mit lokalen Medien erstellen",
+    "Creates a new merged playlist containing this playlist plus your media server libraries. Local items this playlist already matches are not listed twice. Assign your auths to the new playlist to start using it; this playlist and its auths are not changed.": "Erstellt eine neue zusammengeführte Playlist aus dieser Playlist und deinen Medienserver-Bibliotheken. Lokale Titel, die diese Playlist bereits abdeckt, werden nicht doppelt aufgeführt. Weise der neuen Playlist deine Zugänge zu, um sie zu verwenden; diese Playlist und ihre Zugänge bleiben unverändert.",
+    "No media server integrations available": "Keine Medienserver-Integrationen verfügbar",
+    "Enable an Emby, Jellyfin, Plex, or local media integration that has synced a playlist, then try again.": "Aktiviere eine Emby-, Jellyfin-, Plex- oder lokale Medien-Integration mit synchronisierter Playlist und versuche es erneut.",
+    "Merged playlist created": "Zusammengeführte Playlist erstellt",
+    "\":name\" was created. Assign auths to it to start using it.": "„:name“ wurde erstellt. Weise ihr Zugänge zu, um sie zu verwenden.",
+    "Only items not already provided by another playlist": "Nur Titel, die nicht bereits von einer anderen Playlist bereitgestellt werden",
+    "For media server sources: hide titles another playlist in this merge already serves through \"Prefer media server sources\".": "Für Medienserver-Quellen: Titel ausblenden, die eine andere Playlist dieser Zusammenführung bereits über \"Prefer media server sources\" liefert."
 }

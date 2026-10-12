@@ -7048,5 +7048,14 @@
     "yt-dlp format selector followed by optional flags. Example: bestvideo+bestaudio/best --no-playlist": "yt-dlp format selector followed by optional flags. Example: bestvideo+bestaudio/best --no-playlist",
     "{1}:matched of :total channel matched. Review and apply below.|[2,*]:matched of :total channels matched. Review and apply below.": "{1}:matched of :total channel matched. Review and apply below.|[2,*]:matched of :total channels matched. Review and apply below.",
     "{1}:name was already pointing at that replacement channel and has been unset.|[2,*]:count source channels were pointing at that replacement channel and have been unset.": "{1}:name was already pointing at that replacement channel and has been unset.|[2,*]:count source channels were pointing at that replacement channel and have been unset.",
-    "⚠️ IPTV WARNING: This will analyze each stream to determine resolution, which may cause rate limiting or blocking with IPTV providers.": "⚠️ IPTV WARNING: This will analyze each stream to determine resolution, which may cause rate limiting or blocking with IPTV providers."
+    "⚠️ IPTV WARNING: This will analyze each stream to determine resolution, which may cause rate limiting or blocking with IPTV providers.": "⚠️ IPTV WARNING: This will analyze each stream to determine resolution, which may cause rate limiting or blocking with IPTV providers.",
+    ":name + Local Media": ":name + Local Media",
+    "Create Merged Playlist with Local Media": "Create Merged Playlist with Local Media",
+    "Creates a new merged playlist containing this playlist plus your media server libraries. Local items this playlist already matches are not listed twice. Assign your auths to the new playlist to start using it; this playlist and its auths are not changed.": "Creates a new merged playlist containing this playlist plus your media server libraries. Local items this playlist already matches are not listed twice. Assign your auths to the new playlist to start using it; this playlist and its auths are not changed.",
+    "No media server integrations available": "No media server integrations available",
+    "Enable an Emby, Jellyfin, Plex, or local media integration that has synced a playlist, then try again.": "Enable an Emby, Jellyfin, Plex, or local media integration that has synced a playlist, then try again.",
+    "Merged playlist created": "Merged playlist created",
+    "\":name\" was created. Assign auths to it to start using it.": "\":name\" was created. Assign auths to it to start using it.",
+    "Only items not already provided by another playlist": "Only items not already provided by another playlist",
+    "For media server sources: hide titles another playlist in this merge already serves through \"Prefer media server sources\".": "For media server sources: hide titles another playlist in this merge already serves through \"Prefer media server sources\"."
 }

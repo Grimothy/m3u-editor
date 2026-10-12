@@ -6,6 +6,7 @@ use App\Enums\PlaylistSourceType;
 use App\Enums\SeriesProbeScope;
 use App\Enums\Status;
 use App\Facades\PlaylistFacade;
+use App\Filament\Actions\CreateMergedWithLocalMediaAction;
 use App\Filament\Actions\CronHelperAction;
 use App\Filament\Actions\FetchTmdbIdsForGroupsAction;
 use App\Filament\Actions\ModalActionGroup;
@@ -647,6 +648,7 @@ class PlaylistResource extends Resource implements CopilotResource
                     ->hidden(fn ($record): bool => ! $record->xtream),
                 FetchTmdbIdsForGroupsAction::makeForPlaylist('vod')
                     ->hidden(fn ($record): bool => ! $record->xtream),
+                CreateMergedWithLocalMediaAction::make(),
                 Action::make('reset_processing')
                     ->label(__('Reset Processing State'))
                     ->icon('heroicon-o-arrow-path')

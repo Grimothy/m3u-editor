@@ -5887,5 +5887,14 @@
     "yt-dlp format selector followed by optional flags. Example: bestvideo+bestaudio/best --no-playlist": "yt-dlp 格式选择器后跟可选标志。示例：bestvideo+bestaudio/best --no-playlist",
     "{1}:matched of :total channel matched. Review and apply below.|[2,*]:matched of :total channels matched. Review and apply below.": "{1}:matched of :total channel matched. Review and apply below.|[2,*]:matched of :total channels matched. Review and apply below.",
     "{1}:name was already pointing at that replacement channel and has been unset.|[2,*]:count source channels were pointing at that replacement channel and have been unset.": "{1}:name was already pointing at that replacement channel and has been unset.|[2,*]:count source channels were pointing at that replacement channel and have been unset.",
-    "⚠️ IPTV WARNING: This will analyze each stream to determine resolution, which may cause rate limiting or blocking with IPTV providers.": "⚠️ IPTV 警告：这将分析每个流以确定分辨率，这可能会导致 IPTV 提供商的速率限制或阻塞。"
+    "⚠️ IPTV WARNING: This will analyze each stream to determine resolution, which may cause rate limiting or blocking with IPTV providers.": "⚠️ IPTV 警告：这将分析每个流以确定分辨率，这可能会导致 IPTV 提供商的速率限制或阻塞。",
+    ":name + Local Media": ":name + 本地媒体",
+    "Create Merged Playlist with Local Media": "创建包含本地媒体的合并播放列表",
+    "Creates a new merged playlist containing this playlist plus your media server libraries. Local items this playlist already matches are not listed twice. Assign your auths to the new playlist to start using it; this playlist and its auths are not changed.": "创建一个新的合并播放列表，包含此播放列表和您的媒体服务器媒体库。此播放列表已匹配的本地内容不会重复列出。请将您的授权分配给新播放列表以开始使用；此播放列表及其授权不会更改。",
+    "No media server integrations available": "没有可用的媒体服务器集成",
+    "Enable an Emby, Jellyfin, Plex, or local media integration that has synced a playlist, then try again.": "请启用已同步播放列表的 Emby、Jellyfin、Plex 或本地媒体集成，然后重试。",
+    "Merged playlist created": "合并播放列表已创建",
+    "\":name\" was created. Assign auths to it to start using it.": "已创建“:name”。请为其分配授权以开始使用。",
+    "Only items not already provided by another playlist": "仅包含其他播放列表尚未提供的内容",
+    "For media server sources: hide titles another playlist in this merge already serves through \"Prefer media server sources\".": "适用于媒体服务器来源：隐藏此合并中其他播放列表已通过\"Prefer media server sources\"提供的标题。"
 }

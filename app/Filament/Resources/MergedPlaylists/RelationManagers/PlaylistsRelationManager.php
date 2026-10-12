@@ -118,6 +118,7 @@ class PlaylistsRelationManager extends RelationManager
                         'include_live' => $record->pivot->include_live,
                         'include_vod' => $record->pivot->include_vod,
                         'include_series' => $record->pivot->include_series,
+                        'only_unmatched' => $record->pivot->only_unmatched,
                     ])
                     ->modalWidth('md')
                     ->modalHeading(fn (Playlist $record): string => __('Edit content types for :name', ['name' => $record->name]))
@@ -152,6 +153,10 @@ class PlaylistsRelationManager extends RelationManager
             Toggle::make('include_series')
                 ->label(__('Include Series'))
                 ->default(true),
+            Toggle::make('only_unmatched')
+                ->label(__('Only items not already provided by another playlist'))
+                ->helperText(__('For media server sources: hide titles another playlist in this merge already serves through "Prefer media server sources".'))
+                ->default(false),
         ];
     }
 }
