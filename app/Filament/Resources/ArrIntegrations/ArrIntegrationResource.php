@@ -200,22 +200,54 @@ class ArrIntegrationResource extends Resource
 
                                 Toggle::make('guest_enabled')
                                     ->label(__('Allow Guest Requests'))
-                                    ->helperText(__('Allow guests to request content via this integration on any playlist that has content requests enabled.'))
+                                    ->helperText(__('Let guests request content through this integration.'))
+                                    ->hintIcon(
+                                        'heroicon-m-question-mark-circle',
+                                        tooltip: __('Applies to any playlist that has content requests enabled.')
+                                    )
                                     ->default(false),
 
+                                // With caching off in Settings nothing is sent here, so the
+                                // caching options are hidden behind a locked "off" toggle.
+                                // Hidden fields aren't saved, so the stored values survive
+                                // a save meanwhile.
                                 Toggle::make('cache_enabled')
                                     ->label(__('Use for caching'))
-                                    ->disabled(fn (): bool => ! app(CachedContentDispatchService::class)->isEnabled())
-                                    ->helperText(fn (): string => app(CachedContentDispatchService::class)->isEnabled()
-                                        ? __('On playlists that prefer media server sources, Cache Now and dynamic group caching add new titles here instead of downloading them from the provider. Titles already in the library are never changed or removed.')
-                                        : __('Turn on "Enable cache" in Settings > Cache to use this integration for caching.'))
+                                    ->helperText(__('Send new cached titles here instead of downloading them from the provider.'))
+                                    ->hintIcon(
+                                        'heroicon-m-question-mark-circle',
+                                        tooltip: __('Applies to Cache Now and dynamic group caching on playlists that prefer media server sources. Titles already in the library are never changed or removed.')
+                                    )
+                                    ->visible(fn (): bool => app(CachedContentDispatchService::class)->isEnabled())
                                     ->live()
                                     ->default(false),
 
+                                Toggle::make('cache_enabled_locked')
+                                    ->label(__('Use for caching'))
+                                    ->helperText(__('Turn on "Enable cache" in Settings > Cache to use this integration for caching.'))
+                                    ->formatStateUsing(fn (): bool => false)
+                                    ->disabled()
+                                    ->dehydrated(false)
+                                    ->hidden(fn (): bool => app(CachedContentDispatchService::class)->isEnabled()),
+
                                 Toggle::make('cache_cleanup')
                                     ->label(__('Remove after leaving dynamic groups'))
-                                    ->helperText(__('Movies dynamic group caching adds here are removed, files included, once they have been out of every dynamic group for the longest "Keep after leaving (days)" among your caching rules (at least 1 day). Only movies added while this is on are removed, never ones already in the library. Use Cache Now on a movie to keep it.'))
-                                    ->visible(fn (Get $get): bool => $get('type') === 'radarr' && (bool) $get('cache_enabled'))
+                                    ->helperText(__('Remove movies that dynamic group caching added here, files included, once they leave every dynamic group.'))
+                                    ->hintIcon(
+                                        'heroicon-m-question-mark-circle',
+                                        tooltip: __('Removal waits for the longest "Keep after leaving (days)" among your caching rules (at least 1 day). Only movies added while this is on are removed, never ones already in the library. Use Cache Now on a movie to keep it.')
+                                    )
+                                    ->visible(fn (Get $get): bool => $get('type') === 'radarr' && (bool) $get('cache_enabled') && app(CachedContentDispatchService::class)->isEnabled())
+                                    ->default(false),
+
+                                Toggle::make('cache_failback')
+                                    ->label(__('Fail back to the provider'))
+                                    ->helperText(__('Download from the playlist provider instead when a title sent here fails or stalls.'))
+                                    ->hintIcon(
+                                        'heroicon-m-question-mark-circle',
+                                        tooltip: __('Kicks in when a movie or episode fails to download, or still isn\'t downloaded or downloading after 24 hours. The title is then unmonitored here. Nothing is ever deleted from the arr.')
+                                    )
+                                    ->visible(fn (Get $get): bool => (bool) $get('cache_enabled') && app(CachedContentDispatchService::class)->isEnabled())
                                     ->default(false),
                             ]),
                     ]),
@@ -282,11 +314,14 @@ class ArrIntegrationResource extends Resource
                     ->label(__('Guest'))
                     ->sortable(),
 
+                // Off for every row while caching is off in Settings, as
+                // nothing is sent here then.
                 ToggleColumn::make('cache_enabled')
                     ->label(__('Caching'))
+                    ->state(fn (ArrIntegration $record): bool => app(CachedContentDispatchService::class)->isEnabled() && $record->cache_enabled)
                     ->disabled(fn (): bool => ! app(CachedContentDispatchService::class)->isEnabled())
                     ->tooltip(fn (): string => app(CachedContentDispatchService::class)->isEnabled()
-                        ? __('On playlists that prefer media server sources, Cache Now and dynamic group caching add new titles here instead of downloading them from the provider. Titles already in the library are never changed or removed.')
+                        ? __('Send new cached titles here instead of downloading them from the provider.')
                         : __('Turn on "Enable cache" in Settings > Cache to use this integration for caching.'))
                     ->sortable(),
 
