@@ -45,7 +45,7 @@ function matchMovie(Playlist $provider, Channel $providerChannel, Channel $local
 it('keeps every local movie by default, even ones the provider already carries', function () {
     $this->merged->playlists()->attach([$this->provider->id, $this->local->id]);
 
-    $providerMovie = Channel::factory()->create(['playlist_id' => $this->provider->id, 'is_vod' => true]);
+    $providerMovie = Channel::factory()->create(['playlist_id' => $this->provider->id, 'is_vod' => true, 'enabled' => true]);
     $matchedLocal = Channel::factory()->create(['playlist_id' => $this->local->id, 'is_vod' => true]);
     Channel::factory()->create(['playlist_id' => $this->local->id, 'is_vod' => true]);
     matchMovie($this->provider, $providerMovie, $matchedLocal, $this->integration);
@@ -57,7 +57,7 @@ it('hides local movies a provider in the merge already serves when only_unmatche
     $this->merged->playlists()->attach($this->provider->id);
     $this->merged->playlists()->attach($this->local->id, ['only_unmatched' => true]);
 
-    $providerMovie = Channel::factory()->create(['playlist_id' => $this->provider->id, 'is_vod' => true]);
+    $providerMovie = Channel::factory()->create(['playlist_id' => $this->provider->id, 'is_vod' => true, 'enabled' => true]);
     $matchedLocal = Channel::factory()->create(['playlist_id' => $this->local->id, 'is_vod' => true]);
     $unmatchedLocal = Channel::factory()->create(['playlist_id' => $this->local->id, 'is_vod' => true]);
     matchMovie($this->provider, $providerMovie, $matchedLocal, $this->integration);
@@ -71,7 +71,7 @@ it('only counts matches made by playlists attached to the same merge', function 
     $this->merged->playlists()->attach($this->provider->id);
     $this->merged->playlists()->attach($this->local->id, ['only_unmatched' => true]);
 
-    $otherProviderMovie = Channel::factory()->create(['playlist_id' => $otherProvider->id, 'is_vod' => true]);
+    $otherProviderMovie = Channel::factory()->create(['playlist_id' => $otherProvider->id, 'is_vod' => true, 'enabled' => true]);
     $local = Channel::factory()->create(['playlist_id' => $this->local->id, 'is_vod' => true]);
     matchMovie($otherProvider, $otherProviderMovie, $local, $this->integration);
 
@@ -82,7 +82,7 @@ it('picks the local movie back up once the match is gone', function () {
     $this->merged->playlists()->attach($this->provider->id);
     $this->merged->playlists()->attach($this->local->id, ['only_unmatched' => true]);
 
-    $providerMovie = Channel::factory()->create(['playlist_id' => $this->provider->id, 'is_vod' => true]);
+    $providerMovie = Channel::factory()->create(['playlist_id' => $this->provider->id, 'is_vod' => true, 'enabled' => true]);
     $local = Channel::factory()->create(['playlist_id' => $this->local->id, 'is_vod' => true]);
     matchMovie($this->provider, $providerMovie, $local, $this->integration);
 
@@ -110,7 +110,7 @@ it('hides a whole local series once any of its episodes is provided by the merge
     $this->merged->playlists()->attach($this->provider->id);
     $this->merged->playlists()->attach($this->local->id, ['only_unmatched' => true]);
 
-    $providerSeries = Series::factory()->create(['playlist_id' => $this->provider->id, 'user_id' => $this->user->id]);
+    $providerSeries = Series::factory()->create(['playlist_id' => $this->provider->id, 'user_id' => $this->user->id, 'enabled' => true]);
     $providerEpisode = Episode::factory()->create(['playlist_id' => $this->provider->id, 'series_id' => $providerSeries->id]);
 
     $matchedSeries = Series::factory()->create(['playlist_id' => $this->local->id, 'user_id' => $this->user->id]);
@@ -200,4 +200,76 @@ it('saves the only_unmatched toggle from the merged playlist source editor', fun
         ]);
 
     expect($this->merged->playlists()->find($this->local->id)->pivot->only_unmatched)->toBeTrue();
+});
+
+it('keeps a local movie listed when the matched provider movie is disabled', function () {
+    $this->merged->playlists()->attach($this->provider->id);
+    $this->merged->playlists()->attach($this->local->id, ['only_unmatched' => true]);
+
+    $providerMovie = Channel::factory()->create(['playlist_id' => $this->provider->id, 'is_vod' => true, 'enabled' => false]);
+    $local = Channel::factory()->create(['playlist_id' => $this->local->id, 'is_vod' => true]);
+    matchMovie($this->provider, $providerMovie, $local, $this->integration);
+
+    expect($this->merged->channels()->where('channels.enabled', true)->pluck('channels.id')->all())->toContain($local->id)
+        ->and($this->merged->channels()->pluck('channels.id')->all())->toContain($local->id);
+});
+
+it('does not list a second copy of a matched movie that shares its tmdb_id', function () {
+    $secondLocal = Playlist::factory()->for($this->user)->create();
+    $this->merged->playlists()->attach($this->provider->id);
+    $this->merged->playlists()->attach([$this->local->id => ['only_unmatched' => true], $secondLocal->id => ['only_unmatched' => true]]);
+
+    $providerMovie = Channel::factory()->create(['playlist_id' => $this->provider->id, 'is_vod' => true, 'enabled' => true]);
+    $matchedLocal = Channel::factory()->create(['playlist_id' => $this->local->id, 'is_vod' => true, 'tmdb_id' => '603']);
+    $copy = Channel::factory()->create(['playlist_id' => $secondLocal->id, 'is_vod' => true, 'tmdb_id' => '603']);
+    $other = Channel::factory()->create(['playlist_id' => $secondLocal->id, 'is_vod' => true, 'tmdb_id' => '604']);
+    matchMovie($this->provider, $providerMovie, $matchedLocal, $this->integration);
+
+    expect($this->merged->channels()->pluck('channels.id')->sort()->values()->all())
+        ->toBe(collect([$providerMovie->id, $other->id])->sort()->values()->all())
+        ->not->toContain($copy->id);
+});
+
+it('keeps a local series listed when the matched provider series is disabled', function () {
+    $this->merged->playlists()->attach($this->provider->id);
+    $this->merged->playlists()->attach($this->local->id, ['only_unmatched' => true]);
+
+    $providerSeries = Series::factory()->create(['playlist_id' => $this->provider->id, 'user_id' => $this->user->id, 'enabled' => false]);
+    $providerEpisode = Episode::factory()->create(['playlist_id' => $this->provider->id, 'series_id' => $providerSeries->id]);
+    $localSeries = Series::factory()->create(['playlist_id' => $this->local->id, 'user_id' => $this->user->id]);
+    $localEpisode = Episode::factory()->create(['playlist_id' => $this->local->id, 'series_id' => $localSeries->id]);
+
+    MediaSourceMatch::create([
+        'playlist_id' => $this->provider->id,
+        'media_server_integration_id' => $this->integration->id,
+        'episode_id' => $providerEpisode->id,
+        'media_episode_id' => $localEpisode->id,
+        'match_key' => 'tmdb:1:s1e1',
+    ]);
+
+    expect($this->merged->series()->pluck('series.id')->all())->toContain($localSeries->id)
+        ->and($this->merged->episodes()->pluck('episodes.id')->all())->toContain($localEpisode->id);
+});
+
+it('does not list a second copy of a matched series that shares its tmdb_id', function () {
+    $secondLocal = Playlist::factory()->for($this->user)->create();
+    $this->merged->playlists()->attach($this->provider->id);
+    $this->merged->playlists()->attach([$this->local->id => ['only_unmatched' => true], $secondLocal->id => ['only_unmatched' => true]]);
+
+    $providerSeries = Series::factory()->create(['playlist_id' => $this->provider->id, 'user_id' => $this->user->id, 'enabled' => true]);
+    $providerEpisode = Episode::factory()->create(['playlist_id' => $this->provider->id, 'series_id' => $providerSeries->id]);
+    $matchedSeries = Series::factory()->create(['playlist_id' => $this->local->id, 'user_id' => $this->user->id, 'tmdb_id' => '1399']);
+    $matchedEpisode = Episode::factory()->create(['playlist_id' => $this->local->id, 'series_id' => $matchedSeries->id]);
+    $copySeries = Series::factory()->create(['playlist_id' => $secondLocal->id, 'user_id' => $this->user->id, 'tmdb_id' => '1399']);
+
+    MediaSourceMatch::create([
+        'playlist_id' => $this->provider->id,
+        'media_server_integration_id' => $this->integration->id,
+        'episode_id' => $providerEpisode->id,
+        'media_episode_id' => $matchedEpisode->id,
+        'match_key' => 'tmdb:1399:s1e1',
+    ]);
+
+    expect($this->merged->series()->pluck('series.id')->all())->toBe([$providerSeries->id])
+        ->not->toContain($copySeries->id);
 });

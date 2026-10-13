@@ -164,7 +164,10 @@ class MergedPlaylist extends Model
             ->orWhereNotExists(fn ($matches) => $this->scopeToMergeProviders(
                 $matches->selectRaw('1')
                     ->from('media_source_matches')
-                    ->whereColumn('media_source_matches.media_channel_id', 'channels.id')
+                    ->join('channels as provider_channels', 'provider_channels.id', '=', 'media_source_matches.channel_id')
+                    ->join('channels as matched_media', 'matched_media.id', '=', 'media_source_matches.media_channel_id')
+                    ->where('provider_channels.enabled', true)
+                    ->whereRaw('(matched_media.id = channels.id OR (channels.tmdb_id IS NOT NULL AND matched_media.tmdb_id = channels.tmdb_id))')
             )));
     }
 
@@ -182,8 +185,9 @@ class MergedPlaylist extends Model
 
     /**
      * Series-level rule for only_unmatched sources: a local series is hidden once any of its
-     * episodes is already provided by another source in the merge, so the same show is never
-     * listed twice (the provider's entry plays the local episodes it matched).
+     * episodes (or a copy of it sharing its tmdb_id) is matched to an enabled provider episode
+     * of an enabled provider series, so the same show is never listed twice. A disabled
+     * provider title does not hide its local copy.
      */
     private function onlyUnmatchedSeries(string $seriesIdColumn): Closure
     {
@@ -192,8 +196,19 @@ class MergedPlaylist extends Model
             ->orWhereNotExists(fn ($matches) => $this->scopeToMergeProviders(
                 $matches->selectRaw('1')
                     ->from('episodes as matched_episodes')
+                    ->join('series as matched_series', 'matched_series.id', '=', 'matched_episodes.series_id')
                     ->join('media_source_matches', 'media_source_matches.media_episode_id', '=', 'matched_episodes.id')
-                    ->whereColumn('matched_episodes.series_id', $seriesIdColumn)
+                    ->join('episodes as provider_episodes', 'provider_episodes.id', '=', 'media_source_matches.episode_id')
+                    ->join('series as provider_series', 'provider_series.id', '=', 'provider_episodes.series_id')
+                    ->where('provider_episodes.enabled', true)
+                    ->where('provider_series.enabled', true)
+                    ->where(fn ($same) => $same
+                        ->whereColumn('matched_episodes.series_id', $seriesIdColumn)
+                        ->orWhereExists(fn ($copy) => $copy->selectRaw('1')
+                            ->from('series as local_series')
+                            ->whereColumn('local_series.id', $seriesIdColumn)
+                            ->whereNotNull('local_series.tmdb_id')
+                            ->whereColumn('local_series.tmdb_id', 'matched_series.tmdb_id')))
             ));
     }
 
