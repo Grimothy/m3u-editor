@@ -23,7 +23,25 @@ class CreateMergedWithLocalMediaAction
                 && ! $record->is_network_playlist
                 && ! $record->isMediaServerPlaylist())
             ->action(function (Playlist $record): void {
-                $merged = app(MediaSourceMatchService::class)->createMergedWithLocalMedia($record);
+                $service = app(MediaSourceMatchService::class);
+
+                $existing = $service->findMergedWithLocalMedia($record);
+                if ($existing !== null) {
+                    Notification::make()
+                        ->info()
+                        ->title(__('Merged playlist already exists'))
+                        ->body(__('":name" already merges this playlist with your media server libraries.', ['name' => $existing->name]))
+                        ->actions([
+                            Action::make('open')
+                                ->label(__('Open'))
+                                ->url(MergedPlaylistResource::getUrl('edit', ['record' => $existing])),
+                        ])
+                        ->send();
+
+                    return;
+                }
+
+                $merged = $service->createMergedWithLocalMedia($record);
 
                 if ($merged === null) {
                     Notification::make()

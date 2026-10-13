@@ -2,6 +2,7 @@
 
 namespace App\Services;
 
+use App\Enums\PlaylistChannelId;
 use App\Models\Channel;
 use App\Models\MediaServerIntegration;
 use App\Models\MediaSourceMatch;
@@ -73,6 +74,33 @@ class MediaSourceMatchService
     }
 
     /**
+     * An existing merge of this provider with all of its eligible media-server playlists
+     * flagged only_unmatched, so the one-click action does not create duplicates.
+     */
+    public function findMergedWithLocalMedia(Playlist $provider): ?MergedPlaylist
+    {
+        $mediaPlaylistIds = array_keys($this->eligibleIntegrationPlaylists($provider));
+
+        if ($mediaPlaylistIds === []) {
+            return null;
+        }
+
+        $query = MergedPlaylist::query()
+            ->where('user_id', $provider->user_id)
+            ->whereHas('playlists', fn (Builder $sources) => $sources
+                ->where('playlists.id', $provider->id)
+                ->where('merged_playlist_playlist.only_unmatched', false));
+
+        foreach ($mediaPlaylistIds as $mediaPlaylistId) {
+            $query->whereHas('playlists', fn (Builder $sources) => $sources
+                ->where('playlists.id', $mediaPlaylistId)
+                ->where('merged_playlist_playlist.only_unmatched', true));
+        }
+
+        return $query->orderBy('id')->first();
+    }
+
+    /**
      * Create a merged playlist of the provider plus its eligible media-server playlists,
      * with each media-server source set to only_unmatched so titles the provider already
      * carries (and streams from local media via prefer-local) are not listed twice.
@@ -91,7 +119,7 @@ class MediaSourceMatchService
                 'name' => __(':name + Local Media', ['name' => $provider->name]),
                 'uuid' => Str::orderedUuid()->toString(),
                 'user_id' => $provider->user_id,
-                'id_channel_by' => 'stream_id',
+                'id_channel_by' => PlaylistChannelId::TvgId,
             ]);
 
             $merged->playlists()->attach($provider->id);
