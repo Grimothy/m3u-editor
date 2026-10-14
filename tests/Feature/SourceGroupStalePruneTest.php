@@ -100,3 +100,30 @@ describe('SourceGroup stale-prune guard (issue #1530)', function () {
         expect($rows->get(2)?->name)->toBe('Target');
     });
 });
+
+describe('non-numeric category ids (issue #1303)', function () {
+    it('tracks non-numeric categories by name with a null source_group_id instead of crashing', function () {
+        runSyncSourceGroupTypeForPrune($this->playlist, collect([
+            ['category_id' => 'network-group-1', 'category_name' => 'Networks'],
+            ['category_id' => 7, 'category_name' => 'Numeric Group'],
+        ]), 'live');
+
+        $rows = SourceGroup::where('playlist_id', $this->playlist->id)->where('type', 'live')->get()->keyBy('name');
+
+        expect($rows->get('Networks')->source_group_id)->toBeNull();
+        expect($rows->get('Numeric Group')->source_group_id)->toBe(7);
+    });
+
+    it('prunes a name-tracked row when its name leaves the feed', function () {
+        runSyncSourceGroupTypeForPrune($this->playlist, collect([
+            ['category_id' => 'network-group-1', 'category_name' => 'Networks'],
+        ]), 'live');
+
+        runSyncSourceGroupTypeForPrune($this->playlist, collect([
+            ['category_id' => 'network-group-2', 'category_name' => 'Renamed'],
+        ]), 'live');
+
+        expect(SourceGroup::where('playlist_id', $this->playlist->id)->where('type', 'live')->pluck('name')->all())
+            ->toBe(['Renamed']);
+    });
+});

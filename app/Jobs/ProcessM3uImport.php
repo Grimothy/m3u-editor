@@ -1678,7 +1678,13 @@ class ProcessM3uImport implements ShouldQueue
         Playlist $playlist,
     ): array {
         $playlistId = $playlist->id;
-        $categoryIds = $groups->pluck('category_id')->filter(fn ($id) => $id !== null)->unique();
+        // Only numeric category IDs can bind against the bigint source_group_id
+        // column — providers emitting string IDs (e.g. a network playlist's own
+        // Xtream surface, issue #1303) degrade to the legacy name-tracked rows
+        // (null source_group_id) instead of crashing the sync.
+        $categoryIds = $groups->pluck('category_id')
+            ->filter(fn ($id) => $id !== null && is_numeric($id))
+            ->unique();
         $currentNames = $groups->pluck('category_name');
 
         // Names known before this sync, captured ahead of the prune: a category the
@@ -1796,7 +1802,7 @@ class ProcessM3uImport implements ShouldQueue
                 ->map(fn ($item) => [
                     'name' => $item['category_name'],
                     'playlist_id' => $playlistId,
-                    'source_group_id' => $item['category_id'],
+                    'source_group_id' => is_numeric($item['category_id']) ? $item['category_id'] : null,
                     'type' => $type,
                 ])
                 ->values()

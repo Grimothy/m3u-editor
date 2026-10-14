@@ -952,6 +952,19 @@ class AppServiceProvider extends ServiceProvider
                     $network->schedule_type = 'sequential';
                 }
             });
+            Network::created(function (Network $network) {
+                // Project the new network into its output playlist right away,
+                // so merged playlists and M3U/Xtream output see it (issue #1303).
+                if ($network->network_playlist_id === null) {
+                    return;
+                }
+
+                $playlist = Playlist::find($network->network_playlist_id);
+
+                if ($playlist) {
+                    app(NetworkChannelSyncService::class)->syncNetworkAsChannel($playlist, $network);
+                }
+            });
             Network::updated(function (Network $network) {
                 app(NetworkChannelSyncService::class)->refreshNetworkChannel($network);
             });
@@ -966,7 +979,7 @@ class AppServiceProvider extends ServiceProvider
                     ]);
                 }
 
-                Channel::where('network_id', $network->id)->delete();
+                app(NetworkChannelSyncService::class)->removeNetworkChannelsFor($network);
             });
 
             // ChannelScrubber

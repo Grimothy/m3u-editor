@@ -52,10 +52,11 @@ it('falls back to "Networks" when group_name is empty string', function () {
 });
 
 it('updates channel group when network group_name changes via refreshNetworkChannel', function () {
-    $playlist = Playlist::factory()->create(['include_networks_in_m3u' => true]);
+    $playlist = Playlist::factory()->create(['is_network_playlist' => true]);
     $network = Network::factory()->create([
         'user_id' => $playlist->user_id,
         'group_name' => 'Original Group',
+        'network_playlist_id' => $playlist->id,
     ]);
 
     $service = app(NetworkChannelSyncService::class);
