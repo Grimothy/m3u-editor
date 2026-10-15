@@ -90,5 +90,26 @@ it('records for the scheduled window only, without adding the playlist default e
 
     Http::assertSent(fn ($request) => str_contains($request->url(), '/broadcast/')
         && str_contains($request->url(), '/start')
-        && $request->data()['duration_seconds'] === 3600);
+        && abs($request->data()['duration_seconds'] - 3600) <= 2);
+});
+
+it('records only what is left of the airing window when started late or resumed', function () {
+    $playlist = Playlist::factory()->create();
+    $setting = DvrSetting::factory()->create([
+        'playlist_id' => $playlist->id,
+        'user_id' => $playlist->user_id,
+        'enabled' => true,
+        'default_end_late_seconds' => 0,
+    ]);
+    $recording = DvrRecording::factory()->create([
+        'dvr_setting_id' => $setting->id,
+        'user_id' => $playlist->user_id,
+        'scheduled_start' => now()->subMinutes(20),
+        'scheduled_end' => now()->addMinutes(40),
+    ]);
+
+    app(M3uProxyService::class)->startDvrBroadcast($recording, $setting, 'http://example.com/stream.ts');
+
+    Http::assertSent(fn ($request) => str_contains($request->url(), '/start')
+        && abs($request->data()['duration_seconds'] - 2400) <= 2);
 });
