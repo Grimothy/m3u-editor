@@ -12,7 +12,6 @@ use Illuminate\Database\Eloquent\Builder;
 use Illuminate\Database\Query\Builder as QueryBuilder;
 use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Facades\Log;
-use Illuminate\Support\Str;
 
 /**
  * Builds the media_source_matches table for one provider playlist: provider
@@ -74,8 +73,10 @@ class MediaSourceMatchService
     }
 
     /**
-     * An existing merge of this provider with all of its eligible media-server playlists
-     * flagged only_unmatched, so the one-click action does not create duplicates.
+     * An existing merge of this provider (unflagged) with at least one of its eligible
+     * media-server playlists flagged only_unmatched, so the one-click action does not
+     * create duplicates. Matching on any flagged source, not all of them, keeps a merge
+     * findable after the owner adds or enables another integration.
      */
     public function findMergedWithLocalMedia(Playlist $provider): ?MergedPlaylist
     {
@@ -85,19 +86,16 @@ class MediaSourceMatchService
             return null;
         }
 
-        $query = MergedPlaylist::query()
+        return MergedPlaylist::query()
             ->where('user_id', $provider->user_id)
             ->whereHas('playlists', fn (Builder $sources) => $sources
                 ->where('playlists.id', $provider->id)
-                ->where('merged_playlist_playlist.only_unmatched', false));
-
-        foreach ($mediaPlaylistIds as $mediaPlaylistId) {
-            $query->whereHas('playlists', fn (Builder $sources) => $sources
-                ->where('playlists.id', $mediaPlaylistId)
-                ->where('merged_playlist_playlist.only_unmatched', true));
-        }
-
-        return $query->orderBy('id')->first();
+                ->where('merged_playlist_playlist.only_unmatched', false))
+            ->whereHas('playlists', fn (Builder $sources) => $sources
+                ->whereIn('playlists.id', $mediaPlaylistIds)
+                ->where('merged_playlist_playlist.only_unmatched', true))
+            ->orderBy('id')
+            ->first();
     }
 
     /**
@@ -117,7 +115,6 @@ class MediaSourceMatchService
         return DB::transaction(function () use ($provider, $mediaPlaylistIds): MergedPlaylist {
             $merged = MergedPlaylist::create([
                 'name' => __(':name + Local Media', ['name' => $provider->name]),
-                'uuid' => Str::orderedUuid()->toString(),
                 'user_id' => $provider->user_id,
                 'id_channel_by' => PlaylistChannelId::TvgId,
             ]);
@@ -138,7 +135,7 @@ class MediaSourceMatchService
      *
      * @return array<int, int>
      */
-    public function eligibleIntegrationPlaylists(Playlist $playlist): array
+    private function eligibleIntegrationPlaylists(Playlist $playlist): array
     {
         return MediaServerIntegration::query()
             ->where('user_id', $playlist->user_id)
