@@ -130,6 +130,9 @@ class ManageGeneralSettings extends BaseSettingsPage
                                 Toggle::make('show_queue_indicator')
                                     ->label(__('Show queue indicator'))
                                     ->helperText(__('Show the live queue status indicator in the top navigation bar')),
+                                Toggle::make('privacy_mode')
+                                    ->label(__('Privacy mode'))
+                                    ->helperText(__('Blur URLs and credentials across the app. Hover over a value to reveal it.')),
                                 Toggle::make('output_wan_address')
                                     ->label(__('Output WAN address in menu'))
                                     ->helperText(__('When enabled, the application will output the WAN address of the server m3u-editor is currently running on.'))

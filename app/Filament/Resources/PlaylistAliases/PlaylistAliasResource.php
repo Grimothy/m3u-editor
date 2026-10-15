@@ -508,6 +508,7 @@ class PlaylistAliasResource extends Resource implements CopilotResource
                                     ->columns(2)
                                     ->schema([
                                         Forms\Components\TextInput::make('username')
+                                            ->extraInputAttributes(['class' => 'privacy-sensitive'])
                                             ->label(__('Username'))
                                             ->helperText(__('Optional: Set credentials to access this alias via Xtream API. Must be unique across all aliases and playlist auths.'))
                                             ->rules(function ($record) {
@@ -566,6 +567,7 @@ class PlaylistAliasResource extends Resource implements CopilotResource
                                             .(PlaylistAlias::entryReplacesUrl($state) ? ' -> '.parse_url($state['replace_url'], PHP_URL_HOST) : ''))
                                         ->schema([
                                             Forms\Components\TextInput::make('url')
+                                                ->extraInputAttributes(['class' => 'privacy-sensitive'])
                                                 ->label(__('Provider URL'))
                                                 ->live()
                                                 ->helperText(__('The provider URL the source streams use, in <url>:<port> format - without trailing slash (/).'))
@@ -656,6 +658,7 @@ class PlaylistAliasResource extends Resource implements CopilotResource
                                             // Credentials are optional only when the entry replaces the provider
                                             // URL, and must be given as a pair (empty keeps the provider's own).
                                             Forms\Components\TextInput::make('username')
+                                                ->extraInputAttributes(['class' => 'privacy-sensitive'])
                                                 ->label(__('Xtream API Username'))
                                                 ->live(onBlur: true)
                                                 ->required(fn (Get $get): bool => ! $get('replace_url_enabled') || filled($get('password'))),

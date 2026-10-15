@@ -106,6 +106,7 @@ class ManageSmtpSettings extends BaseSettingsPage
                     ->columns(2)
                     ->schema([
                         TextInput::make('smtp_host')
+                            ->extraInputAttributes(['class' => 'privacy-sensitive'])
                             ->label(__('SMTP Host'))
                             ->placeholder(__('Enter SMTP Host'))
                             ->requiredWith('smtp_port')

@@ -128,6 +128,7 @@ class EpgResource extends Resource implements CopilotResource
                     ->searchable()
                     ->sortable(),
                 TextColumn::make('url')
+                    ->extraAttributes(['class' => 'privacy-sensitive'])
                     ->wrap()
                     ->toggleable(isToggledHiddenByDefault: true)
                     ->searchable(),
@@ -743,6 +744,7 @@ class EpgResource extends Resource implements CopilotResource
                 ->visible(fn (Get $get): bool => $get('source_type') === EpgSourceType::URL->value || ! $get('source_type'))
                 ->schema([
                     TextInput::make('url')
+                        ->extraInputAttributes(['class' => 'privacy-sensitive'])
                         ->label(__('URL or Local file path'))
                         ->prefixIcon('heroicon-m-globe-alt')
                         ->helperText(__('Enter the URL of the XMLTV guide data. If this is a local file, you can enter a full or relative path. If changing URL, the guide data will be re-imported. Use with caution as this could lead to data loss if the new guide differs from the old one.'))

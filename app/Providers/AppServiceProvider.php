@@ -1030,6 +1030,20 @@ class AppServiceProvider extends ServiceProvider
             PanelsRenderHook::FOOTER,
             fn () => view('footer')
         );
+
+        // Privacy mode: blur URLs and credentials marked with .privacy-sensitive
+        FilamentView::registerRenderHook(
+            PanelsRenderHook::HEAD_END,
+            function (): string {
+                try {
+                    return app(GeneralSettings::class)->privacy_mode
+                        ? view('components.privacy-mode-styles')->render()
+                        : '';
+                } catch (Throwable $e) {
+                    return '';
+                }
+            }
+        );
     }
 
     /**

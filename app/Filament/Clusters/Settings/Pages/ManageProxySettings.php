@@ -185,6 +185,7 @@ class ManageProxySettings extends BaseSettingsPage
                     ->columnSpanFull()
                     ->schema([
                         TextInput::make('url_override')
+                            ->extraInputAttributes(['class' => 'privacy-sensitive'])
                             ->label(__('Override URL'))
                             ->columnSpanFull()
                             ->url()
@@ -286,6 +287,7 @@ class ManageProxySettings extends BaseSettingsPage
                     ])
                     ->schema([
                         TextInput::make('failover_resolver_url')
+                            ->extraInputAttributes(['class' => 'privacy-sensitive'])
                             ->label(__('Resolver URL'))
                             ->columnSpanFull()
                             ->url()
