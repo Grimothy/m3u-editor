@@ -1031,6 +1031,56 @@ it('classifies recording with non-movie category and subtitle as TV', function (
     expect($series->name)->toBe('Premier League');
 });
 
+it('classifies a bare film-genre category with a subtitle as a movie', function (string $category) {
+    $recording = makeCompletedRecording([
+        'title' => 'Heat',
+        'subtitle' => 'Director\'s Cut',
+        'season' => null,
+        'episode' => null,
+        'metadata' => null,
+        'epg_programme_data' => ['category' => $category],
+    ]);
+
+    $this->service->integrateRecording($recording);
+
+    expect($recording->isTvContent())->toBeFalse()
+        ->and(Series::count())->toBe(0)
+        ->and(Channel::where('dvr_recording_id', $recording->id)->exists())->toBeTrue();
+})->with(['Drama', 'Action', 'Thriller', 'Comedy']);
+
+it('ignores a provider ID in episode_num and classifies the recording as a movie', function () {
+    $recording = makeCompletedRecording([
+        'title' => 'Heat',
+        'subtitle' => null,
+        'season' => null,
+        'episode' => null,
+        'metadata' => null,
+        'epg_programme_data' => ['episode_num' => 'MV000123.0000'],
+    ]);
+
+    $this->service->integrateRecording($recording);
+
+    expect($recording->isTvContent())->toBeFalse()
+        ->and(Series::count())->toBe(0)
+        ->and(Channel::where('dvr_recording_id', $recording->id)->exists())->toBeTrue();
+});
+
+it('does not treat series_key as a TV signal because every recording has one', function () {
+    $recording = makeCompletedRecording([
+        'title' => 'Heat',
+        'series_key' => 'setting:1|title:heat',
+        'season' => null,
+        'episode' => null,
+        'metadata' => null,
+        'epg_programme_data' => null,
+    ]);
+
+    $this->service->integrateRecording($recording);
+
+    expect($recording->isTvContent())->toBeFalse()
+        ->and(Channel::where('dvr_recording_id', $recording->id)->exists())->toBeTrue();
+});
+
 it('falls through to movie when no category, no S/E, no subtitle', function () {
     $recording = makeCompletedRecording([
         'title' => 'Some Random Programme',

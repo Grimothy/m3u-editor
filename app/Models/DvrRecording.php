@@ -8,6 +8,7 @@ use App\Enums\DvrRuleType;
 use App\Events\DvrRecordingStatusEvent;
 use App\Notifications\Notification as AppNotification;
 use App\Services\ShowMetadataService;
+use App\Support\EpisodeNumberParser;
 use Illuminate\Database\Eloquent\Builder;
 use Illuminate\Database\Eloquent\Factories\HasFactory;
 use Illuminate\Database\Eloquent\Model;
@@ -22,6 +23,17 @@ use Symfony\Component\HttpFoundation\StreamedResponse;
 class DvrRecording extends Model
 {
     use HasFactory;
+
+    /**
+     * Bare film genres that EPG providers use as the category for movies.
+     * A subtitle alongside one of these is not evidence of an episode.
+     *
+     * @var list<string>
+     */
+    private const FILM_GENRE_CATEGORIES = [
+        'drama', 'action', 'thriller', 'comedy', 'horror', 'romance', 'western',
+        'sci-fi', 'science fiction', 'fantasy', 'animation', 'adventure', 'crime', 'mystery', 'suspense',
+    ];
 
     /**
      * @return array<string, string>
@@ -422,6 +434,61 @@ class DvrRecording extends Model
             DvrRecordingStatus::Scheduled,
             DvrRecordingStatus::Recording,
         ])->orderBy('scheduled_start');
+    }
+
+    /**
+     * Decide whether this recording is TV content (series/episode) rather than a movie.
+     *
+     * Priority order (first match wins):
+     *
+     *   1. TMDB metadata type (definitive when present)
+     *   2. season/episode columns
+     *   3. epg_programme_data.episode_num, but only when it parses as a real
+     *      season/episode. Providers also stuff non-episode IDs here (e.g. "MV000123.0000").
+     *   4. EPG category: movie/film → movie, TV-ish keywords → TV
+     *   5. Non-movie category with a subtitle → TV. Bare film genres ("Drama", "Action")
+     *      are skipped here, since movies often carry a subtitle (tagline, edition, original title).
+     *
+     * series_key is deliberately not a signal: every recording gets one, including movies.
+     */
+    public function isTvContent(): bool
+    {
+        $tmdbType = $this->metadata['tmdb']['type'] ?? null;
+
+        if ($tmdbType !== null) {
+            return $tmdbType === 'tv';
+        }
+
+        if ($this->season !== null || $this->episode !== null) {
+            return true;
+        }
+
+        // Covers recordings made before season/episode were parsed at schedule time.
+        [$season, $episode] = EpisodeNumberParser::fromRaw($this->epg_programme_data['episode_num'] ?? null);
+
+        if ($season !== null || $episode !== null) {
+            return true;
+        }
+
+        $category = mb_strtolower(trim((string) ($this->epg_programme_data['category'] ?? '')));
+
+        if ($category === '') {
+            return false;
+        }
+
+        if (Str::contains($category, ['movie', 'film'])) {
+            return false;
+        }
+
+        if (Str::contains($category, ['series', 'episode', 'tv', 'show', 'news', 'documentary', 'talk'])) {
+            return true;
+        }
+
+        if (Str::contains($category, self::FILM_GENRE_CATEGORIES)) {
+            return false;
+        }
+
+        return trim((string) $this->subtitle) !== '';
     }
 
     /**
