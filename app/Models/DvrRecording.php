@@ -25,14 +25,15 @@ class DvrRecording extends Model
     use HasFactory;
 
     /**
-     * Bare film genres that EPG providers use as the category for movies.
-     * A subtitle alongside one of these is not evidence of an episode.
+     * Bare film genres that EPG providers use as the whole category for movies.
+     * A subtitle alongside one of these is not evidence of an episode. Matched
+     * against the entire category, so "Crime drama" or "Kids animation" don't count.
      *
      * @var list<string>
      */
     private const FILM_GENRE_CATEGORIES = [
         'drama', 'action', 'thriller', 'comedy', 'horror', 'romance', 'western',
-        'sci-fi', 'science fiction', 'fantasy', 'animation', 'adventure', 'crime', 'mystery', 'suspense',
+        'sci-fi', 'science fiction', 'fantasy', 'adventure', 'crime', 'mystery', 'suspense',
     ];
 
     /**
@@ -443,13 +444,17 @@ class DvrRecording extends Model
      *
      *   1. TMDB metadata type (definitive when present)
      *   2. season/episode columns
-     *   3. epg_programme_data.episode_num, but only when it parses as a real
-     *      season/episode. Providers also stuff non-episode IDs here (e.g. "MV000123.0000").
-     *   4. EPG category: movie/film → movie, TV-ish keywords → TV
-     *   5. Non-movie category with a subtitle → TV. Bare film genres ("Drama", "Action")
+     *   3. epg_programme_data.episode_num, when it parses as a real season/episode
+     *   4. Gracenote/Schedules Direct programme ID in episode_num (dd_progid):
+     *      "MV..." → movie, "EP..."/"SH..."/"SP..." → TV
+     *   5. EPG category containing movie/film → movie
+     *   6. Recorded by a Series rule
+     *   7. EPG category with TV-ish keywords → TV
+     *   8. Non-movie category with a subtitle → TV. Bare film genres ("Drama", "Action")
      *      are skipped here, since movies often carry a subtitle (tagline, edition, original title).
      *
      * series_key is deliberately not a signal: every recording gets one, including movies.
+     * Neither is a TVMaze match: its singlesearch is fuzzy and returns a show for most movie titles.
      */
     public function isTvContent(): bool
     {
@@ -464,19 +469,28 @@ class DvrRecording extends Model
         }
 
         // Covers recordings made before season/episode were parsed at schedule time.
-        [$season, $episode] = EpisodeNumberParser::fromRaw($this->epg_programme_data['episode_num'] ?? null);
+        $episodeNum = $this->epg_programme_data['episode_num'] ?? null;
+        [$season, $episode] = EpisodeNumberParser::fromRaw($episodeNum);
 
         if ($season !== null || $episode !== null) {
             return true;
         }
 
+        if ($episodeNum !== null && preg_match('/^(MV|EP|SH|SP)\d{6}/i', trim($episodeNum), $programmeId)) {
+            return strtoupper($programmeId[1]) !== 'MV';
+        }
+
         $category = mb_strtolower(trim((string) ($this->epg_programme_data['category'] ?? '')));
 
-        if ($category === '') {
+        if (Str::contains($category, ['movie', 'film'])) {
             return false;
         }
 
-        if (Str::contains($category, ['movie', 'film'])) {
+        if ($this->recordingRule?->type === DvrRuleType::Series) {
+            return true;
+        }
+
+        if ($category === '') {
             return false;
         }
 
@@ -484,7 +498,7 @@ class DvrRecording extends Model
             return true;
         }
 
-        if (Str::contains($category, self::FILM_GENRE_CATEGORIES)) {
+        if (in_array($category, self::FILM_GENRE_CATEGORIES, true)) {
             return false;
         }
 
