@@ -12,6 +12,7 @@ use App\Enums\ImageProfile;
 use App\Events\ViewerFavoriteEvent;
 use App\Facades\PlaylistFacade;
 use App\Facades\ProxyFacade;
+use App\Filament\Support\DvrPaddingFields;
 use App\Jobs\FetchTmdbIds;
 use App\Jobs\RefreshMediaServerLibraryJob;
 use App\Models\ArrIntegration;
@@ -221,11 +222,12 @@ class XtreamApiController extends Controller
      *   - `priority` (int, optional): Defaults to 50 via the column migration default.
      *     Clamped 0-100 when supplied. **Omit to inherit the column default; do not send
      *     a hardcoded value.**
-     *   - `start_early_seconds` (int, optional): Seconds to start early. **Omit to inherit
+     *   - `start_early_seconds` (int, optional): Seconds to start early; a negative value
+     *     starts late. Clamped to ±24h. **Omit to inherit
      *     `dvr_setting.default_start_early_seconds`** (resolved at runtime). Blank is not
      *     coerced to 0 — `0` is a meaningful value (no padding) distinct from "inherit".
-     *   - `end_late_seconds` (int, optional): Seconds to end late. Same omit-to-inherit
-     *     semantics as `start_early_seconds`.
+     *   - `end_late_seconds` (int, optional): Seconds to end late; a negative value finishes
+     *     early. Clamped to ±24h. Same omit-to-inherit semantics as `start_early_seconds`.
      * Returns `{success: true, rule_id: <int>}`. Returns 409 `{error, rule_id, duplicate: true}`
      * when a Series rule for the same normalized title already exists under this DVR
      * setting (+ auth).
@@ -4581,8 +4583,8 @@ class XtreamApiController extends Controller
             'match_mode' => DvrMatchMode::Exact,
             'manual_start' => $manualStart,
             'manual_end' => $manualEnd,
-            'start_early_seconds' => (int) $request->input('start_early_seconds', $dvrSetting->default_start_early_seconds ?? 0),
-            'end_late_seconds' => (int) $request->input('end_late_seconds', $dvrSetting->default_end_late_seconds ?? 0),
+            'start_early_seconds' => DvrPaddingFields::clampSeconds((int) $request->input('start_early_seconds', $dvrSetting->default_start_early_seconds ?? 0)),
+            'end_late_seconds' => DvrPaddingFields::clampSeconds((int) $request->input('end_late_seconds', $dvrSetting->default_end_late_seconds ?? 0)),
             'enabled' => true,
         ]);
 
@@ -4707,11 +4709,11 @@ class XtreamApiController extends Controller
 
         $rawStartEarly = $request->input('start_early_seconds');
         if ($rawStartEarly !== null && $rawStartEarly !== '') {
-            $createAttrs['start_early_seconds'] = (int) $rawStartEarly;
+            $createAttrs['start_early_seconds'] = DvrPaddingFields::clampSeconds((int) $rawStartEarly);
         }
         $rawEndLate = $request->input('end_late_seconds');
         if ($rawEndLate !== null && $rawEndLate !== '') {
-            $createAttrs['end_late_seconds'] = (int) $rawEndLate;
+            $createAttrs['end_late_seconds'] = DvrPaddingFields::clampSeconds((int) $rawEndLate);
         }
 
         $rule = DvrRecordingRule::create($createAttrs);
@@ -4804,12 +4806,12 @@ class XtreamApiController extends Controller
 
         $rawStartEarly = $request->input('start_early_seconds');
         if ($rawStartEarly !== null && $rawStartEarly !== '') {
-            $rule->start_early_seconds = (int) $rawStartEarly;
+            $rule->start_early_seconds = DvrPaddingFields::clampSeconds((int) $rawStartEarly);
         }
 
         $rawEndLate = $request->input('end_late_seconds');
         if ($rawEndLate !== null && $rawEndLate !== '') {
-            $rule->end_late_seconds = (int) $rawEndLate;
+            $rule->end_late_seconds = DvrPaddingFields::clampSeconds((int) $rawEndLate);
         }
 
         $rule->save();

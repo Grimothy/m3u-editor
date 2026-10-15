@@ -3992,9 +3992,9 @@ class M3uProxyService
 
         $durationSeconds = 0;
         if ($recording->scheduled_start && $recording->scheduled_end) {
+            // scheduled_end already includes the rule's end-late/finish-early padding,
+            // so adding the playlist default again would over-record.
             $durationSeconds = (int) abs($recording->scheduled_end->diffInSeconds($recording->scheduled_start));
-            // Add end-late buffer
-            $durationSeconds += (int) $setting->resolveEndLateSeconds(null);
         }
 
         // When transcoding is enabled the proxy runs FFmpeg for the DVR broadcast
