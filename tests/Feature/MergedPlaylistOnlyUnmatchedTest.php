@@ -5,6 +5,7 @@ use App\Filament\Resources\MergedPlaylists\RelationManagers\PlaylistsRelationMan
 use App\Filament\Resources\Playlists\Pages\EditPlaylist;
 use App\Models\Channel;
 use App\Models\Episode;
+use App\Models\Group;
 use App\Models\MediaServerIntegration;
 use App\Models\MediaSourceMatch;
 use App\Models\MergedPlaylist;
@@ -15,6 +16,7 @@ use App\Models\Season;
 use App\Models\Series;
 use App\Models\User;
 use App\Services\MediaSourceMatchService;
+use App\Services\XtreamCategoryService;
 use Filament\Actions\Testing\TestAction;
 use Illuminate\Foundation\Testing\RefreshDatabase;
 use Illuminate\Support\Str;
@@ -378,4 +380,47 @@ it('opens the existing merge instead of creating a duplicate when the action run
         ->assertNotified(__('Merged playlist already exists'));
 
     expect(MergedPlaylist::where('user_id', $this->user->id)->where('name', 'like', '%Local Media%')->count())->toBe(1);
+});
+
+it('still finds the existing merge after the owner adds another media integration', function () {
+    $service = app(MediaSourceMatchService::class);
+    $merged = $service->createMergedWithLocalMedia($this->provider);
+
+    $secondLocal = Playlist::factory()->for($this->user)->create();
+    MediaServerIntegration::factory()->for($this->user)->create([
+        'type' => 'local',
+        'playlist_id' => $secondLocal->id,
+    ]);
+
+    expect($service->findMergedWithLocalMedia($this->provider)?->id)->toBe($merged->id);
+});
+
+it('drops a VOD category whose movies are all hidden by only_unmatched', function () {
+    $this->merged->playlists()->attach($this->provider->id);
+    $this->merged->playlists()->attach($this->local->id, ['only_unmatched' => true]);
+
+    $providerGroup = Group::factory()->create(['playlist_id' => $this->provider->id, 'user_id' => $this->user->id]);
+    $hiddenGroup = Group::factory()->create(['playlist_id' => $this->local->id, 'user_id' => $this->user->id]);
+    $keptGroup = Group::factory()->create(['playlist_id' => $this->local->id, 'user_id' => $this->user->id]);
+
+    $providerMovie = Channel::factory()->create(['playlist_id' => $this->provider->id, 'group_id' => $providerGroup->id, 'is_vod' => true, 'enabled' => true]);
+    $matchedLocal = Channel::factory()->create(['playlist_id' => $this->local->id, 'group_id' => $hiddenGroup->id, 'is_vod' => true, 'enabled' => true]);
+    Channel::factory()->create(['playlist_id' => $this->local->id, 'group_id' => $keptGroup->id, 'is_vod' => true, 'enabled' => true]);
+    matchMovie($this->provider, $providerMovie, $matchedLocal, $this->integration);
+
+    $alias = PlaylistAlias::create([
+        'merged_playlist_id' => $this->merged->id,
+        'user_id' => $this->user->id,
+        'name' => 'Merged Alias',
+        'uuid' => Str::uuid()->toString(),
+        'xtream_config' => [['url' => 'http://provider.example.com', 'username' => 'u', 'password' => 'p']],
+    ]);
+
+    $expected = collect([$providerGroup->id, $keptGroup->id])->map(fn ($id) => (string) $id)->sort()->values()->all();
+
+    foreach ([$this->merged, $alias] as $playlist) {
+        $categoryIds = collect(XtreamCategoryService::groupCategories($playlist, true))->pluck('category_id')->sort()->values()->all();
+
+        expect($categoryIds)->toBe($expected);
+    }
 });
