@@ -386,8 +386,12 @@ it('rejects invalid schedule_dvr windows with a stable code', function (array $t
         fn () => ['start_time' => now()->addHour()->toIso8601String(), 'end_time' => now()->addHours(26)->toIso8601String()],
         'duration_too_long',
     ],
-    'negative padding' => [
-        fn () => ['start_time' => now()->addHour()->toIso8601String(), 'end_time' => now()->addHours(2)->toIso8601String(), 'start_early_seconds' => -30],
+    'padding beyond 24 hours' => [
+        fn () => ['start_time' => now()->addHour()->toIso8601String(), 'end_time' => now()->addHours(2)->toIso8601String(), 'start_early_seconds' => -86401],
+        'invalid_padding',
+    ],
+    'non-integer padding' => [
+        fn () => ['start_time' => now()->addHour()->toIso8601String(), 'end_time' => now()->addHours(2)->toIso8601String(), 'end_late_seconds' => '1.5'],
         'invalid_padding',
     ],
 ]);

@@ -4570,8 +4570,8 @@ class XtreamApiController extends Controller
 
         foreach (['start_early_seconds', 'end_late_seconds'] as $paddingField) {
             $padding = $request->input($paddingField);
-            if ($padding !== null && filter_var($padding, FILTER_VALIDATE_INT, ['options' => ['min_range' => 0, 'max_range' => 65535]]) === false) {
-                return $this->scheduleDvrRejection('invalid_padding', "{$paddingField} must be a whole number of seconds between 0 and 65535");
+            if ($padding !== null && filter_var($padding, FILTER_VALIDATE_INT, ['options' => ['min_range' => -DvrPaddingFields::MAX_SECONDS, 'max_range' => DvrPaddingFields::MAX_SECONDS]]) === false) {
+                return $this->scheduleDvrRejection('invalid_padding', "{$paddingField} must be a whole number of seconds between -".DvrPaddingFields::MAX_SECONDS.' and '.DvrPaddingFields::MAX_SECONDS);
             }
         }
 
