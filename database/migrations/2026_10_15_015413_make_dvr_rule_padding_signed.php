@@ -23,8 +23,11 @@ return new class extends Migration
      */
     public function down(): void
     {
-        DB::table('dvr_recording_rules')->where('start_early_seconds', '<', 0)->update(['start_early_seconds' => 0]);
-        DB::table('dvr_recording_rules')->where('end_late_seconds', '<', 0)->update(['end_late_seconds' => 0]);
+        // Postgres has no unsigned types, so the smallint ceiling (32767) is the safe cap.
+        foreach (['start_early_seconds', 'end_late_seconds'] as $column) {
+            DB::table('dvr_recording_rules')->where($column, '<', 0)->update([$column => 0]);
+            DB::table('dvr_recording_rules')->where($column, '>', 32767)->update([$column => 32767]);
+        }
 
         Schema::table('dvr_recording_rules', function (Blueprint $table) {
             $table->unsignedSmallInteger('start_early_seconds')->nullable()->change();

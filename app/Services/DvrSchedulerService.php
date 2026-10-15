@@ -678,7 +678,7 @@ class DvrSchedulerService
             return true;
         }
 
-        Log::debug("DVR: Skipping '{$title}' — rule {$rule->id} padding leaves no recording window", [
+        Log::debug("DVR: Skipping '{$title}' - rule {$rule->id} padding leaves no recording window", [
             'scheduled_start' => $scheduledStart,
             'scheduled_end' => $scheduledEnd,
         ]);

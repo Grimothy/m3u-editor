@@ -109,8 +109,6 @@ final class DvrPaddingFields
 
         $inputs = self::inputs($amountField, $unitField, $directionField, $isStart, $allowNegative, $maxSeconds, $placeholder);
 
-        $inputs[array_key_last($inputs)]->default($defaultSeconds === null ? null : self::fromSeconds($defaultSeconds)['amount']);
-
         // Keep the stored seconds in sync as the helper inputs change. Some pages save
         // from the form's raw state, which dehydrate hooks never touch.
         $sync = function (Get $get, Set $set) use ($field, $amountField, $unitField, $directionField, $allowNegative): void {
