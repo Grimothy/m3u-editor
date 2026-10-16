@@ -39,6 +39,7 @@ beforeEach(function () {
 
     $epg = Epg::factory()->for($this->user)->create(['is_cached' => true]);
     $epgChannel = EpgChannel::factory()->for($this->user)->for($epg)->create(['channel_id' => 'shift.channel']);
+    $this->epg = $epg;
 
     $this->makeChannel = fn (?string $shift) => Channel::factory()
         ->for($this->user)
@@ -107,4 +108,66 @@ it('leaves times untouched when the channel has no tvg_shift', function () {
         ->json('epg_listings.0');
 
     expect((int) $programme['start_timestamp'])->toBe($this->start->timestamp);
+});
+
+it('includes earlier-dated programmes that a positive shift moves into today', function () {
+    Carbon::setTestNow(Carbon::today()->setTime(1, 0));
+    $channel = ($this->makeChannel)('3');
+
+    // Aired 22:00-23:30 yesterday, so with +3 it is on now (01:00-02:30)
+    $yesterdayStart = Carbon::yesterday()->setTime(22, 0);
+    seedEpgProgrammeCache($this->epg, [
+        ['shift.channel', [
+            'id' => 'late-show',
+            'title' => 'Late Show',
+            'start' => $yesterdayStart->format('Y-m-d H:i:s'),
+            'stop' => $yesterdayStart->copy()->addMinutes(90)->format('Y-m-d H:i:s'),
+        ]],
+    ]);
+
+    $programme = $this->getJson(($this->xtreamUrl)('get_short_epg', ['stream_id' => (string) $channel->id]))
+        ->assertOk()
+        ->json('epg_listings.0');
+
+    expect($programme['title'])->toBe('Late Show')
+        ->and((int) $programme['start_timestamp'])->toBe($yesterdayStart->copy()->addHours(3)->timestamp);
+});
+
+it('adds shifted-in earlier programmes to get_epg_batch only for positively shifted channels', function () {
+    $shifted = ($this->makeChannel)('2');
+    $unshifted = ($this->makeChannel)(null);
+
+    $today = Carbon::today();
+    seedEpgProgrammeCache($this->epg, [
+        // Still ends before today once shifted +2, so it stays out
+        ['shift.channel', [
+            'id' => 'early-show',
+            'title' => 'Early Show',
+            'start' => $today->copy()->subDay()->setTime(19, 0)->format('Y-m-d H:i:s'),
+            'stop' => $today->copy()->subDay()->setTime(20, 0)->format('Y-m-d H:i:s'),
+        ]],
+        // Shifted +2 it runs 01:00-02:30 today
+        ['shift.channel', [
+            'id' => 'late-show',
+            'title' => 'Late Show',
+            'start' => $today->copy()->subDay()->setTime(23, 0)->format('Y-m-d H:i:s'),
+            'stop' => $today->copy()->setTime(0, 30)->format('Y-m-d H:i:s'),
+        ]],
+    ]);
+
+    $response = $this->getJson(($this->xtreamUrl)('get_epg_batch', [
+        'stream_ids' => "{$shifted->id},{$unshifted->id}",
+        'date' => $today->format('Y-m-d'),
+    ]))->assertOk();
+
+    $titles = fn (int $streamId) => collect($response->json("{$streamId}.epg_listings"))
+        ->map(fn ($listing) => base64_decode($listing['title']));
+
+    $lateShow = collect($response->json("{$shifted->id}.epg_listings"))
+        ->first(fn ($listing) => base64_decode($listing['title']) === 'Late Show');
+
+    expect($lateShow)->not->toBeNull()
+        ->and((int) $lateShow['start_timestamp'])->toBe($today->copy()->setTime(1, 0)->timestamp)
+        ->and($titles($shifted->id))->not->toContain('Early Show')
+        ->and($titles($unshifted->id))->not->toContain('Late Show');
 });

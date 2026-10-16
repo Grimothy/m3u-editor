@@ -1879,7 +1879,19 @@ class XtreamApiController extends Controller
                 $allProgrammes = array_merge($allProgrammes, $tomorrowProgrammes[$channel->epgChannel->channel_id]);
             }
 
-            $allProgrammes = EpgCacheService::shiftProgrammes($allProgrammes, (int) ($channel->tvg_shift ?? 0));
+            // A positive shift moves programmes from earlier dates into today, so fetch those too
+            $tvgShift = (int) ($channel->tvg_shift ?? 0);
+            if ($tvgShift > 0) {
+                $earlierProgrammes = $cacheService->getCachedProgrammesRange(
+                    $epg,
+                    Carbon::now()->subHours($tvgShift)->format('Y-m-d'),
+                    Carbon::now()->subDay()->format('Y-m-d'),
+                    [$channel->epgChannel->channel_id]
+                );
+                $allProgrammes = array_merge($earlierProgrammes[$channel->epgChannel->channel_id] ?? [], $allProgrammes);
+            }
+
+            $allProgrammes = EpgCacheService::shiftProgrammes($allProgrammes, $tvgShift);
 
             // Check if channel is currently playing
             $isNowPlaying = $proxyEnabled ? M3uProxyService::isChannelActive($channel) : false;
@@ -2065,12 +2077,39 @@ class XtreamApiController extends Controller
                     $programmes[$channelId] = array_merge($programmes[$channelId], $progs);
                 }
 
+                // A positive shift moves programmes from earlier dates into the requested day,
+                // so fetch those for the positively shifted channels only
+                $positiveShifts = [];
+                foreach ($group['channelMap'] as $streamId => $epgChannelId) {
+                    $tvgShift = (int) ($channels[$streamId]->tvg_shift ?? 0);
+                    if ($tvgShift > 0) {
+                        $positiveShifts[$epgChannelId] = max($tvgShift, $positiveShifts[$epgChannelId] ?? 0);
+                    }
+                }
+                $earlierProgrammes = [];
+                if (! empty($positiveShifts)) {
+                    $earlierProgrammes = $cacheService->getCachedProgrammesRange(
+                        $epg,
+                        Carbon::parse($date)->subHours(max($positiveShifts))->format('Y-m-d'),
+                        Carbon::parse($date)->subDay()->format('Y-m-d'),
+                        array_keys($positiveShifts)
+                    );
+                }
+                $dayStart = Carbon::parse($date)->startOfDay();
+
                 foreach ($group['channelMap'] as $streamId => $epgChannelId) {
                     $channel = $channels[$streamId];
-                    $channelProgrammes = EpgCacheService::shiftProgrammes(
-                        $programmes[$epgChannelId] ?? [],
-                        (int) ($channel->tvg_shift ?? 0)
-                    );
+                    $tvgShift = (int) ($channel->tvg_shift ?? 0);
+                    $channelProgrammes = EpgCacheService::shiftProgrammes($programmes[$epgChannelId] ?? [], $tvgShift);
+
+                    // Keep only the earlier-dated programmes that now reach into the requested day
+                    if ($tvgShift > 0 && ! empty($earlierProgrammes[$epgChannelId])) {
+                        $shiftedIn = array_filter(
+                            EpgCacheService::shiftProgrammes($earlierProgrammes[$epgChannelId], $tvgShift),
+                            fn ($programme) => ! empty($programme['stop']) && Carbon::parse($programme['stop'])->gt($dayStart)
+                        );
+                        $channelProgrammes = array_merge(array_values($shiftedIn), $channelProgrammes);
+                    }
 
                     // Fill gaps in EPG
                     if (empty($channelProgrammes)) {
