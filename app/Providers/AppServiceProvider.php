@@ -952,21 +952,14 @@ class AppServiceProvider extends ServiceProvider
                     $network->schedule_type = 'sequential';
                 }
             });
-            Network::created(function (Network $network) {
-                // Project the new network into its output playlist right away,
-                // so merged playlists and M3U/Xtream output see it (issue #1303).
-                if ($network->network_playlist_id === null) {
-                    return;
-                }
-
-                $playlist = Playlist::find($network->network_playlist_id);
-
-                if ($playlist) {
-                    app(NetworkChannelSyncService::class)->syncNetworkAsChannel($playlist, $network);
-                }
-            });
+            // Keep the network's channel projection current (issue #1303).
+            Network::created(fn (Network $network) => app(NetworkChannelSyncService::class)->syncNetwork($network));
             Network::updated(function (Network $network) {
-                app(NetworkChannelSyncService::class)->refreshNetworkChannel($network);
+                // Broadcast state saves don't touch any projected attribute, so
+                // they skip this entirely.
+                if ($network->wasChanged(NetworkChannelSyncService::PROJECTED_ATTRIBUTES)) {
+                    app(NetworkChannelSyncService::class)->syncNetwork($network);
+                }
             });
             Network::deleting(function (Network $network) {
                 // Ensure any running broadcast is stopped and HLS files are removed
@@ -979,7 +972,7 @@ class AppServiceProvider extends ServiceProvider
                     ]);
                 }
 
-                app(NetworkChannelSyncService::class)->removeNetworkChannelsFor($network);
+                app(NetworkChannelSyncService::class)->removeNetwork($network);
             });
 
             // ChannelScrubber

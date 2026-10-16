@@ -9,7 +9,7 @@ return new class extends Migration
 {
     /**
      * Backfill: project existing network playlists' networks into real
-     * Channel + Group rows (issue #1303). Row inserts only — no DDL, so the
+     * Channel + Group rows (issue #1303). Row inserts only (no DDL), so the
      * hot channels table is never locked.
      */
     public function up(): void
@@ -30,7 +30,7 @@ return new class extends Migration
             ->chunkById(100, function ($playlists): void {
                 foreach ($playlists as $playlist) {
                     $playlist->channels()->whereNotNull('network_id')->delete();
-                    Group::where('playlist_id', $playlist->id)->whereDoesntHave('channels')->delete();
+                    Group::where('playlist_id', $playlist->id)->where('custom', false)->whereDoesntHave('channels')->forceDelete();
                 }
             });
     }

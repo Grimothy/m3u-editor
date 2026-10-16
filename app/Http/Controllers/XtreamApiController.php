@@ -49,7 +49,6 @@ use App\Services\EmbyPublicationCatalogService;
 use App\Services\EpgCacheService;
 use App\Services\LogoCacheService;
 use App\Services\M3uProxyService;
-use App\Services\NetworkChannelSyncService;
 use App\Services\TmdbService;
 use App\Services\VodFileNameService;
 use App\Services\WatchProgressLinker;
@@ -2413,24 +2412,22 @@ class XtreamApiController extends Controller
     /**
      * Build a consistent mapping of network group name to category ID.
      *
-     * The IDs are the projected Group rows' primary keys: numeric (so Xtream
-     * consumers like ProcessM3uImport's source-group sync can bind them
-     * against the bigint source_groups.source_group_id, issue #1303) and
-     * stable across requests, unlike the synthetic "network-group-N" strings
-     * previously minted here.
+     * The IDs are the primary keys of the Group rows NetworkChannelSyncService
+     * projects for each network: numeric (so Xtream consumers like
+     * ProcessM3uImport can bind them against bigint source group columns,
+     * issue #1303) and stable across requests.
      *
      * @param  Collection<int, Network>  $networks
      * @return array<string, int>
      */
     private function buildNetworkCategoryMap(Playlist $playlist, Collection $networks): array
     {
-        $service = app(NetworkChannelSyncService::class);
+        $names = $networks->map(fn (Network $network) => $network->effective_group_name)->unique()->values();
+        $groupIds = $playlist->groups()->whereIn('name', $names)->pluck('id', 'name');
 
-        return $networks
-            ->map(fn (Network $network) => $network->effective_group_name)
-            ->unique()
-            ->values()
-            ->mapWithKeys(fn (string $name) => [$name => $service->getOrCreateGroup($playlist, $name)->id])
+        return $names
+            ->filter(fn (string $name) => $groupIds->has($name))
+            ->mapWithKeys(fn (string $name) => [$name => (int) $groupIds[$name]])
             ->all();
     }
 

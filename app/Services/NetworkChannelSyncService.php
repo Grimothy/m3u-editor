@@ -6,7 +6,6 @@ use App\Models\Channel;
 use App\Models\Group;
 use App\Models\Network;
 use App\Models\Playlist;
-use Illuminate\Support\Facades\Log;
 
 /**
  * Projects Networks into real Channel + Group rows on their network playlist,
@@ -16,11 +15,21 @@ use Illuminate\Support\Facades\Log;
 class NetworkChannelSyncService
 {
     /**
-     * Project every network that outputs to a network playlist into Channel
-     * and Group rows, and drop projections for networks that no longer output
-     * to it. Unlike merged/custom playlists (where the include_networks_in_m3u
-     * toggle governs), a network playlist's whole purpose is exposing its
-     * networks, so the projection is unconditional.
+     * Network attributes the projected channel is built from. Saves that touch
+     * none of these (e.g. broadcast state) skip the projection entirely.
+     */
+    public const PROJECTED_ATTRIBUTES = [
+        'name',
+        'logo',
+        'channel_number',
+        'enabled',
+        'group_name',
+        'network_playlist_id',
+    ];
+
+    /**
+     * Project every network that outputs to a network playlist, and drop
+     * projections for networks that no longer output to it.
      */
     public function syncNetworksToPlaylist(Playlist $playlist): int
     {
@@ -29,51 +38,72 @@ class NetworkChannelSyncService
         }
 
         $networkIds = [];
-
-        foreach ($playlist->networks()->get() as $network) {
-            $this->syncNetworkAsChannel($playlist, $network);
+        foreach ($playlist->networks()->cursor() as $network) {
+            $this->upsertChannel($playlist, $network);
             $networkIds[] = $network->id;
         }
 
-        // Drop projections for networks that no longer output to this playlist.
         Channel::where('playlist_id', $playlist->id)
             ->whereNotNull('network_id')
-            ->when($networkIds !== [], fn ($query) => $query->whereNotIn('network_id', $networkIds))
-            ->get(['id', 'group_id'])
-            ->each(function (Channel $channel): void {
-                $channel->delete();
-                $this->pruneGroupIfEmpty($channel->group_id);
-            });
+            ->whereNotIn('network_id', $networkIds)
+            ->delete();
 
-        Log::info('Projected networks to playlist', [
-            'playlist_id' => $playlist->id,
-            'playlist_name' => $playlist->name,
-            'networks' => count($networkIds),
-        ]);
+        $this->pruneEmptyGroups([$playlist->id]);
 
         return count($networkIds);
     }
 
     /**
-     * Sync a single network as a channel.
+     * Project a single network: drop its rows from playlists it no longer
+     * outputs to, upsert its channel on the one it does, and prune groups the
+     * change left empty.
      */
-    public function syncNetworkAsChannel(Playlist $playlist, Network $network, ?Group $group = null): Channel
+    public function syncNetwork(Network $network): void
     {
-        if (! $group) {
-            $group = $this->getOrCreateNetworksGroup($playlist, $network);
+        $playlistId = $network->network_playlist_id;
+        $affectedPlaylistIds = $this->removeChannels($network, except: $playlistId);
+
+        $playlist = $playlistId ? Playlist::find($playlistId) : null;
+        if ($playlist) {
+            $this->upsertChannel($playlist, $network);
+            $affectedPlaylistIds[] = $playlist->id;
         }
 
-        $channel = Channel::updateOrCreate(
-            [
-                'playlist_id' => $playlist->id,
-                'network_id' => $network->id,
-            ],
+        $this->pruneEmptyGroups($affectedPlaylistIds);
+    }
+
+    /**
+     * Remove a network's projection everywhere, pruning groups left empty.
+     */
+    public function removeNetwork(Network $network): void
+    {
+        $this->pruneEmptyGroups($this->removeChannels($network));
+    }
+
+    /**
+     * Upsert the channel row for a network on its playlist.
+     */
+    public function upsertChannel(Playlist $playlist, Network $network): Channel
+    {
+        $groupName = $network->effective_group_name;
+        $group = Group::firstOrCreate(
+            ['playlist_id' => $playlist->id, 'name' => $groupName],
+            ['user_id' => $playlist->user_id, 'name_internal' => $groupName, 'enabled' => true],
+        );
+
+        return Channel::updateOrCreate(
+            ['playlist_id' => $playlist->id, 'network_id' => $network->id],
             [
                 'user_id' => $playlist->user_id,
                 'name' => $network->name,
                 'title' => $network->name,
-                'url' => $network->stream_url,
+                // Fixed HLS endpoint on the configured base URL: unlike the
+                // stream_url accessor it doesn't depend on broadcast state or the
+                // host of whichever request saved the network, and the endpoint
+                // starts on-demand broadcasts itself.
+                'url' => PlaylistService::getBaseUrl(route('network.hls.playlist', ['network' => $network->uuid], absolute: false)),
                 'logo' => $network->logo,
+                'group' => $group->name,
                 'group_id' => $group->id,
                 'group_internal' => $group->name,
                 'channel' => $network->channel_number,
@@ -81,99 +111,49 @@ class NetworkChannelSyncService
                 'is_vod' => false,
                 'stream_id' => 'network-'.$network->id,
                 'source_id' => 'network-'.$network->id,
-            ]
-        );
-
-        return $channel;
-    }
-
-    /**
-     * Refresh a network's projection after it changes: (re)create the channel
-     * when missing, move it when the network is reassigned to another
-     * playlist, and prune groups the projection no longer populates.
-     */
-    public function refreshNetworkChannel(Network $network): void
-    {
-        // Stale projections: rows in playlists the network no longer outputs to.
-        $this->removeNetworkChannelsFor($network, $network->network_playlist_id);
-
-        if ($network->network_playlist_id === null) {
-            return;
-        }
-
-        $playlist = Playlist::find($network->network_playlist_id);
-
-        if (! $playlist) {
-            return;
-        }
-
-        $existing = Channel::where('network_id', $network->id)
-            ->where('playlist_id', $playlist->id)
-            ->first(['group_id']);
-
-        $channel = $this->syncNetworkAsChannel($playlist, $network);
-
-        // The network moved between groups: prune the one it left behind once
-        // no other channel projects into it.
-        if ($existing && $existing->group_id !== null && $existing->group_id !== $channel->group_id) {
-            $this->pruneGroupIfEmpty($existing->group_id);
-        }
-    }
-
-    /**
-     * Remove a network's projected channels everywhere (or everywhere except
-     * one playlist), pruning any groups left empty by the removal.
-     */
-    public function removeNetworkChannelsFor(Network $network, ?int $exceptPlaylistId = null): void
-    {
-        Channel::where('network_id', $network->id)
-            ->when($exceptPlaylistId !== null, fn ($query) => $query->where('playlist_id', '!=', $exceptPlaylistId))
-            ->get(['id', 'group_id'])
-            ->each(function (Channel $channel): void {
-                $channel->delete();
-                $this->pruneGroupIfEmpty($channel->group_id);
-            });
-    }
-
-    /**
-     * Get or create the group for a network within a playlist.
-     * Uses the network's configured group_name, falling back to "Networks".
-     */
-    protected function getOrCreateNetworksGroup(Playlist $playlist, ?Network $network = null): Group
-    {
-        return $this->getOrCreateGroup($playlist, $network?->effective_group_name ?? 'Networks');
-    }
-
-    /**
-     * Get or create a group by name within a playlist. Exposed for the network
-     * playlist's Xtream surface, which resolves stable numeric category IDs
-     * backed by these projected rows.
-     */
-    public function getOrCreateGroup(Playlist $playlist, string $groupName): Group
-    {
-        return Group::firstOrCreate(
-            [
-                'playlist_id' => $playlist->id,
-                'name' => $groupName,
             ],
-            [
-                'user_id' => $playlist->user_id,
-                'name_internal' => $groupName,
-                'enabled' => true,
-            ]
         );
     }
 
     /**
-     * Delete a group that no longer has any channels, so renamed or removed
-     * networks don't leave ghost categories behind in merged output.
+     * Delete a network's channels (optionally keeping the ones on one
+     * playlist) and return the playlists they were removed from.
+     *
+     * @return list<int>
      */
-    protected function pruneGroupIfEmpty(?int $groupId): void
+    protected function removeChannels(Network $network, ?int $except = null): array
     {
-        if (! $groupId || Channel::where('group_id', $groupId)->exists()) {
+        $query = Channel::where('network_id', $network->id)
+            ->when($except !== null, fn ($query) => $query->where('playlist_id', '!=', $except));
+
+        $playlistIds = (clone $query)->distinct()->pluck('playlist_id')->all();
+        if ($playlistIds !== []) {
+            $query->delete();
+        }
+
+        return $playlistIds;
+    }
+
+    /**
+     * Delete projected groups that no longer hold any channels. Network
+     * playlists only contain projected groups, so anything empty and
+     * non-custom there is a leftover from a renamed, moved or removed network.
+     * They carry no user data, so they're removed outright rather than
+     * soft-deleted (which would pile up a trashed row per rename).
+     *
+     * @param  list<int>  $playlistIds
+     */
+    protected function pruneEmptyGroups(array $playlistIds): void
+    {
+        if ($playlistIds === []) {
             return;
         }
 
-        Group::where('id', $groupId)->delete();
+        Group::whereIn('playlist_id', Playlist::whereIn('id', array_unique($playlistIds))
+            ->where('is_network_playlist', true)
+            ->select('id'))
+            ->where('custom', false)
+            ->whereDoesntHave('channels')
+            ->forceDelete();
     }
 }
