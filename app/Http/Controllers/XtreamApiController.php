@@ -1879,6 +1879,8 @@ class XtreamApiController extends Controller
                 $allProgrammes = array_merge($allProgrammes, $tomorrowProgrammes[$channel->epgChannel->channel_id]);
             }
 
+            $allProgrammes = EpgCacheService::shiftProgrammes($allProgrammes, (int) ($channel->tvg_shift ?? 0));
+
             // Check if channel is currently playing
             $isNowPlaying = $proxyEnabled ? M3uProxyService::isChannelActive($channel) : false;
 
@@ -1968,6 +1970,7 @@ class XtreamApiController extends Controller
                     $allProgrammes = array_merge($allProgrammes, $programmes[$channel->epgChannel->channel_id]);
                 }
             }
+            $allProgrammes = EpgCacheService::shiftProgrammes($allProgrammes, (int) ($channel->tvg_shift ?? 0));
 
             $epgListings = [];
             if (! empty($allProgrammes)) {
@@ -2063,8 +2066,11 @@ class XtreamApiController extends Controller
                 }
 
                 foreach ($group['channelMap'] as $streamId => $epgChannelId) {
-                    $channelProgrammes = $programmes[$epgChannelId] ?? [];
                     $channel = $channels[$streamId];
+                    $channelProgrammes = EpgCacheService::shiftProgrammes(
+                        $programmes[$epgChannelId] ?? [],
+                        (int) ($channel->tvg_shift ?? 0)
+                    );
 
                     // Fill gaps in EPG
                     if (empty($channelProgrammes)) {
