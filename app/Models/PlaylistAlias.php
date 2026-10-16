@@ -6,6 +6,7 @@ use App\Enums\PlaylistChannelId;
 use App\Jobs\UpdateXtreamStats;
 use App\Pivots\BouquetPlaylistAlias;
 use App\Pivots\MergedPlaylistPivot;
+use App\Traits\HasDefaultAuth;
 use App\Traits\ShortUrlTrait;
 use Illuminate\Database\Eloquent\Casts\Attribute;
 use Illuminate\Database\Eloquent\Collection;
@@ -21,6 +22,7 @@ use Spatie\Tags\Tag;
 
 class PlaylistAlias extends Model
 {
+    use HasDefaultAuth;
     use HasFactory;
     use ShortUrlTrait;
 
@@ -736,7 +738,7 @@ class PlaylistAlias extends Model
                 })->orWhere(function ($q): void {
                     $q->where('channels.is_vod', true)->where('merged_playlist_playlist.include_vod', true);
                 });
-            });
+            })->where(MergedPlaylist::onlyUnmatchedChannels());
 
             // The alias filter is stored as {playlist_id, name} pairs so a group can be
             // allowed from one source without also allowing a same-named group from
@@ -766,7 +768,7 @@ class PlaylistAlias extends Model
 
         if ($this->custom_playlist_id) {
             $relation = $this->belongsToMany(Channel::class, 'channel_custom_playlist', 'custom_playlist_id', 'channel_id', 'custom_playlist_id', 'id')
-                ->withPivot(['channel_number']);
+                ->withPivot(['channel_number', 'channel_minor']);
 
             // Custom playlists group their channels with per-playlist tags rather than
             // provider groups, so the filter is matched against the tag the channel carries
@@ -856,7 +858,8 @@ class PlaylistAlias extends Model
                 'playlist_id', // Foreign key on Series table
                 'merged_playlist_id', // Local key on PlaylistAlias table
                 'playlist_id' // Local key on merged_playlist_playlist
-            )->where('merged_playlist_playlist.include_series', true);
+            )->where('merged_playlist_playlist.include_series', true)
+                ->where(MergedPlaylist::onlyUnmatchedSeries('series'));
 
             $categorySelections = $this->getAllowedCategorySelections();
             if ($this->hasCategoryFilter()) {

@@ -12,6 +12,7 @@ use App\Filament\Concerns\HasCopilotSupport;
 use App\Filament\Resources\VodResource\Pages;
 use App\Filament\Resources\Vods\Pages\ListVod;
 use App\Filament\Resources\Vods\Pages\ViewVod;
+use App\Filament\Tables\CacheStateColumn;
 use App\Filament\Tables\ProbeStatusColumn;
 use App\Forms\Components\TmdbSearchResults;
 use App\Jobs\ChannelFindAndReplace;
@@ -170,7 +171,8 @@ class VodResource extends Resource implements CopilotResource
             ->modifyQueryUsing(function (Builder $query) {
                 $query->with([
                     'epgChannel' => fn ($q) => $q->select('id', 'name', 'icon', 'icon_custom'),
-                    'playlist' => fn ($q) => $q->select('id', 'name', 'uuid', 'auto_sort', 'enable_proxy', 'enable_logo_proxy', 'user_id')
+                    // prefer_media_server_sources: the Cached column reads it.
+                    'playlist' => fn ($q) => $q->select('id', 'name', 'uuid', 'auto_sort', 'enable_proxy', 'enable_logo_proxy', 'user_id', 'prefer_media_server_sources')
                         ->with(['user' => fn ($uq) => $uq->select('id', 'is_admin', 'permissions')]),
                     'customPlaylist' => fn ($q) => $q->select('id', 'name', 'uuid', 'enable_proxy', 'enable_logo_proxy', 'user_id')
                         ->with(['user' => fn ($uq) => $uq->select('id', 'is_admin', 'permissions')]),
@@ -209,10 +211,10 @@ class VodResource extends Resource implements CopilotResource
                 })
                 ->getStateUsing(function ($record) {
                     $info = $record->info;
-                    $title = $record->title_custom ?: $record->title;
+                    $title = e($record->title_custom ?: $record->title, false);
                     $html = "<span class='fi-ta-text-item-label whitespace-normal text-sm leading-6 text-gray-950 dark:text-white'>{$title}</span>";
                     if (is_array($info)) {
-                        $description = Str::limit($info['description'] ?? $info['plot'] ?? '', 200);
+                        $description = e(Str::limit($info['description'] ?? $info['plot'] ?? '', 200), false);
                         if (! empty($description)) {
                             $html .= "<p class='text-sm text-gray-500 dark:text-gray-400 whitespace-normal mt-2'>{$description}</p>";
                         }
@@ -250,19 +252,8 @@ class VodResource extends Resource implements CopilotResource
                 ->label(__('Metadata'))
                 ->icon(fn ($record): string => $record->has_metadata ? 'heroicon-o-check-circle' : 'heroicon-o-minus')
                 ->color(fn ($record): string => $record->has_metadata ? 'success' : 'gray'),
-            IconColumn::make('is_cached')
-                ->label(__('Cached'))
-                ->visible(fn (): bool => app(CachedContentDispatchService::class)->isEnabled())
-                ->getStateUsing(fn (Channel $record): bool => $record->isCached())
-                ->boolean()
-                ->trueIcon('heroicon-o-circle-stack')
-                ->falseIcon('heroicon-o-circle-stack')
-                ->trueColor('info')
-                ->falseColor('gray')
-                ->tooltip(fn (?bool $state): string => $state
-                    ? __('Cached file available. Playback will use the local cache.')
-                    : __('Not cached. Use "Cache Now" to download the file for offline playback.'))
-                ->toggleable(),
+            CacheStateColumn::make(),
+            CacheStateColumn::radarrManaged(),
             ToggleColumn::make('probe_enabled')
                 ->label(__('Probe Enabled'))
                 ->disabled(fn (Channel $record): bool => (bool) $record->aio_integration_id)
@@ -344,12 +335,13 @@ class VodResource extends Resource implements CopilotResource
                 })
                 ->toggleable(),
             TextInputColumn::make('channel')
-                ->rules(['numeric', 'min:0'])
+                ->rules(['nullable', 'integer', 'min:0'])
                 ->type('number')
                 ->placeholder(__('Channel No.'))
                 ->toggleable()
                 ->sortable(),
             TextInputColumn::make('url_custom')
+                ->extraInputAttributes(['class' => 'privacy-sensitive'])
                 ->label(__('URL'))
                 ->rules(['url'])
                 ->type('url')
@@ -430,6 +422,7 @@ class VodResource extends Resource implements CopilotResource
                 })
                 ->toggleable(isToggledHiddenByDefault: true),
             TextColumn::make('url')
+                ->extraAttributes(['class' => 'privacy-sensitive'])
                 ->label(__('Default URL'))
                 ->sortable()
                 ->searchable(query: function (Builder $query, string $search): Builder {
@@ -1593,8 +1586,10 @@ class VodResource extends Resource implements CopilotResource
                     ->columns(2)
                     ->schema([
                         TextEntry::make('url')
+                            ->extraAttributes(['class' => 'privacy-sensitive'])
                             ->label(__('URL'))->columnSpanFull(),
                         TextEntry::make('proxy_url')
+                            ->extraAttributes(['class' => 'privacy-sensitive'])
                             ->label(__('Proxy URL'))->columnSpanFull(),
                         TextEntry::make('stream_id')
                             ->label(__('ID')),
@@ -1717,7 +1712,7 @@ class VodResource extends Resource implements CopilotResource
                         ->label(__('Channel No.'))
                         ->hint(__('tvg-chno'))
                         ->columnSpan(1)
-                        ->rules(['numeric', 'min:0']),
+                        ->rules(['nullable', 'integer', 'min:0']),
                     TextInput::make('shift')
                         ->label(__('Time Shift'))
                         ->hint(__('timeshift'))
@@ -1758,6 +1753,7 @@ class VodResource extends Resource implements CopilotResource
             Fieldset::make(__('URL Settings'))
                 ->schema([
                     TextInput::make('url')
+                        ->extraInputAttributes(['class' => 'privacy-sensitive'])
                         ->label(fn (Get $get) => $get('is_custom') ? 'URL' : 'Provider URL')
                         ->columnSpan(1)
                         ->prefixIcon('heroicon-m-globe-alt')
@@ -1770,6 +1766,7 @@ class VodResource extends Resource implements CopilotResource
                         ->dehydrated(fn (Get $get) => $get('is_custom')) // don't save the value in the database for custom channels
                         ->type('url'),
                     TextInput::make('url_custom')
+                        ->extraInputAttributes(['class' => 'privacy-sensitive'])
                         ->label(__('URL Override'))
                         ->columnSpan(1)
                         ->prefixIcon('heroicon-m-globe-alt')
@@ -1818,6 +1815,7 @@ class VodResource extends Resource implements CopilotResource
                             AssetPickerAction::browse('logo'),
                         ]),
                     TextInput::make('proxy_url')
+                        ->extraInputAttributes(['class' => 'privacy-sensitive'])
                         ->label(__('Proxy URL'))
                         ->columnSpan(2)
                         ->prefixIcon('heroicon-m-globe-alt')
@@ -2091,6 +2089,7 @@ class VodResource extends Resource implements CopilotResource
                         ->columnSpanFull()
                         ->simple(
                             TextInput::make('url')
+                                ->extraInputAttributes(['class' => 'privacy-sensitive'])
                                 ->label(__('Image URL'))
                                 ->placeholder(__('https://example.com/backdrop.jpg'))
                                 ->type('url')

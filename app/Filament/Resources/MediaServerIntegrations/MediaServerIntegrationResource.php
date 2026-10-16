@@ -5,6 +5,7 @@ namespace App\Filament\Resources\MediaServerIntegrations;
 use App\Exceptions\MediaServerException;
 use App\Facades\PlaylistFacade;
 use App\Facades\ProxyFacade;
+use App\Filament\Clusters\MediaServers\MediaServersCluster;
 use App\Filament\Concerns\HasCopilotSupport;
 use App\Filament\Resources\MediaServerIntegrations\Pages\CreateMediaServerIntegration;
 use App\Filament\Resources\MediaServerIntegrations\Pages\EditMediaServerIntegration;
@@ -78,27 +79,25 @@ class MediaServerIntegrationResource extends Resource implements CopilotResource
 
     protected static ?string $recordTitleAttribute = 'name';
 
+    protected static ?string $cluster = MediaServersCluster::class;
+
+    // Prefixed by the cluster: the admin URL is /media-server-integrations/servers.
+    protected static ?string $slug = 'servers';
+
     public static function getNavigationLabel(): string
     {
-        return __('Servers');
+        return __('Media Servers');
     }
 
     public static function getModelLabel(): string
     {
-        return __('Server');
+        return __('Media Server');
     }
 
     public static function getPluralModelLabel(): string
     {
-        return __('Servers');
+        return __('Media Servers');
     }
-
-    public static function getNavigationGroup(): ?string
-    {
-        return __('Integrations');
-    }
-
-    protected static ?int $navigationSort = 100;
 
     /**
      * Check if the user can access this page.
@@ -241,14 +240,7 @@ class MediaServerIntegrationResource extends Resource implements CopilotResource
 
                             Select::make('type')
                                 ->label(__('Server Type'))
-                                ->options([
-                                    'emby' => 'Emby',
-                                    'jellyfin' => 'Jellyfin',
-                                    'plex' => 'Plex',
-                                    'local' => 'Local Media',
-                                    'webdav' => 'WebDAV',
-                                    'aiostreams' => 'AIOStreams',
-                                ])
+                                ->options(self::typeOptions())
                                 ->required()
                                 ->default('emby')
                                 ->live()
@@ -267,6 +259,7 @@ class MediaServerIntegrationResource extends Resource implements CopilotResource
                         // Network server configuration (hidden for local media)
                         Grid::make(3)->schema([
                             TextInput::make('host')
+                                ->extraInputAttributes(['class' => 'privacy-sensitive'])
                                 ->label(__('Host / IP Address'))
                                 ->prefix(fn (callable $get) => $get('ssl') ? 'https://' : 'http://')
                                 ->placeholder(fn (callable $get) => $get('type') === 'webdav'
@@ -312,6 +305,7 @@ class MediaServerIntegrationResource extends Resource implements CopilotResource
 
                         // AIOStreams manifest URL
                         TextInput::make('manifest_url')
+                            ->extraInputAttributes(['class' => 'privacy-sensitive'])
                             ->label(__('Manifest URL'))
                             ->url()
                             ->placeholder('https://your-aiostreams-instance.com/stremio/uuid/token/manifest.json')
@@ -328,6 +322,7 @@ class MediaServerIntegrationResource extends Resource implements CopilotResource
                         // WebDAV authentication (username/password)
                         Grid::make(2)->schema([
                             TextInput::make('webdav_username')
+                                ->extraInputAttributes(['class' => 'privacy-sensitive'])
                                 ->label(__('WebDAV Username'))
                                 ->placeholder(__('username'))
                                 ->afterStateHydrated(fn ($component, $record) => $component->state($record?->webdav_username))
@@ -960,11 +955,11 @@ class MediaServerIntegrationResource extends Resource implements CopilotResource
                                                     $baseUrl = ProxyFacade::getBaseUrl();
                                                     $uuid = $playlist->uuid;
 
-                                                    $playlistAuth = method_exists($playlist, 'playlistAuths')
-                                                        ? $playlist->playlistAuths()->where('enabled', true)->first()
-                                                        : null;
-                                                    $hdhrAuthPath = $playlistAuth
-                                                        ? '/'.rawurlencode($playlistAuth->username).'/'.rawurlencode($playlistAuth->password)
+                                                    // Same credentials the playlist's own HDHR URL carries
+                                                    // (a Playlist Auth, or the Custom Password login)
+                                                    $credentials = PlaylistFacade::getOutputCredentials($playlist);
+                                                    $hdhrAuthPath = $credentials
+                                                        ? '/'.rawurlencode($credentials->username).'/'.rawurlencode($credentials->password)
                                                         : '';
 
                                                     $set('hdhr_base_url', $baseUrl."/{$uuid}/hdhr{$hdhrAuthPath}");
@@ -986,10 +981,12 @@ class MediaServerIntegrationResource extends Resource implements CopilotResource
                                                     return $playlist && $value !== 'number';
                                                 }),
                                             TextInput::make('hdhr_base_url')
+                                                ->extraInputAttributes(['class' => 'privacy-sensitive'])
                                                 ->label(__('HDHR Base URL'))
                                                 ->helperText(__('This URL must be reachable from your Plex server. Uses the Proxy URL Override or APP_URL. Adjust if Plex reaches m3u-editor via a different address (e.g. Docker internal IP).'))
                                                 ->required(),
                                             TextInput::make('epg_url')
+                                                ->extraInputAttributes(['class' => 'privacy-sensitive'])
                                                 ->label(__('EPG URL'))
                                                 ->helperText(__('XMLTV EPG guide URL. Must also be reachable from Plex. Adjust if needed.'))
                                                 ->required(),
@@ -1199,6 +1196,7 @@ class MediaServerIntegrationResource extends Resource implements CopilotResource
                     ->description(__('Create live TV channels from your media server content'))
                     ->schema([
                         TextInput::make('networks_playlist_url')
+                            ->extraInputAttributes(['class' => 'privacy-sensitive'])
                             ->label(__('Networks Playlist URL'))
                             ->disabled()
                             ->dehydrated(false)
@@ -1221,6 +1219,7 @@ class MediaServerIntegrationResource extends Resource implements CopilotResource
                             ->helperText(__('M3U playlist containing all your Networks as live channels')),
 
                         TextInput::make('networks_epg_url')
+                            ->extraInputAttributes(['class' => 'privacy-sensitive'])
                             ->label(__('Networks EPG URL'))
                             ->disabled()
                             ->dehydrated(false)
@@ -1261,10 +1260,27 @@ class MediaServerIntegrationResource extends Resource implements CopilotResource
         ];
     }
 
+    /**
+     * Integration types and their labels, shared by the form, the table's
+     * type badge and its filter so the three can't drift apart.
+     *
+     * @return array<string, string>
+     */
+    public static function typeOptions(): array
+    {
+        return [
+            'emby' => 'Emby',
+            'jellyfin' => 'Jellyfin',
+            'plex' => 'Plex',
+            'local' => 'Local Media',
+            'webdav' => 'WebDAV',
+            'aiostreams' => 'AIOStreams',
+        ];
+    }
+
     public static function table(Table $table): Table
     {
         return $table
-            ->heading(__('Media Servers'))
             ->headerActions([
                 CreateAction::make()
                     ->label(__('Add Media Server')),
@@ -1314,12 +1330,7 @@ class MediaServerIntegrationResource extends Resource implements CopilotResource
                 TextColumn::make('type')
                     ->label(__('Type'))
                     ->badge()
-                    ->formatStateUsing(fn (string $state): string => match ($state) {
-                        'local' => 'Local Media',
-                        'webdav' => 'WebDAV',
-                        'aiostreams' => 'AIOStreams',
-                        default => ucfirst($state),
-                    })
+                    ->formatStateUsing(fn (string $state): string => self::typeOptions()[$state] ?? ucfirst($state))
                     ->color(fn (string $state): string => match ($state) {
                         'emby' => 'success',
                         'jellyfin' => 'info',
@@ -1331,6 +1342,7 @@ class MediaServerIntegrationResource extends Resource implements CopilotResource
                     }),
 
                 TextColumn::make('host')
+                    ->extraAttributes(['class' => 'privacy-sensitive'])
                     ->label(__('Server'))
                     ->getStateUsing(function ($record): string {
                         if ($record->type === 'local') {
@@ -1427,12 +1439,7 @@ class MediaServerIntegrationResource extends Resource implements CopilotResource
             ])
             ->filters([
                 Tables\Filters\SelectFilter::make('type')
-                    ->options([
-                        'emby' => 'Emby',
-                        'jellyfin' => 'Jellyfin',
-                        'plex' => 'Plex',
-                        'local' => 'Local Media',
-                    ]),
+                    ->options(self::typeOptions()),
                 Tables\Filters\TernaryFilter::make('enabled')
                     ->label(__('Enabled')),
             ])

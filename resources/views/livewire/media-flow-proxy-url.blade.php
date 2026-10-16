@@ -21,7 +21,7 @@
                             <x-slot name="prefix">
                                 <x-copy-to-clipboard :text="$m3uUrl" />
                             </x-slot>
-                            <x-filament::input type="text" :value="$m3uUrl" readonly />
+                            <x-filament::input type="text" class="privacy-sensitive" :value="$m3uUrl" readonly />
                         </x-filament::input.wrapper>
                         <x-qr-modal :title="$this->record->name" body="MediaFlow Proxy - M3U URL" :text="$m3uUrl" />
                     </div>
@@ -33,7 +33,7 @@
                             <x-slot name="prefix">
                                 <x-copy-to-clipboard :text="$epgUrl" />
                             </x-slot>
-                            <x-filament::input type="text" :value="$epgUrl" readonly />
+                            <x-filament::input type="text" class="privacy-sensitive" :value="$epgUrl" readonly />
                         </x-filament::input.wrapper>
                         <x-qr-modal :title="$this->record->name" body="MediaFlow Proxy - EPG URL" :text="$epgUrl" />
                     </div>
@@ -56,7 +56,12 @@
                             <x-slot name="prefix">
                                 <x-copy-to-clipboard :text="$xtream['server']" />
                             </x-slot>
-                            <x-filament::input type="text" :value="$xtream['server']" readonly />
+                            <x-filament::input
+                                type="text"
+                                class="privacy-sensitive"
+                                :value="$xtream['server']"
+                                readonly
+                            />
                         </x-filament::input.wrapper>
                         <x-qr-modal
                             :title="$this->record->name"
@@ -64,36 +69,61 @@
                             :text="$xtream['server']"
                         />
                     </div>
-                    <div class="mb-4 flex items-center justify-start gap-2">
-                        <x-filament::input.wrapper suffix-icon="heroicon-m-user">
-                            <x-slot name="prefix">
-                                <x-copy-to-clipboard :text="$xtream['default']['username']" />
-                            </x-slot>
-                            <x-filament::input type="text" :value="$xtream['default']['username']" readonly />
-                        </x-filament::input.wrapper>
-                        <x-qr-modal
-                            :title="$this->record->name"
-                            body="MediaFlow Proxy - Username"
-                            :text="$xtream['default']['username']"
-                        />
-                    </div>
-                    <div class="flex items-center justify-start gap-2">
-                        <x-filament::input.wrapper suffix-icon="heroicon-m-lock-closed">
-                            <x-slot name="prefix">
-                                <x-copy-to-clipboard :text="$xtream['default']['password']" />
-                            </x-slot>
-                            <x-filament::input type="text" :value="$xtream['default']['password']" readonly />
-                        </x-filament::input.wrapper>
-                        <x-qr-modal
-                            :title="$this->record->name"
-                            body="MediaFlow Proxy - Password"
-                            :text="$xtream['default']['password']"
-                        />
-                    </div>
-                    <p class="mt-4 mb-2 text-sm text-gray-500 dark:text-gray-400">
-                        The default username is your <strong>m3u editor</strong> username and the Playlist
-                        <strong>unique identifier</strong> is the password, encoded for MediaFlow Proxy.
-                    </p>
+                    @if ($xtream['default'] === null)
+                        <div class="flex items-center gap-2">
+                            <x-filament::badge color="danger" size="sm">{{ __('Disabled') }}</x-filament::badge>
+                            <span class="text-sm text-gray-500 dark:text-gray-400">
+                                {{ __('The default login is disabled for this playlist. Use one of its Playlist Auths to log in.') }}
+                            </span>
+                        </div>
+                    @else
+                        <div class="mb-4 flex items-center justify-start gap-2">
+                            <x-filament::input.wrapper suffix-icon="heroicon-m-user">
+                                <x-slot name="prefix">
+                                    <x-copy-to-clipboard :text="$xtream['default']['username']" />
+                                </x-slot>
+                                <x-filament::input
+                                    type="text"
+                                    class="privacy-sensitive"
+                                    :value="$xtream['default']['username']"
+                                    readonly
+                                />
+                            </x-filament::input.wrapper>
+                            <x-qr-modal
+                                :title="$this->record->name"
+                                body="MediaFlow Proxy - Username"
+                                :text="$xtream['default']['username']"
+                            />
+                        </div>
+                        <div class="flex items-center justify-start gap-2">
+                            <x-filament::input.wrapper suffix-icon="heroicon-m-lock-closed">
+                                <x-slot name="prefix">
+                                    <x-copy-to-clipboard :text="$xtream['default']['password']" />
+                                </x-slot>
+                                <x-filament::input
+                                    type="text"
+                                    class="privacy-sensitive"
+                                    :value="$xtream['default']['password']"
+                                    readonly
+                                />
+                            </x-filament::input.wrapper>
+                            <x-qr-modal
+                                :title="$this->record->name"
+                                body="MediaFlow Proxy - Password"
+                                :text="$xtream['default']['password']"
+                            />
+                        </div>
+                        @if ($xtream['default_mode'] === \App\Enums\DefaultAuthMode::Uuid)
+                            <p class="mt-4 mb-2 text-sm text-gray-500 dark:text-gray-400">
+                                The default username is your <strong>m3u editor</strong> username and the Playlist
+                                <strong>unique identifier</strong> is the password, encoded for MediaFlow Proxy.
+                            </p>
+                        @elseif ($xtream['default_mode'] === \App\Enums\DefaultAuthMode::Custom)
+                            <p class="mt-4 mb-2 text-sm text-gray-500 dark:text-gray-400">
+                                {{ __('The default username is your m3u editor username, encoded for MediaFlow Proxy, and the password is the custom password set in this playlist\'s Auth settings.') }}
+                            </p>
+                        @endif
+                    @endif
                 </div>
 
                 {{-- Right: per-auth credentials --}}
@@ -130,7 +160,12 @@
                                     <x-slot name="prefix">
                                         <x-copy-to-clipboard :text="$auth['username']" />
                                     </x-slot>
-                                    <x-filament::input type="text" :value="$auth['username']" readonly />
+                                    <x-filament::input
+                                        type="text"
+                                        class="privacy-sensitive"
+                                        :value="$auth['username']"
+                                        readonly
+                                    />
                                 </x-filament::input.wrapper>
                                 <x-qr-modal
                                     :title="$this->record->name"
@@ -143,7 +178,12 @@
                                     <x-slot name="prefix">
                                         <x-copy-to-clipboard :text="$auth['password']" />
                                     </x-slot>
-                                    <x-filament::input type="text" :value="$auth['password']" readonly />
+                                    <x-filament::input
+                                        type="text"
+                                        class="privacy-sensitive"
+                                        :value="$auth['password']"
+                                        readonly
+                                    />
                                 </x-filament::input.wrapper>
                                 <x-qr-modal
                                     :title="$this->record->name"

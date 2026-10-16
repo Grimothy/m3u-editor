@@ -16,6 +16,7 @@ use App\Models\DvrSetting;
 use App\Models\Epg;
 use App\Models\EpgProgramme;
 use App\Support\SeriesKey;
+use Carbon\CarbonInterface;
 use Closure;
 use Exception;
 use Illuminate\Database\Eloquent\Builder;
@@ -66,6 +67,7 @@ class DvrSchedulerService
             // Minute-level precision for trigger and stop.
             $this->triggerPendingRecordings();
             $this->stopExpiredRecordings();
+            $this->resumeLostRecordings();
         } catch (Exception $e) {
             Log::error('DVR scheduler tick failed: '.$e->getMessage(), [
                 'exception' => $e,
@@ -531,6 +533,10 @@ class DvrSchedulerService
             $scheduledStart = $rule->manual_start->subSeconds($startEarly);
             $scheduledEnd = $rule->manual_end->addSeconds($endLate);
 
+            if (! $this->hasUsableRecordingWindow($rule, $title, $scheduledStart, $scheduledEnd)) {
+                return;
+            }
+
             [$streamUrl] = $this->resolveStreamUrl($rule, $setting);
 
             $recording = DvrRecording::create([
@@ -624,6 +630,13 @@ class DvrSchedulerService
             $startEarly = $setting->resolveStartEarlySeconds($rule->start_early_seconds);
             $endLate = $setting->resolveEndLateSeconds($rule->end_late_seconds);
 
+            $scheduledStart = $slotStart->copy()->subSeconds($startEarly);
+            $scheduledEnd = $slotEnd->copy()->addSeconds($endLate);
+
+            if (! $this->hasUsableRecordingWindow($rule, $title, $scheduledStart, $scheduledEnd)) {
+                return;
+            }
+
             [$streamUrl] = $this->resolveStreamUrl($rule, $setting);
 
             DvrRecording::create([
@@ -635,8 +648,8 @@ class DvrSchedulerService
                 'title' => $title,
                 'series_key' => $seriesKey,
                 'normalized_title' => $normalizedTitle,
-                'scheduled_start' => $slotStart->copy()->subSeconds($startEarly),
-                'scheduled_end' => $slotEnd->copy()->addSeconds($endLate),
+                'scheduled_start' => $scheduledStart,
+                'scheduled_end' => $scheduledEnd,
                 'programme_start' => $slotStart,
                 'programme_end' => $slotEnd,
                 'stream_url' => $streamUrl,
@@ -651,6 +664,26 @@ class DvrSchedulerService
                 'slot_end' => $slotEnd,
             ]);
         });
+    }
+
+    /**
+     * Whether the padded recording window still has a positive length.
+     *
+     * Negative padding (start late / finish early) can cancel out a short programme
+     * entirely; scheduling it would only produce an instantly-missed recording.
+     */
+    private function hasUsableRecordingWindow(DvrRecordingRule $rule, string $title, CarbonInterface $scheduledStart, CarbonInterface $scheduledEnd): bool
+    {
+        if ($scheduledEnd->gt($scheduledStart)) {
+            return true;
+        }
+
+        Log::debug("DVR: Skipping '{$title}' - rule {$rule->id} padding leaves no recording window", [
+            'scheduled_start' => $scheduledStart,
+            'scheduled_end' => $scheduledEnd,
+        ]);
+
+        return false;
     }
 
     /**
@@ -774,6 +807,10 @@ class DvrSchedulerService
 
             $scheduledStart = $programme->start_time->copy()->subSeconds($startEarly);
             $scheduledEnd = $programme->end_time->copy()->addSeconds($endLate);
+
+            if (! $this->hasUsableRecordingWindow($rule, $programme->title, $scheduledStart, $scheduledEnd)) {
+                return;
+            }
 
             [$streamUrl, $resolvedChannelId] = $this->resolveStreamUrl($rule, $setting, $programme);
 
@@ -903,6 +940,42 @@ class DvrSchedulerService
         foreach ($expired as $recording) {
             Log::info("DvrSchedulerService: Stopping expired recording {$recording->id} ({$recording->title})");
             StopDvrRecording::dispatch($recording->id)->onQueue('dvr');
+        }
+    }
+
+    /**
+     * Resume in-progress recordings the proxy no longer has a broadcast for,
+     * which happens when the proxy restarts mid-recording. Without this the
+     * recording silently stops capturing and ends up truncated at scheduled_end.
+     *
+     * Skipped entirely when the proxy can't be asked, and recordings that only
+     * just started or are about to end are left alone.
+     */
+    private function resumeLostRecordings(): void
+    {
+        $now = now();
+        $candidates = DvrRecording::recording()
+            ->whereNotNull('proxy_network_id')
+            ->where('actual_start', '<=', UtcDateTime::forQuery($now->copy()->subMinute()))
+            ->where('scheduled_end', '>', UtcDateTime::forQuery($now->copy()->addSeconds(30)))
+            ->get(['id', 'proxy_network_id', 'title']);
+
+        if ($candidates->isEmpty()) {
+            return;
+        }
+
+        $activeIds = app(M3uProxyService::class)->activeBroadcastIds();
+        if ($activeIds === null) {
+            return;
+        }
+
+        foreach ($candidates as $recording) {
+            if (in_array($recording->proxy_network_id, $activeIds, true)) {
+                continue;
+            }
+
+            Log::warning("DvrSchedulerService: Recording {$recording->id} ({$recording->title}) is missing from the proxy, resuming");
+            StartDvrRecording::dispatch($recording->id, resume: true)->onQueue('dvr');
         }
     }
 

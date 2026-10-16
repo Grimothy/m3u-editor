@@ -28,6 +28,7 @@ use App\Services\DateFormatService;
 use App\Services\EpgCacheService;
 use App\Services\LogoCacheService;
 use App\Services\PlaylistService;
+use App\Support\ChannelNumber;
 use App\Traits\HasUserFiltering;
 use EslamRedaDiv\FilamentCopilot\Contracts\CopilotResource;
 use Exception;
@@ -201,17 +202,17 @@ class ChannelResource extends Resource implements CopilotResource
                     return $query->orderByRaw("COALESCE(title_custom, title) {$direction}");
                 })
                 ->getStateUsing(function ($record) {
-                    $info = $record->info;
-                    $title = $record->title_custom ?: $record->title;
+                    $title = e($record->title_custom ?: $record->title, false);
                     $html = "<span class='fi-ta-text-item-label whitespace-normal text-sm leading-6 text-gray-950 dark:text-white'>{$title}</span>";
-                    if (is_array($info)) {
-                        $description = Str::limit($info['description'] ?? $info['plot'] ?? '', 200);
+                    if ($description = static::infoDescription($record)) {
+                        $description = e(Str::limit($description, 200), false);
                         $html .= "<p class='text-sm text-gray-500 dark:text-gray-400 whitespace-normal mt-2'>{$description}</p>";
                     }
 
                     return new HtmlString($html);
                 })
-                ->extraAttributes(['style' => 'min-width: 350px;'])
+                // Only reserve room for a wrapped description; title-only rows (most live channels) size to their content
+                ->extraAttributes(fn ($record): array => static::infoDescription($record) ? ['style' => 'min-width: 350px;'] : [])
                 ->toggleable(),
             TextInputColumn::make('sort')
                 ->label(__('Sort Order'))
@@ -292,12 +293,17 @@ class ChannelResource extends Resource implements CopilotResource
                 })
                 ->toggleable(),
             TextInputColumn::make('channel')
-                ->rules(['numeric', 'min:0'])
-                ->type('number')
+                ->rules(['nullable', 'regex:'.ChannelNumber::PATTERN])
+                ->validationMessages(['regex' => __('Use a whole number, or a sub-channel like 5.1.')])
                 ->placeholder(__('Channel No.'))
+                ->getStateUsing(fn (Channel $record): int|string|null => $record->resolveChannelNumber())
+                ->updateStateUsing(fn (Channel $record, $state) => $record->update(ChannelNumber::toAttributes($state)))
                 ->toggleable()
-                ->sortable(),
+                ->sortable(query: fn (Builder $query, string $direction): Builder => $query
+                    ->orderBy('channels.channel', $direction)
+                    ->orderByRaw('COALESCE(channels.channel_minor, 0) '.($direction === 'desc' ? 'desc' : 'asc'))),
             TextInputColumn::make('url_custom')
+                ->extraInputAttributes(['class' => 'privacy-sensitive'])
                 ->label(__('URL'))
                 ->rules(['url'])
                 ->type('url')
@@ -429,6 +435,7 @@ class ChannelResource extends Resource implements CopilotResource
                 })
                 ->toggleable(isToggledHiddenByDefault: true),
             TextColumn::make('url')
+                ->extraAttributes(['class' => 'privacy-sensitive'])
                 ->label(__('Default URL'))
                 ->sortable()
                 ->searchable(query: function (Builder $query, string $search): Builder {
@@ -447,6 +454,21 @@ class ChannelResource extends Resource implements CopilotResource
                 ->sortable()
                 ->toggleable(isToggledHiddenByDefault: true),
         ];
+    }
+
+    /**
+     * Description/plot text shown under the title in the Info column, if any.
+     */
+    protected static function infoDescription(Channel $record): ?string
+    {
+        $info = $record->info;
+        if (! is_array($info)) {
+            return null;
+        }
+
+        $description = trim((string) ($info['description'] ?? $info['plot'] ?? ''));
+
+        return $description !== '' ? $description : null;
     }
 
     public static function getTableFilters($showPlaylist = true): array
@@ -470,7 +492,7 @@ class ChannelResource extends Resource implements CopilotResource
                 ->query(function ($query) {
                     return $query->where('aed_profile_id', '!=', null);
                 }),
-            Filter::make('un_mapped')
+            Filter::make('aed_profile_not_applied')
                 ->label(__('AED Profile not applied'))
                 ->toggle()
                 ->query(function ($query) {
@@ -1403,8 +1425,10 @@ class ChannelResource extends Resource implements CopilotResource
                     ->columns(2)
                     ->schema([
                         TextEntry::make('url')
+                            ->extraAttributes(['class' => 'privacy-sensitive'])
                             ->label(__('URL'))->columnSpanFull(),
                         TextEntry::make('proxy_url')
+                            ->extraAttributes(['class' => 'privacy-sensitive'])
                             ->state(fn ($record) => $record?->getProxyUrl())
                             ->label(__('Proxy URL'))->columnSpanFull(),
                         TextEntry::make('stream_id')
@@ -1753,8 +1777,15 @@ class ChannelResource extends Resource implements CopilotResource
                     TextInput::make('channel')
                         ->label(__('Channel No.'))
                         ->hint(__('tvg-chno'))
+                        ->helperText(__('Use a decimal for a sub-channel, e.g. 5.1.'))
                         ->columnSpan(1)
-                        ->rules(['numeric', 'min:0']),
+                        ->rules(['nullable', 'regex:'.ChannelNumber::PATTERN])
+                        ->validationMessages(['regex' => __('Use a whole number, or a sub-channel like 5.1.')])
+                        ->formatStateUsing(fn ($state, ?Channel $record): int|string|null => ChannelNumber::format($state, $record?->channel_minor))
+                        ->dehydrateStateUsing(fn ($state): ?int => ChannelNumber::parse($state)[0]),
+                    // The sub-channel part of the number above ("5.1" => 1), saved alongside it.
+                    Hidden::make('channel_minor')
+                        ->dehydrateStateUsing(fn (Get $get): ?int => ChannelNumber::parse($get('channel'))[1]),
                     TextInput::make('shift')
                         ->label(__('Time Shift'))
                         ->hint(__('timeshift'))
@@ -1803,6 +1834,7 @@ class ChannelResource extends Resource implements CopilotResource
             Fieldset::make(__('URL Settings'))
                 ->schema([
                     TextInput::make('url')
+                        ->extraInputAttributes(['class' => 'privacy-sensitive'])
                         ->label(fn (Get $get) => $get('is_custom') ? 'URL' : 'Provider URL')
                         ->columnSpan(1)
                         ->prefixIcon('heroicon-m-globe-alt')
@@ -1815,6 +1847,7 @@ class ChannelResource extends Resource implements CopilotResource
                         ->dehydrated(fn (Get $get) => $get('is_custom')) // don't save the value in the database for custom channels
                         ->type('url'),
                     TextInput::make('url_custom')
+                        ->extraInputAttributes(['class' => 'privacy-sensitive'])
                         ->label(__('URL Override'))
                         ->columnSpan(1)
                         ->prefixIcon('heroicon-m-globe-alt')
@@ -1874,6 +1907,7 @@ class ChannelResource extends Resource implements CopilotResource
                         ->url()
                         ->hidden(fn (Get $get) => ! ($get('is_custom') && $get('catchup'))),
                     TextInput::make('proxy_url')
+                        ->extraInputAttributes(['class' => 'privacy-sensitive'])
                         ->label(__('Proxy URL'))
                         ->columnSpan(2)
                         ->prefixIcon('heroicon-m-globe-alt')
@@ -1889,6 +1923,7 @@ class ChannelResource extends Resource implements CopilotResource
                         ->hiddenOn('create')
                         ->hidden(fn () => ! config('proxy.proxy_integration_enabled')),
                     TextInput::make('mediaflow_proxy_url')
+                        ->extraInputAttributes(['class' => 'privacy-sensitive'])
                         ->label(__('MediaFlow Proxy URL'))
                         ->columnSpan(2)
                         ->prefixIcon('heroicon-m-shield-check')

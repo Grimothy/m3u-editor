@@ -198,10 +198,10 @@ class VodResource extends Resource
                     ->wrap()
                     ->getStateUsing(function ($record) {
                         $info = $record->info;
-                        $title = $record->title_custom ?: $record->title;
+                        $title = e($record->title_custom ?: $record->title, false);
                         $html = "<span class='fi-ta-text-item-label whitespace-normal text-sm leading-6 text-gray-950 dark:text-white'>{$title}</span>";
                         if (is_array($info)) {
-                            $description = Str::limit($info['description'] ?? $info['plot'] ?? '', 200);
+                            $description = e(Str::limit($info['description'] ?? $info['plot'] ?? '', 200), false);
                             if (! empty($description)) {
                                 $html .= "<p class='text-sm text-gray-500 dark:text-gray-400 whitespace-normal mt-2'>{$description}</p>";
                             }
@@ -268,6 +268,7 @@ class VodResource extends Resource
                     })
                     ->toggleable(isToggledHiddenByDefault: true),
                 Tables\Columns\TextColumn::make('url')
+                    ->extraAttributes(['class' => 'privacy-sensitive'])
                     ->label(__('Default URL'))
                     ->sortable()
                     ->searchable(query: function (Builder $query, string $search): Builder {
@@ -303,7 +304,7 @@ class VodResource extends Resource
                 Action::make('play')
                     ->tooltip(__('Play Video'))
                     ->action(function ($record, $livewire) {
-                        $livewire->dispatch('openFloatingStream', $record->getFloatingPlayerAttributes());
+                        $livewire->dispatch('openFloatingStream', static::playerAttributes($record));
                     })
                     ->icon('heroicon-s-play-circle')
                     ->button()
