@@ -2,13 +2,18 @@
 
 use App\Filament\Clusters\Settings\Pages\ManageAlertSettings;
 use App\Filament\Clusters\Settings\Pages\ManageGeneralSettings;
+use App\Filament\Clusters\Settings\Pages\ManageSmtpSettings;
 use App\Filament\Pages\M3uProxyStreamMonitor;
+use App\Filament\Resources\PlaylistAliases\Pages\EditPlaylistAlias;
+use App\Models\Playlist;
+use App\Models\PlaylistAlias;
 use App\Models\User;
 use App\Services\M3uProxyService;
 use App\Settings\GeneralSettings;
 use Filament\Facades\Filament;
 use Filament\View\PanelsRenderHook;
 use Illuminate\Support\Facades\Blade;
+use Illuminate\Support\Facades\Queue;
 use Livewire\Livewire;
 
 use function Pest\Laravel\actingAs;
@@ -90,3 +95,41 @@ it('marks webhook url inputs as privacy sensitive', function (string $field) {
             'privacy-sensitive',
         ));
 })->with(['discord_webhook_url', 'slack_webhook_url']);
+
+it('marks the smtp username input as privacy sensitive', function () {
+    Livewire::test(ManageSmtpSettings::class)
+        ->assertFormFieldExists('smtp_username', fn ($component): bool => str_contains(
+            (string) $component->getExtraInputAttributeBag()->get('class'),
+            'privacy-sensitive',
+        ));
+});
+
+it('shows stream monitor urls unblurred by the legacy toggle when privacy mode is on', function () {
+    ($this->bindProxyMock)();
+    ($this->setPrivacyMode)(true);
+
+    Livewire::test(M3uProxyStreamMonitor::class)
+        ->assertSeeHtml('showUrls: true ||');
+});
+
+it('marks the provider hosts in the alias entry label as privacy sensitive', function () {
+    Queue::fake();
+
+    $playlist = Playlist::factory()->for($this->admin)->createQuietly(['xtream_config' => null]);
+    $alias = PlaylistAlias::create([
+        'name' => 'Provider Alias',
+        'uuid' => fake()->uuid(),
+        'user_id' => $this->admin->id,
+        'playlist_id' => $playlist->id,
+        'xtream_config' => [[
+            'url' => 'http://provider.example.com:8080',
+            'username' => 'user',
+            'password' => 'pass',
+            'replace_url_enabled' => true,
+            'replace_url' => 'http://vpn.example.com:8080',
+        ]],
+    ]);
+
+    Livewire::test(EditPlaylistAlias::class, ['record' => $alias->getRouteKey()])
+        ->assertSeeHtml('Provider: <span class="privacy-sensitive">provider.example.com</span> -> <span class="privacy-sensitive">vpn.example.com</span>');
+});

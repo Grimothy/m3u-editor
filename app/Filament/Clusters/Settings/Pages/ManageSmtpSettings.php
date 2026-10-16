@@ -118,6 +118,7 @@ class ManageSmtpSettings extends BaseSettingsPage
                             ->numeric()
                             ->helperText(__('Required to send emails.')),
                         TextInput::make('smtp_username')
+                            ->extraInputAttributes(['class' => 'privacy-sensitive'])
                             ->label(__('SMTP Username'))
                             ->placeholder(__('Enter SMTP Username'))
                             ->requiredWith('smtp_password')

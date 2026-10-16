@@ -64,6 +64,7 @@ use Illuminate\Database\Eloquent\Collection as EloquentCollection;
 use Illuminate\Database\Eloquent\Model;
 use Illuminate\Support\Facades\Cache;
 use Illuminate\Support\Facades\DB;
+use Illuminate\Support\HtmlString;
 use Illuminate\Support\Str;
 use Illuminate\Validation\Rule;
 use Illuminate\Validation\Rules\Exists;
@@ -563,8 +564,8 @@ class PlaylistAliasResource extends Resource implements CopilotResource
                                         ->maxItems(fn (Get $get) => in_array($get('source_type'), ['custom_playlist', 'merged_playlist'], true) ? null : 1)
                                         ->minItems(1)
                                         ->collapsible()
-                                        ->itemLabel(fn (array $state): ?string => 'Provider: '.parse_url($state['url'] ?? '', PHP_URL_HOST)
-                                            .(PlaylistAlias::entryReplacesUrl($state) ? ' -> '.parse_url($state['replace_url'], PHP_URL_HOST) : ''))
+                                        ->itemLabel(fn (array $state): HtmlString => new HtmlString('Provider: <span class="privacy-sensitive">'.e(parse_url($state['url'] ?? '', PHP_URL_HOST)).'</span>'
+                                            .(PlaylistAlias::entryReplacesUrl($state) ? ' -> <span class="privacy-sensitive">'.e(parse_url($state['replace_url'], PHP_URL_HOST)).'</span>' : '')))
                                         ->schema([
                                             Forms\Components\TextInput::make('url')
                                                 ->extraInputAttributes(['class' => 'privacy-sensitive'])
@@ -675,6 +676,7 @@ class PlaylistAliasResource extends Resource implements CopilotResource
                                                 ->live()
                                                 ->columnSpan(2),
                                             Forms\Components\TextInput::make('replace_url')
+                                                ->extraInputAttributes(['class' => 'privacy-sensitive'])
                                                 ->label(__('Replacement URL'))
                                                 ->helperText(__('Clients receive this URL in place of the provider URL. When the proxy is enabled, the proxy fetches from it instead, so it must be reachable from the proxy server.'))
                                                 ->prefixIcon('heroicon-m-arrows-right-left')

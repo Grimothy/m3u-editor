@@ -322,6 +322,7 @@ class MediaServerIntegrationResource extends Resource implements CopilotResource
                         // WebDAV authentication (username/password)
                         Grid::make(2)->schema([
                             TextInput::make('webdav_username')
+                                ->extraInputAttributes(['class' => 'privacy-sensitive'])
                                 ->label(__('WebDAV Username'))
                                 ->placeholder(__('username'))
                                 ->afterStateHydrated(fn ($component, $record) => $component->state($record?->webdav_username))

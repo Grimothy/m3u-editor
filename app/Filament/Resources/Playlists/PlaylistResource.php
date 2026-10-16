@@ -1398,7 +1398,11 @@ class PlaylistResource extends Resource implements CopilotResource
                         ->addActionLabel('Add Profile')
                         ->reorderable()
                         ->collapsible()
-                        ->itemLabel(fn (array $state): ?string => $state['name'] ?? $state['username'] ?? 'New Profile')
+                        ->itemLabel(fn (array $state): string|HtmlString => match (true) {
+                            filled($state['name'] ?? null) => $state['name'],
+                            filled($state['username'] ?? null) => new HtmlString('<span class="privacy-sensitive">'.e($state['username']).'</span>'),
+                            default => 'New Profile',
+                        })
                         ->extraItemActions([
                             Action::make('test_profile')
                                 ->label(__('Test'))
@@ -4058,6 +4062,7 @@ class PlaylistResource extends Resource implements CopilotResource
                                             ->columnSpan(2),
 
                                         TextInput::make('auth_username')
+                                            ->extraInputAttributes(['class' => 'privacy-sensitive'])
                                             ->label(__('Username'))
                                             ->helperText(__('Username for playlist access.'))
                                             ->required()

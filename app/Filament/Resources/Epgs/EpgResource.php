@@ -439,6 +439,7 @@ class EpgResource extends Resource implements CopilotResource
                         ->columns(2)
                         ->schema([
                             TextInput::make('sd_username')
+                                ->extraInputAttributes(['class' => 'privacy-sensitive'])
                                 ->label(__('Username'))
                                 ->required(fn (Get $get): bool => $get('source_type') === EpgSourceType::SCHEDULES_DIRECT->value),
                             TextInput::make('sd_password')
